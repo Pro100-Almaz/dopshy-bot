@@ -1,0 +1,33 @@
+services:
+  bot:
+    build: .
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - chroma_data:/app/chroma_db      # persistent vector DB
+      - bot_data:/app/data              # persistent conversation history (SQLite)
+      - ./documents:/app/documents:ro   # hot-reload docs without rebuild
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Run with: docker compose --profile ingest run --rm ingest
+  ingest:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - chroma_data:/app/chroma_db
+      - ./documents:/app/documents:ro
+    command: python scripts/ingest.py
+    profiles:
+      - ingest
+
+volumes:
+  chroma_data:
+  bot_data:
