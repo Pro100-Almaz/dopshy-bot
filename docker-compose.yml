@@ -32,16 +32,7 @@ services:
       - certbot_certs:/etc/letsencrypt
       - certbot_webroot:/var/www/certbot
     # Obtain cert on first run (no-op if already valid), then renew every 12h
-    entrypoint: >
-      sh -c "
-        certbot certonly --webroot --webroot-path=/var/www/certbot
-          --email admin@dopsy.kz --agree-tos --no-eff-email --non-interactive
-          -d bot.dopsy.kz || true;
-        while true; do
-          sleep 12h;
-          certbot renew --webroot --webroot-path=/var/www/certbot --quiet;
-        done
-      "
+    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email admin@dopsy.kz --agree-tos --no-eff-email --non-interactive -d bot.dopsy.kz || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
     depends_on:
       - nginx
     restart: unless-stopped
