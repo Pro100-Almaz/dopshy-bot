@@ -15,6 +15,10 @@ WORKDIR /app
 COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-root --only main
 
+# Rebuild numpy from source so it targets the actual server CPU instead of
+# using the pre-built wheel which requires x86_v2 (SSE4.2) instructions.
+RUN pip install --no-cache-dir --no-binary numpy numpy
+
 COPY . .
 
 EXPOSE 5000
