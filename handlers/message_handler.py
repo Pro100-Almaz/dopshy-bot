@@ -9,6 +9,7 @@ from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,19 @@ def handle_incoming_message(payload: dict) -> None:
     Parse a WhatsApp Cloud API webhook payload and respond.
     Supports both individual and group messages.
     """
+    sender_id = ""
+
     try:
         entry = payload.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
         value = changes.get("value", {})
+
+        phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+        bot_config = config.get_bot_config(phone_number_id)
+
+        if not bot_config:
+            logger.warning("Unknown phone_number_id from webhook: %s", phone_number_id)
+            return
 
         messages = value.get("messages", [])
         if not messages:
@@ -35,11 +45,13 @@ def handle_incoming_message(payload: dict) -> None:
         sender_id = message.get("from", "")  # sender phone number
 
         # Mark as read immediately
-        mark_as_read(message_id)
+        if message_id:
+            mark_as_read(phone_number_id, message_id)
 
         # Only handle text messages
         if msg_type != "text":
             send_text_message(
+                phone_number_id,
                 sender_id,
                 "Пожалуйста, отправьте текстовое сообщение. / Мәтіндік хабарлама жіберіңіз.",
             )
@@ -51,19 +63,26 @@ def handle_incoming_message(payload: dict) -> None:
         # For group messages Meta Cloud API includes a "context" object; we use
         # sender_id so each person in a group gets a shared thread identified by
         # their own number (simplest approach — change to group JID if needed).
-        chat_id = sender_id
+        chat_id = f"{phone_number_id}:{sender_id}"
 
         # Handle reset command
         if user_text.lower() in RESET_COMMANDS:
             clear_history(chat_id)
             send_text_message(
+                phone_number_id,
                 sender_id,
                 "История разговора сброшена. Начнём заново! 🔄\n"
                 "Сөйлесу тарихы тазаланды. Қайтадан бастайық! 🔄",
             )
             return
 
-        logger.info("Message from %s: %s", sender_id, user_text[:80])
+        logger.info(
+            "Message from %s via bot %s (%s): %s",
+            sender_id,
+            bot_config["name"],
+            phone_number_id,
+            user_text[:80],
+        )
 
         # 1. Retrieve relevant context from knowledge base
         context = retrieve_context(user_text)
@@ -73,6 +92,7 @@ def handle_incoming_message(payload: dict) -> None:
 
         # 3. Generate response
         reply = get_ai_response(
+            phone_number_id=phone_number_id,
             chat_id=chat_id,
             user_message=user_text,
             history=history,
@@ -84,22 +104,23 @@ def handle_incoming_message(payload: dict) -> None:
         append_message(chat_id, "assistant", reply)
 
         # 5. Send reply
-        send_text_message(sender_id, reply)
-        logger.info("Replied to %s", sender_id)
+        send_text_message(phone_number_id,  sender_id, reply)
+        logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
         logger.exception("Error handling message: %s", exc)
         # Best-effort fallback reply
         try:
-            sender_id = (
-                payload.get("entry", [{}])[0]
-                .get("changes", [{}])[0]
-                .get("value", {})
-                .get("messages", [{}])[0]
-                .get("from", "")
-            )
-            if sender_id:
+            entry = payload.get("entry", [{}])[0]
+            changes = entry.get("changes", [{}])[0]
+            value = changes.get("value", {})
+
+            phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+            bot_config = config.get_bot_config(phone_number_id)
+
+            if sender_id and bot_config:
                 send_text_message(
+                    phone_number_id,
                     sender_id,
                     "Произошла ошибка. Попробуйте позже или свяжитесь с администратором.\n"
                     "Қате орын алды. Кейінірек немесе әкімшімен хабарласыңыз.",

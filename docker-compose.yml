@@ -13,29 +13,31 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  nginx:
-    build: ./nginx
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - certbot_certs:/etc/letsencrypt
-      - certbot_webroot:/var/www/certbot
-    depends_on:
-      - bot
-    restart: unless-stopped
+      - "5000:5000"
 
-  certbot:
-    image: certbot/certbot:latest
-    volumes:
-      - certbot_certs:/etc/letsencrypt
-      - certbot_webroot:/var/www/certbot
-    # Obtain cert on first run (no-op if already valid), then renew every 12h
-    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email admin@dopsy.kz --agree-tos --no-eff-email --non-interactive -d bot.dopsy.kz || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
-    depends_on:
-      - nginx
-    restart: unless-stopped
+#  nginx:
+#    build: ./nginx
+#    ports:
+#      - "80:80"
+#      - "443:443"
+#    volumes:
+#      - certbot_certs:/etc/letsencrypt
+#      - certbot_webroot:/var/www/certbot
+#    depends_on:
+#      - bot
+#    restart: unless-stopped
+
+#  certbot:
+#    image: certbot/certbot:latest
+#    volumes:
+#      - certbot_certs:/etc/letsencrypt
+#      - certbot_webroot:/var/www/certbot
+#    # Obtain cert on first run (no-op if already valid), then renew every 12h
+#    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email admin@dopsy.kz --agree-tos --no-eff-email --non-interactive -d bot.dopsy.kz || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
+#    depends_on:
+#      - nginx
+#    restart: unless-stopped
 
   # Run with: docker compose --profile ingest run --rm ingest
   ingest:
@@ -52,5 +54,5 @@ services:
 volumes:
   chroma_data:
   bot_data:
-  certbot_certs:
-  certbot_webroot:
+#  certbot_certs:
+#  certbot_webroot:
