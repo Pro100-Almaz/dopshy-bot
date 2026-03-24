@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from chat.system_prompts import sp_1, sp_2, sp_3
+from chat.system_prompts import sp_1, sp_3, sp_2
 
 load_dotenv()
 
