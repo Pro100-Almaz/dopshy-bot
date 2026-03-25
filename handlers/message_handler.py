@@ -48,6 +48,15 @@ def handle_incoming_message(payload: dict) -> None:
         if message_id:
             mark_as_read(phone_number_id, message_id)
 
+        # Document = payment receipt confirmation
+        if msg_type == "document":
+            send_text_message(
+                phone_number_id,
+                sender_id,
+                "Оплата принята! Спасибо. ✅\nТөлем қабылданды! Рахмет. ✅",
+            )
+            return
+
         # Only handle text messages
         if msg_type != "text":
             send_text_message(
