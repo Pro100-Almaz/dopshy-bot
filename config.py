@@ -1,3 +1,4 @@
+import json as _json
 import os
 from dotenv import load_dotenv
 from chat.system_prompts import sp_1, sp_3, sp_2
@@ -39,6 +40,32 @@ BOT_CONFIGS = {
 
 def get_bot_config(phone_number_id: str) -> dict | None:
     return BOT_CONFIGS.get(phone_number_id)
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL
+# ---------------------------------------------------------------------------
+POSTGRES_DSN: str = os.getenv("POSTGRES_DSN", "")
+
+# ---------------------------------------------------------------------------
+# Google Sheets
+# ---------------------------------------------------------------------------
+GOOGLE_CREDENTIALS_PATH: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "./secrets/google_credentials.json")
+GOOGLE_SPREADSHEET_ID: str = os.getenv("GOOGLE_SPREADSHEET_ID", "")
+GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Текущая неделя")
+
+# ---------------------------------------------------------------------------
+# Booking (Bot 1 — Dopshy field rental only)
+# ---------------------------------------------------------------------------
+BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "09:00")
+BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:00")
+BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
+BOOKING_FIELDS: list = _json.loads(
+    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"5x5"},{"id":2,"format":"6x6"}]')
+)
+BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
+BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1800"))  # seconds
+KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
 
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:

@@ -19,6 +19,9 @@ langchain-community = "^0.3"
 langchain-chroma = "^0.2"
 tiktoken = "^0.9"
 gunicorn = "^23.0"
+gspread = "^6.0"
+google-auth = "^2.0"
+psycopg2-binary = "^2.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

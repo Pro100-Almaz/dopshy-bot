@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: dopshy
+      POSTGRES_USER: dopshy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dopshy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   bot:
     build: .
     env_file:
@@ -7,6 +24,10 @@ services:
       - chroma_data:/app/chroma_db      # persistent vector DB
       - bot_data:/app/data              # persistent conversation history (SQLite)
       - ./documents:/app/documents:ro   # hot-reload docs without rebuild
+      - ./secrets:/app/secrets:ro       # Google service account JSON
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
@@ -54,5 +75,6 @@ services:
 volumes:
   chroma_data:
   bot_data:
+  postgres_data:
 #  certbot_certs:
 #  certbot_webroot:

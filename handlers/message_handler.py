@@ -9,6 +9,7 @@ from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read
+from handlers.booking_session import handle_booking_turn
 import config
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ def handle_incoming_message(payload: dict) -> None:
     Parse a WhatsApp Cloud API webhook payload and respond.
     Supports both individual and group messages.
     """
-    sender_id = ""
+    sender_id = "" 
 
     try:
         entry = payload.get("entry", [{}])[0]
@@ -93,13 +94,24 @@ def handle_incoming_message(payload: dict) -> None:
             user_text[:80],
         )
 
-        # 1. Retrieve relevant context from knowledge base
+        # 1. Booking session handler (Bot 1 — Dopshy field rental only)
+        if bot_config["name"] == "dopsy_bot":
+            booking_reply = handle_booking_turn(
+                chat_id, phone_number_id, sender_id, user_text
+            )
+            if booking_reply is not None:
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", booking_reply)
+                send_text_message(phone_number_id, sender_id, booking_reply)
+                return
+
+        # 2. Retrieve relevant context from knowledge base
         context = retrieve_context(user_text)
 
-        # 2. Get conversation history
+        # 3. Get conversation history
         history = get_history(chat_id)
 
-        # 3. Generate response
+        # 4. Generate response
         reply = get_ai_response(
             phone_number_id=phone_number_id,
             chat_id=chat_id,
@@ -108,11 +120,11 @@ def handle_incoming_message(payload: dict) -> None:
             context=context,
         )
 
-        # 4. Save to history
+        # 5. Save to history
         append_message(chat_id, "user", user_text)
         append_message(chat_id, "assistant", reply)
 
-        # 5. Send reply
+        # 6. Send reply
         send_text_message(phone_number_id,  sender_id, reply)
         logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 

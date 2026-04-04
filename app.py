@@ -21,6 +21,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialize PostgreSQL schema on startup (no-op if tables already exist)
+if config.POSTGRES_DSN:
+    try:
+        from integrations.postgres import init_schema as _pg_init_schema
+        _pg_init_schema()
+    except Exception as _e:
+        logger.warning("PostgreSQL init skipped: %s", _e)
+
 app = Flask(__name__)
 
 
