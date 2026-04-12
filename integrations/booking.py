@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 import config
-from integrations import postgres
+from integrations import postgres, sheets
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +17,7 @@ def _parse_time(t: str) -> time:
 
 def get_week_range() -> tuple[date, date]:
     today = date.today()
-    week_start = today - timedelta(days=today.weekday())
-    return week_start, week_start + timedelta(days=6)
+    return today, today + timedelta(days=6)
 
 
 # ---------------------------------------------------------------------------
@@ -50,54 +49,115 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
     return slots
 
 
-def get_free_slots() -> list[dict]:
-    """Return free future slots for the current week."""
+def get_all_booked(week_start: date, week_end: date) -> list[dict]:
+    """Merged booked slots from PostgreSQL and Google Sheets for a date range."""
+    return (
+        postgres.get_booked_slots(str(week_start), str(week_end))
+        + sheets.get_booked_slots(str(week_start), str(week_end))
+    )
+
+
+def is_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:
+    """Return True if no existing booking overlaps [time_start, time_end) on the given field."""
+    req_start = datetime.strptime(time_start, "%H:%M").time()
+    req_end   = datetime.strptime(time_end,   "%H:%M").time()
+    for b in booked:
+        if str(b["date"]) != date_str or int(b["field"]) != int(field_id):
+            continue
+        b_start = datetime.strptime(str(b["time_start"])[:5], "%H:%M").time()
+        b_end   = datetime.strptime(str(b["time_end"])[:5],   "%H:%M").time()
+        if req_start < b_end and req_end > b_start:
+            return False
+    return True
+
+
+def get_free_windows() -> list[dict]:
+    """
+    Compute exact contiguous free time windows for the next 7 days.
+
+    Subtracts all booked ranges from [open_time, close_time] directly,
+    so any arbitrary start/end (e.g. 10:20–11:45) is shown accurately.
+    Each returned dict: {date, time_start (time), time_end (time), field, format}
+    """
     week_start, week_end = get_week_range()
-    all_slots = generate_all_slots(week_start, week_end)
-    booked = postgres.get_booked_slots(str(week_start), str(week_end))
-
-    booked_keys = {
-        (str(b["date"]), str(b["time_start"])[:5], int(b["field"]))
-        for b in booked
-    }
-
-    today = date.today()
+    booked   = get_all_booked(week_start, week_end)
+    open_t   = _parse_time(config.BOOKING_OPEN_TIME)
+    close_t  = _parse_time(config.BOOKING_CLOSE_TIME)
+    today    = date.today()
     now_time = datetime.now().time()
 
-    free = []
-    for s in all_slots:
-        # Skip past slots
-        if s["date"] < today:
-            continue
-        if s["date"] == today and s["time_start"] <= now_time:
-            continue
-        key = (str(s["date"]), s["time_start"].strftime("%H:%M"), s["field"])
-        if key not in booked_keys:
-            free.append(s)
-    return free
+    result = []
+    current = week_start
+    while current <= week_end:
+        for field_conf in config.BOOKING_FIELDS:
+            field_id = field_conf["id"]
+
+            # Bookings for this day/field, sorted by start time
+            day_booked = sorted(
+                [
+                    b for b in booked
+                    if str(b["date"]) == str(current) and int(b["field"]) == field_id
+                ],
+                key=lambda b: datetime.strptime(str(b["time_start"])[:5], "%H:%M").time(),
+            )
+
+            # For today, don't show time that has already passed
+            floor = max(open_t, now_time) if current == today else open_t
+            cursor = floor
+
+            for b in day_booked:
+                b_start = datetime.strptime(str(b["time_start"])[:5], "%H:%M").time()
+                b_end   = datetime.strptime(str(b["time_end"])[:5],   "%H:%M").time()
+                if b_start > cursor:
+                    result.append({
+                        "date":       current,
+                        "time_start": cursor,
+                        "time_end":   b_start,
+                        "field":      field_id,
+                        "format":     field_conf["format"],
+                    })
+                if b_end > cursor:
+                    cursor = b_end
+
+            if cursor < close_t:
+                result.append({
+                    "date":       current,
+                    "time_start": cursor,
+                    "time_end":   close_t,
+                    "field":      field_id,
+                    "format":     field_conf["format"],
+                })
+
+        current += timedelta(days=1)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Context formatting for LLM injection
 # ---------------------------------------------------------------------------
 
-def format_availability_context(free_slots: list[dict]) -> str:
-    if not free_slots:
-        return "Свободных слотов на этой неделе больше нет."
+def format_availability_context(free_windows: list[dict]) -> str:
+    if not free_windows:
+        return "Свободных слотов на ближайшие 7 дней нет."
 
-    by_date: dict[date, list] = {}
-    for s in free_slots:
-        by_date.setdefault(s["date"], []).append(s)
+    by_date: dict[date, dict] = {}
+    for w in free_windows:
+        by_date.setdefault(w["date"], {}) \
+               .setdefault((w["field"], w["format"]), []) \
+               .append(w)
 
-    lines = ["Свободные слоты на текущую неделю:"]
+    lines = ["Свободные окна на ближайшие 7 дней:"]
     for d in sorted(by_date):
         day_label = f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}"
-        slot_strs = [
-            f"{s['time_start'].strftime('%H:%M')}–{s['time_end'].strftime('%H:%M')} "
-            f"(поле {s['field']}, {s['format']})"
-            for s in sorted(by_date[d], key=lambda x: (x["time_start"], x["field"]))
-        ]
-        lines.append(f"  {day_label}: {', '.join(slot_strs)}")
+        field_lines = []
+        for (field, fmt) in sorted(by_date[d]):
+            windows = sorted(by_date[d][(field, fmt)], key=lambda w: w["time_start"])
+            range_str = ", ".join(
+                f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
+                for w in windows
+            )
+            field_lines.append(f"    поле {field} ({fmt}): {range_str}")
+        lines.append(f"  {day_label}:\n" + "\n".join(field_lines))
     return "\n".join(lines)
 
 
@@ -126,13 +186,9 @@ def format_user_booking_context(bookings: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def find_free_field(free_slots: list[dict], date_str: str, time_str: str, format_: str) -> int | None:
-    """Return a free field id for the given date/time/format, or None if none available."""
-    for s in free_slots:
-        if (
-            str(s["date"]) == date_str
-            and s["time_start"].strftime("%H:%M") == time_str
-            and s["format"] == format_
-        ):
-            return s["field"]
+def find_free_field(booked: list[dict], date_str: str, time_start: str, time_end: str, format_: str) -> int | None:
+    """Return a free field id for the given date/time-range/format, or None if all are taken."""
+    for f in config.BOOKING_FIELDS:
+        if f["format"] == format_ and is_range_free(booked, date_str, time_start, time_end, f["id"]):
+            return f["id"]
     return None

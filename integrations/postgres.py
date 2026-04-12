@@ -184,6 +184,24 @@ def update_booking_status(booking_id: int, status: str) -> None:
             )
 
 
+def cancel_expired_bookings(ttl_seconds: int) -> list[dict]:
+    """
+    Cancel all awaiting_payment bookings older than ttl_seconds.
+    Returns the cancelled rows so callers can notify users and refresh Sheets.
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=ttl_seconds)
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                UPDATE bookings
+                SET status = 'cancelled', updated_at = NOW()
+                WHERE status = 'awaiting_payment'
+                  AND created_at < %s
+                RETURNING id, date, field, format, time_start, time_end, phone, customer_name
+            """, (cutoff,))
+            return [dict(r) for r in cur.fetchall()]
+
+
 def set_booking_sheet_row(booking_id: int, row: int) -> None:
     with _conn() as conn:
         with conn.cursor() as cur:

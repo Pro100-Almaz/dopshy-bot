@@ -61,10 +61,13 @@ BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "09:00")
 BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:00")
 BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
 BOOKING_FIELDS: list = _json.loads(
-    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"5x5"},{"id":2,"format":"6x6"}]')
+    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"5x5"},'
+                                '{"id":2,"format":"6x6"},'
+                                '{"id":3,"format":"5x5"}]')
 )
 BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
 BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1800"))  # seconds
+PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "3600"))   # 1 hour
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
 
 

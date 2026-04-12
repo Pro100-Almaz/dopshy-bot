@@ -1,11 +1,23 @@
 """OpenAI GPT-4o-mini integration."""
-import json
-from datetime import date
-
 from openai import OpenAI
 import config
 
 _client = OpenAI(api_key=config.OPENAI_API_KEY)
+
+# Tool definition for Bot 1: LLM calls this instead of emitting a text tag
+_START_BOOKING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "start_booking",
+        "description": (
+            "Запустить пошаговый процесс бронирования футбольного поля. "
+            "Вызывай эту функцию как только пользователь выражает желание забронировать поле — "
+            "даже если он уже прислал дату, время или другие детали."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
 
 def get_ai_response(
     phone_number_id: str,
@@ -13,12 +25,26 @@ def get_ai_response(
     user_message: str,
     history: list[dict],
     context: str,
-) -> str:
+) -> tuple[str, bool]:
     """
     Build the full prompt with RAG context and conversation history,
-    then call GPT-4o-mini and return the assistant reply.
+    then call GPT-4o-mini.
+
+    Returns:
+        (reply_text, start_booking)
+        start_booking=True means the LLM called the start_booking tool.
     """
+    is_dopsy = config.BOT_CONFIGS[phone_number_id]["name"] == "dopsy_bot"
     system_content = config.BOT_CONFIGS[phone_number_id]["system_prompt"]
+
+    # Inject factual field list for Bot 1 so the LLM never hallucinates field formats
+    if is_dopsy and config.BOOKING_FIELDS:
+        fields_lines = "\n".join(
+            f"  - Поле {f['id']}: формат {f['format']}"
+            for f in config.BOOKING_FIELDS
+        )
+        system_content += f"\n\n--- Наши поля ---\n{fields_lines}\n---"
+
     if context:
         system_content += f"\n\n--- База знаний / Білім базасы ---\n{context}\n---"
 
@@ -26,55 +52,26 @@ def get_ai_response(
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
-    response = _client.chat.completions.create(
+    kwargs = dict(
         model=config.MODEL_NAME,
         messages=messages,
         temperature=0.6,
         max_tokens=512,
     )
-    return response.choices[0].message.content.strip()
+    if is_dopsy:
+        kwargs["tools"] = [_START_BOOKING_TOOL]
+        kwargs["tool_choice"] = "auto"
 
+    response = _client.chat.completions.create(**kwargs)
+    msg = response.choices[0].message
 
-# ---------------------------------------------------------------------------
-# Booking-specific LLM helpers
-# ---------------------------------------------------------------------------
+    # LLM decided to start the booking flow
+    if msg.tool_calls and any(tc.function.name == "start_booking" for tc in msg.tool_calls):
+        # Use the LLM's text content as a preamble if it provided one
+        preamble = (msg.content or "").strip()
+        return preamble, True
 
-def extract_booking_params(
-    user_text: str,
-    current_params: dict,
-    free_slots_summary: str,
-) -> dict:
-    """
-    Extract booking parameters from a user message.
-    Returns a dict — fields not mentioned are set to null/None.
-    Uses JSON mode for reliable structured output.
-    """
-    today = date.today().isoformat()
-    prompt = (
-        f"Today is {today} (YYYY-MM-DD). "
-        f"Extract booking parameters from the user's message.\n"
-        f"Already collected: {json.dumps(current_params, ensure_ascii=False, default=str)}\n"
-        f"Available slots:\n{free_slots_summary}\n\n"
-        f"User message: \"{user_text}\"\n\n"
-        f"Return a JSON object with these fields (null for anything not mentioned or unclear):\n"
-        f'{{"date":"YYYY-MM-DD or null",'
-        f'"time_start":"HH:MM or null",'
-        f'"format":"5x5 or 6x6 or null",'
-        f'"players":integer_or_null,'
-        f'"customer_name":"string or null",'
-        f'"field":integer_or_null}}'
-    )
-    try:
-        response = _client.chat.completions.create(
-            model=config.MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=150,
-            response_format={"type": "json_object"},
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception:
-        return {}
+    return (msg.content or "").strip(), False
 
 
 def get_booking_reply(

@@ -10,6 +10,7 @@ Endpoints:
 import logging
 import threading
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
 
 import config
@@ -30,6 +31,84 @@ if config.POSTGRES_DSN:
         logger.warning("PostgreSQL init skipped: %s", _e)
 
 app = Flask(__name__)
+
+# ---------------------------------------------------------------------------
+# Scheduler: refresh Google Sheet every Monday 06:00 Almaty time
+# ---------------------------------------------------------------------------
+
+def _scheduled_sheet_refresh():
+    if not config.GOOGLE_SPREADSHEET_ID:
+        return
+    try:
+        from integrations.sheets import maybe_refresh_week
+        maybe_refresh_week(force=True)
+        logger.info("Scheduled weekly sheet refresh complete.")
+    except Exception as exc:
+        logger.error("Scheduled sheet refresh failed: %s", exc)
+
+
+def _cancel_expired_bookings():
+    """Cancel awaiting_payment bookings older than PAYMENT_TTL_SECONDS and notify users."""
+    if not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations.postgres import cancel_expired_bookings
+        from integrations.sheets import maybe_refresh_week
+        from handlers.whatsapp_client import send_text_message
+
+        cancelled = cancel_expired_bookings(config.PAYMENT_TTL_SECONDS)
+        if not cancelled:
+            return
+
+        logger.info(
+            "[PAYMENT] Auto-cancelled %d unpaid booking(s): ids=%s",
+            len(cancelled), [b["id"] for b in cancelled],
+        )
+
+        # Refresh Sheets for every affected date
+        for d in {b["date"] for b in cancelled}:
+            try:
+                maybe_refresh_week(force=True, target_date=d)
+            except Exception as exc:
+                logger.error("[PAYMENT] Sheet refresh failed for date %s: %s", d, exc)
+
+        # Notify each user
+        for b in cancelled:
+            try:
+                ts = str(b["time_start"])[:5]
+                te = str(b["time_end"])[:5]
+                send_text_message(
+                    config.WHATSAPP_PHONE_NUMBER_ID_BOT_1,
+                    b["phone"],
+                    f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, Поле {b['field']}) "
+                    f"была отменена — оплата не поступила в течение 1 часа.\n"
+                    f"Хотите забронировать снова? Просто напишите нам!\n\n"
+                    f"Өкінішке орай, брондауыңыз {b['date']} ({ts}–{te}, Поле {b['field']}) "
+                    f"1 сағат ішінде төленбегендіктен жойылды.\n"
+                    f"Қайта брондау үшін жазыңыз!",
+                )
+            except Exception as exc:
+                logger.error("[PAYMENT] Failed to notify %s about cancelled booking %d: %s",
+                             b["phone"], b["id"], exc)
+
+    except Exception as exc:
+        logger.error("[PAYMENT] Auto-cancel job failed: %s", exc)
+
+
+_scheduler = BackgroundScheduler(timezone=config.BOOKING_TIMEZONE)
+_scheduler.add_job(
+    _scheduled_sheet_refresh,
+    trigger="cron",
+    day_of_week="mon",
+    hour=6,
+    minute=0,
+)
+_scheduler.add_job(
+    _cancel_expired_bookings,
+    trigger="interval",
+    minutes=5,
+)
+_scheduler.start()
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +186,26 @@ def admin_ingest():
         return jsonify({"status": "ok", "chunks_indexed": count}), 200
     except Exception as exc:
         logger.exception("Ingest failed: %s", exc)
+        return jsonify({"status": "error", "detail": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Admin: apply Google Sheet template (run once after sheet creation)
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/setup-sheet")
+def admin_setup_sheet():
+    auth = request.headers.get("X-Admin-Token", "")
+    if auth != config.WHATSAPP_VERIFY_TOKEN:
+        abort(403)
+
+    from integrations.sheets import setup_sheet_template, maybe_refresh_week
+    try:
+        setup_sheet_template()
+        maybe_refresh_week(force=True)
+        return jsonify({"status": "ok"}), 200
+    except Exception as exc:
+        logger.exception("Sheet setup failed: %s", exc)
         return jsonify({"status": "error", "detail": str(exc)}), 500
 
 

@@ -21,11 +21,23 @@ def _get_embeddings() -> OpenAIEmbeddings:
     )
 
 
+_chroma_client = None
+
+
 def _get_chroma_client() -> chromadb.PersistentClient:
-    return chromadb.PersistentClient(
-        path=config.CHROMA_DB_PATH,
-        settings=Settings(anonymized_telemetry=False),
-    )
+    """Return a module-level singleton PersistentClient.
+
+    Both get_vector_store() and ingest_documents() must share the same client
+    instance — ChromaDB raises ValueError if two clients are created for the
+    same path with different settings objects.
+    """
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(
+            path=config.CHROMA_DB_PATH,
+            settings=Settings(anonymized_telemetry=False),
+        )
+    return _chroma_client
 
 
 def get_vector_store() -> Chroma:
@@ -33,7 +45,7 @@ def get_vector_store() -> Chroma:
     return Chroma(
         collection_name=config.CHROMA_COLLECTION_NAME,
         embedding_function=_get_embeddings(),
-        persist_directory=config.CHROMA_DB_PATH,
+        client=_get_chroma_client(),
     )
 
 
@@ -67,9 +79,8 @@ def ingest_documents(documents_path: str = config.DOCUMENTS_PATH) -> int:
     )
     chunks = splitter.split_documents(docs)
 
-    # Build Chroma store (creates or overwrites the collection)
+    # Drop and recreate the collection to avoid duplicates on re-ingest
     client = _get_chroma_client()
-    # Delete existing collection to avoid duplicates on re-ingest
     try:
         client.delete_collection(config.CHROMA_COLLECTION_NAME)
     except Exception:
@@ -79,8 +90,7 @@ def ingest_documents(documents_path: str = config.DOCUMENTS_PATH) -> int:
         documents=chunks,
         embedding=_get_embeddings(),
         collection_name=config.CHROMA_COLLECTION_NAME,
-        persist_directory=config.CHROMA_DB_PATH,
-        client_settings=Settings(anonymized_telemetry=False),
+        client=client,
     )
 
     print(f"Ingested {len(chunks)} chunks from {len(files)} files.")

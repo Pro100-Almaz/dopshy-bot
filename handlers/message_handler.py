@@ -4,12 +4,14 @@ Core message processing pipeline:
 """
 
 import logging
+import threading
 
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read
-from handlers.booking_session import handle_booking_turn
+from handlers.booking_session import handle_booking_turn, start_booking_flow
+from integrations import postgres, sheets
 import config
 
 logger = logging.getLogger(__name__)
@@ -49,13 +51,9 @@ def handle_incoming_message(payload: dict) -> None:
         if message_id:
             mark_as_read(phone_number_id, message_id)
 
-        # Document = payment receipt confirmation
+        # Document = payment receipt — mark the booking as paid
         if msg_type == "document":
-            send_text_message(
-                phone_number_id,
-                sender_id,
-                "Оплата принята! Спасибо. ✅\nТөлем қабылданды! Рахмет. ✅",
-            )
+            _handle_payment_receipt(phone_number_id, sender_id)
             return
 
         # Only handle text messages
@@ -96,35 +94,59 @@ def handle_incoming_message(payload: dict) -> None:
 
         # 1. Booking session handler (Bot 1 — Dopshy field rental only)
         if bot_config["name"] == "dopsy_bot":
+            logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
             booking_reply = handle_booking_turn(
                 chat_id, phone_number_id, sender_id, user_text
             )
             if booking_reply is not None:
+                logger.info(
+                    "[BOOKING] Booking branch handled message — skipping RAG/LLM. "
+                    "Reply preview: %.120s", booking_reply
+                )
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", booking_reply)
                 send_text_message(phone_number_id, sender_id, booking_reply)
                 return
+            logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
 
         # 2. Retrieve relevant context from knowledge base
         context = retrieve_context(user_text)
+        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
 
-        # 3. Get conversation history
+        # 3a. For Bot 1: inject live availability so the LLM can answer
+        #     "what's free?" questions and decide when to emit [BOOK].
+        if bot_config["name"] == "dopsy_bot":
+            from integrations.booking import get_free_windows, format_availability_context
+            free = get_free_windows()
+            availability_ctx = format_availability_context(free)
+            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
+            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
+
+        # 3b. Get conversation history
         history = get_history(chat_id)
+        logger.info("[LLM] History length: %d messages", len(history))
 
         # 4. Generate response
-        reply = get_ai_response(
+        reply, should_book = get_ai_response(
             phone_number_id=phone_number_id,
             chat_id=chat_id,
             user_message=user_text,
             history=history,
             context=context,
         )
+        logger.info("[LLM] Raw reply (%.120s) | should_book=%s", reply, should_book)
 
-        # 5. Save to history
+        # 5. LLM called start_booking tool — launch deterministic booking flow
+        if should_book:
+            logger.info("[BOOKING] LLM called start_booking tool — starting booking flow")
+            booking_prompt = start_booking_flow(chat_id, sender_id)
+            reply = (reply + "\n\n" + booking_prompt) if reply else booking_prompt
+
+        # 6. Save to history
         append_message(chat_id, "user", user_text)
         append_message(chat_id, "assistant", reply)
 
-        # 6. Send reply
+        # 7. Send reply
         send_text_message(phone_number_id,  sender_id, reply)
         logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
@@ -148,3 +170,51 @@ def handle_incoming_message(payload: dict) -> None:
                 )
         except Exception:
             pass
+
+
+def _handle_payment_receipt(phone_number_id: str, sender_phone: str) -> None:
+    """
+    Called when a user sends a document (assumed to be a payment receipt).
+    Finds their most recent awaiting_payment booking, marks it paid, and
+    refreshes Google Sheets in the background.
+    """
+    booking = postgres.get_awaiting_payment_booking(sender_phone)
+
+    if not booking:
+        logger.info("[PAYMENT] Document from %s — no awaiting_payment booking found", sender_phone)
+        send_text_message(
+            phone_number_id,
+            sender_phone,
+            "Оплата принята! Спасибо. ✅\nТөлем қабылданды! Рахмет. ✅",
+        )
+        return
+
+    postgres.update_booking_status(booking["id"], "paid")
+    logger.info("[PAYMENT] Booking id=%d marked as paid for phone=%s", booking["id"], sender_phone)
+
+    booking_date = booking["date"]
+    def _refresh_sheets():
+        try:
+            sheets.maybe_refresh_week(force=True, target_date=booking_date)
+        except Exception as exc:
+            logger.error("[PAYMENT] Sheet refresh failed for booking id=%d: %s", booking["id"], exc)
+
+    threading.Thread(target=_refresh_sheets, daemon=True).start()
+
+    ts = str(booking["time_start"])[:5]
+    te = str(booking["time_end"])[:5]
+    send_text_message(
+        phone_number_id,
+        sender_phone,
+        f"✅ Оплата получена! Бронь подтверждена.\n\n"
+        f"📅 {booking_date}\n"
+        f"⏰ {ts}–{te}\n"
+        f"⚽ Поле {booking['field']} ({booking['format']})\n\n"
+        f"Ждём вас! 🙌\n\n"
+        f"— — —\n"
+        f"✅ Төлем қабылданды! Брондау расталды.\n\n"
+        f"📅 {booking_date}\n"
+        f"⏰ {ts}–{te}\n"
+        f"⚽ Поле {booking['field']} ({booking['format']})\n\n"
+        f"Сізді күтеміз! 🙌",
+    )
