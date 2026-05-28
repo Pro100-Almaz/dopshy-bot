@@ -20,15 +20,22 @@ After confirming "да":
 import logging
 import re
 import threading
-from datetime import date, datetime, timedelta
+import uuid
+from datetime import date, datetime
 
 import config
 from integrations import booking as booking_logic
-from integrations import postgres, sheets
+from integrations import booking_service, postgres, sheets
+from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 
 _WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _save(chat_id: str, state: str, params: dict) -> None:
+    """Persist the session, keeping booking_sessions.booking_id in sync."""
+    postgres.upsert_session(chat_id, state, params, booking_id=params.get("booking_id"))
 
 # Regex to pull two HH:MM times from a single message (e.g. "10:00 до 12:00", "14:30-16:00")
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")
@@ -42,6 +49,20 @@ _MY_BOOKING_KW = {
     "мне забронировали", "моя игра", "моя запись",
     "менің брон", "менің уақыт", "менің жазба",
 }
+
+# Substrings (matched in lowercased message) that abort an in-flight booking
+# session at any step. Strong cancel intents only — short tokens like "нет" are
+# intentionally excluded because they're valid step_confirm inputs.
+_CANCEL_PHRASES = (
+    "отмен", "стоп", "передум", "не хочу", "не хотим", "не нужно",
+    "не надо", "забуд", "забыть", "отбой", "отказыв",
+    "тоқтат", "керек емес", "ұнамайды", "болмайды", "бас тарт",
+)
+
+
+def _is_cancel_intent(text: str) -> bool:
+    low = text.lower()
+    return any(p in low for p in _CANCEL_PHRASES)
 
 
 def detect_intent(text: str) -> str | None:
@@ -79,15 +100,24 @@ def start_booking_flow(chat_id: str, sender_phone: str) -> str:
         logger.warning("[BOOKING:start_flow] No available days — aborting flow")
         return "К сожалению, свободных слотов на ближайшие 7 дней нет. Пожалуйста, свяжитесь с администратором."
 
-    postgres.upsert_session(
+    client_token = str(uuid.uuid4())
+    draft = booking_service.create_draft(chat_id, sender_phone, client_token)
+    booking_id = draft["data"]["booking_id"]
+
+    _save(
         chat_id,
         "step_date",
         {
             "sender_phone": sender_phone,
             "available_days": [str(d) for d in available_days],
+            "booking_id": booking_id,
+            "client_token": client_token,
         },
     )
-    logger.info("[BOOKING:start_flow] Session created — step_date. Showing %d days", len(available_days))
+    logger.info(
+        "[BOOKING:start_flow] Draft booking_id=%d created — step_date. Showing %d days",
+        booking_id, len(available_days),
+    )
     return _ask_date(available_days)
 
 
@@ -113,6 +143,26 @@ def handle_booking_turn(
             "[BOOKING] Active session found: chat_id=%s state=%s params=%s | user_text=%.80s",
             chat_id, state, params, user_text,
         )
+
+        # Natural-language cancel at any step ("передумал", "отмена", "не хотим"…)
+        if _is_cancel_intent(user_text):
+            bid = params.get("booking_id")
+            if bid:
+                booking_service.cancel_booking(
+                    bid, actor_type="whatsapp", actor_id=chat_id, reason="user_cancel_mid_flow"
+                )
+            else:
+                postgres.delete_session(chat_id)
+            logger.info("[BOOKING] Cancel intent detected — session cleared for %s", chat_id)
+            return ("Хорошо, бронь отменена. Если передумаете — просто напишите! 🙂\n\n"
+                    "Жарайды, брондау тоқтатылды. Қайта қаласаңыз — жазыңыз!")
+
+        # Legacy session from before the state-machine upgrade has no draft booking_id.
+        # Discard it and restart the flow cleanly rather than crashing.
+        if "booking_id" not in params:
+            logger.warning("[BOOKING] Stale session without booking_id — restarting flow for %s", chat_id)
+            postgres.delete_session(chat_id)
+            return start_booking_flow(chat_id, sender_phone)
 
         if state == "step_date":
             return _handle_step_date(chat_id, user_text, params)
@@ -155,10 +205,11 @@ def handle_booking_turn(
 # ---------------------------------------------------------------------------
 
 def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
-    available_days = [
-        datetime.strptime(d, "%Y-%m-%d").date()
-        for d in params.get("available_days", [])
-    ]
+    # Always recompute available_days here so a session that crossed midnight
+    # doesn't keep offering yesterday's date.
+    free_now = booking_logic.get_free_windows()
+    available_days = sorted({w["date"] for w in free_now})
+    params["available_days"] = [str(d) for d in available_days]
     logger.info("[BOOKING:step_date] available_days=%s | user_text=%.80s", available_days, user_text)
 
     chosen: date | None = None
@@ -182,7 +233,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
             m = re.match(r"^(\d{1,2})\.(\d{1,2})$", text)
             if m:
                 try:
-                    chosen = date(date.today().year, int(m.group(2)), int(m.group(1)))
+                    chosen = date(today_almaty().year, int(m.group(2)), int(m.group(1)))
                     logger.info("[BOOKING:step_date] parsed dd.mm → %s", chosen)
                 except ValueError:
                     pass
@@ -202,7 +253,8 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
     )
 
     params["date"] = str(chosen)
-    postgres.upsert_session(chat_id, "step_time", params)
+    booking_service.update_draft(params["booking_id"], date=str(chosen))
+    _save(chat_id, "step_time", params)
     return _ask_time(chosen, day_windows)
 
 
@@ -260,11 +312,16 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
         params["field"]  = f["id"]
         params["format"] = f["format"]
         logger.info("[BOOKING:step_time] single free field=%d — advancing to step_players", f["id"])
-        postgres.upsert_session(chat_id, "step_players", params)
+        booking_service.update_draft(
+            params["booking_id"], time_start=time_start, time_end=time_end,
+            field=f["id"], format=f["format"],
+        )
+        _save(chat_id, "step_players", params)
         return f"Поле {f['id']} ({f['format']}) — свободно ✅\n\nСколько игроков будет?"
 
     logger.info("[BOOKING:step_time] multiple free fields=%s — advancing to step_field", [f["id"] for f in free_fields])
-    postgres.upsert_session(chat_id, "step_field", params)
+    booking_service.update_draft(params["booking_id"], time_start=time_start, time_end=time_end)
+    _save(chat_id, "step_field", params)
     return _ask_field(free_fields)
 
 
@@ -291,7 +348,10 @@ def _handle_step_field(chat_id: str, user_text: str, params: dict) -> str:
 
     params["field"]  = chosen_field["id"]
     params["format"] = chosen_field["format"]
-    postgres.upsert_session(chat_id, "step_players", params)
+    booking_service.update_draft(
+        params["booking_id"], field=chosen_field["id"], format=chosen_field["format"]
+    )
+    _save(chat_id, "step_players", params)
     return "Сколько игроков будет?"
 
 
@@ -303,14 +363,16 @@ def _handle_step_players(chat_id: str, user_text: str, params: dict) -> str:
 
     params["players"] = int(m.group(1))
     logger.info("[BOOKING:step_players] players=%d — advancing to step_name", params["players"])
-    postgres.upsert_session(chat_id, "step_name", params)
+    booking_service.update_draft(params["booking_id"], players=params["players"])
+    _save(chat_id, "step_name", params)
     return "Укажите ваше имя:"
 
 
 def _handle_step_name(chat_id: str, user_text: str, params: dict) -> str:
     params["customer_name"] = user_text.strip()
     logger.info("[BOOKING:step_name] customer_name=%r — advancing to step_confirm", params["customer_name"])
-    postgres.upsert_session(chat_id, "step_confirm", params)
+    booking_service.update_draft(params["booking_id"], customer_name=params["customer_name"])
+    _save(chat_id, "step_confirm", params)
     return _format_summary(params)
 
 
@@ -331,7 +393,11 @@ def _handle_step_confirm(
         return _confirm_booking(chat_id, sender_phone, params)
 
     if any(w in lower for w in _NO):
-        logger.info("[BOOKING:step_confirm] NO received — cancelling session")
+        logger.info("[BOOKING:step_confirm] NO received — cancelling draft + session")
+        if params.get("booking_id"):
+            booking_service.cancel_booking(
+                params["booking_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined"
+            )
         postgres.delete_session(chat_id)
         return (
             "Бронирование отменено. Если захотите снова — просто напишите, "
@@ -350,45 +416,48 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
     time_start_str = params["time_start"]
     time_end_str   = params["time_end"]
     field          = int(params["field"])
+    booking_id     = params["booking_id"]
 
     logger.info(
-        "[BOOKING:confirm] Writing booking to DB: phone=%s date=%s %s–%s field=%d format=%s players=%s name=%r",
-        sender_phone, params["date"], time_start_str, time_end_str,
-        field, params["format"], params.get("players"), params.get("customer_name"),
+        "[BOOKING:confirm] request_payment booking_id=%d phone=%s date=%s %s–%s field=%d",
+        booking_id, sender_phone, params["date"], time_start_str, time_end_str, field,
     )
-    try:
-        booking_id = postgres.create_booking(
-            phone=sender_phone,
-            customer_name=params.get("customer_name", ""),
-            date=params["date"],
-            time_start=time_start_str,
-            time_end=time_end_str,
-            field=field,
-            format_=params["format"],
-            players=int(params.get("players") or 0),
-        )
-        logger.info("[BOOKING:confirm] Booking created successfully — id=%d", booking_id)
-    except Exception as exc:
-        if "unique" in str(exc).lower():
-            logger.warning("[BOOKING:confirm] UNIQUE violation — slot taken mid-flow: %s", exc)
-            postgres.delete_session(chat_id)
+
+    res = booking_service.request_payment(booking_id, params["client_token"])
+    if not res["ok"]:
+        postgres.delete_session(chat_id)
+        if res["code"] == "SLOT_TAKEN":
+            logger.warning("[BOOKING:confirm] slot taken mid-flow for booking_id=%d", booking_id)
             free = booking_logic.get_free_windows()
             return (
                 "К сожалению, этот слот только что заняли. "
                 "Начните бронирование заново.\n\n"
                 + booking_logic.format_availability_context(free)
             )
-        logger.exception("[BOOKING:confirm] create_booking failed: %s", exc)
-        postgres.delete_session(chat_id)
+        logger.error("[BOOKING:confirm] request_payment failed: %s", res)
         return (
             "Произошла ошибка при создании брони. Пожалуйста, попробуйте ещё раз.\n"
             "Если проблема повторяется, свяжитесь с администратором."
         )
 
+    logger.info("[BOOKING:confirm] booking_id=%d → awaiting_payment", booking_id)
+
+    booking_row = {
+        "id":            booking_id,
+        "field":         field,
+        "date":          params["date"],
+        "time_start":    time_start_str,
+        "time_end":      time_end_str,
+        "customer_name": params.get("customer_name", ""),
+        "phone":         sender_phone,
+        "players":       params.get("players"),
+        "state":         "awaiting_payment",
+        "notes":         "",
+    }
+
     def _write_to_sheets():
         try:
-            booking_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
-            sheets.maybe_refresh_week(force=True, target_date=booking_date)
+            sheets.upsert_booking_row(booking_row)
         except Exception as e:
             logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 

@@ -22,15 +22,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize PostgreSQL schema on startup (no-op if tables already exist)
+# Apply database migrations on startup (idempotent; no-op if already up to date)
 if config.POSTGRES_DSN:
     try:
-        from integrations.postgres import init_schema as _pg_init_schema
-        _pg_init_schema()
+        from scripts.migrate import migrate as _pg_migrate
+        _pg_migrate()
     except Exception as _e:
-        logger.warning("PostgreSQL init skipped: %s", _e)
+        logger.warning("PostgreSQL migrations skipped: %s", _e)
 
 app = Flask(__name__)
+
+# Manager API (Google Apps Script → backend)
+from blueprints.manager_api import manager_api  # noqa: E402
+app.register_blueprint(manager_api)
 
 # ---------------------------------------------------------------------------
 # Scheduler: refresh Google Sheet every Monday 06:00 Almaty time
@@ -40,40 +44,46 @@ def _scheduled_sheet_refresh():
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
-        from integrations.sheets import maybe_refresh_week
-        maybe_refresh_week(force=True)
-        logger.info("Scheduled weekly sheet refresh complete.")
+        from integrations.sheets import refresh_all_bookings
+        refresh_all_bookings()
+        logger.info("Scheduled sheet refresh complete.")
     except Exception as exc:
         logger.error("Scheduled sheet refresh failed: %s", exc)
 
 
 def _cancel_expired_bookings():
-    """Cancel awaiting_payment bookings older than PAYMENT_TTL_SECONDS and notify users."""
+    """Cancel expired awaiting_payment reservations + abandoned drafts, notify users."""
     if not config.POSTGRES_DSN:
         return
     try:
-        from integrations.postgres import cancel_expired_bookings
-        from integrations.sheets import maybe_refresh_week
+        from integrations.postgres import get_expired_bookings
+        from integrations import booking_service, sheets
         from handlers.whatsapp_client import send_text_message
 
-        cancelled = cancel_expired_bookings(config.PAYMENT_TTL_SECONDS)
-        if not cancelled:
+        expired = get_expired_bookings(config.BOOKING_SESSION_TTL)
+        if not expired:
             return
 
+        # Cancel each through the service layer so every transition is audited.
+        for b in expired:
+            booking_service.cancel_booking(
+                b["id"], actor_type="system", reason="ttl_expired"
+            )
+
+        # Only awaiting_payment expiries are user-facing (drafts never reserved a slot).
+        to_notify = [b for b in expired if b["state"] == "awaiting_payment"]
         logger.info(
-            "[PAYMENT] Auto-cancelled %d unpaid booking(s): ids=%s",
-            len(cancelled), [b["id"] for b in cancelled],
+            "[PAYMENT] Auto-cancelled %d expired booking(s): ids=%s (notify=%d)",
+            len(expired), [b["id"] for b in expired], len(to_notify),
         )
 
-        # Refresh Sheets for every affected date
-        for d in {b["date"] for b in cancelled}:
+        if to_notify:
             try:
-                maybe_refresh_week(force=True, target_date=d)
+                sheets.refresh_all_bookings()
             except Exception as exc:
-                logger.error("[PAYMENT] Sheet refresh failed for date %s: %s", d, exc)
+                logger.error("[PAYMENT] Sheet refresh failed: %s", exc)
 
-        # Notify each user
-        for b in cancelled:
+        for b in to_notify:
             try:
                 ts = str(b["time_start"])[:5]
                 te = str(b["time_end"])[:5]
@@ -199,10 +209,10 @@ def admin_setup_sheet():
     if auth != config.WHATSAPP_VERIFY_TOKEN:
         abort(403)
 
-    from integrations.sheets import setup_sheet_template, maybe_refresh_week
+    from integrations.sheets import setup_sheet_template, refresh_all_bookings
     try:
         setup_sheet_template()
-        maybe_refresh_week(force=True)
+        refresh_all_bookings()
         return jsonify({"status": "ok"}), 200
     except Exception as exc:
         logger.exception("Sheet setup failed: %s", exc)

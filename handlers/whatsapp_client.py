@@ -1,7 +1,33 @@
 """Meta WhatsApp Cloud API client — send messages."""
 
+import logging
+
 import requests
 import config
+
+logger = logging.getLogger(__name__)
+
+_GRAPH = "https://graph.facebook.com/v22.0"
+
+
+def download_media(phone_number_id: str, media_id: str) -> bytes | None:
+    """Resolve a media_id to its temporary URL and download the bytes. None on failure."""
+    bot_config = config.get_bot_config(phone_number_id)
+    if not bot_config or not media_id:
+        return None
+    headers = {"Authorization": f"Bearer {bot_config['access_token']}"}
+    try:
+        meta = requests.get(f"{_GRAPH}/{media_id}", headers=headers, timeout=10)
+        meta.raise_for_status()
+        url = meta.json().get("url")
+        if not url:
+            return None
+        media = requests.get(url, headers=headers, timeout=30)
+        media.raise_for_status()
+        return media.content
+    except Exception as exc:
+        logger.error("Media download failed for %s: %s", media_id, exc)
+        return None
 
 
 def send_text_message(phone_number_id: str, to: str, text: str) -> dict:

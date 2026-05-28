@@ -46,13 +46,20 @@ def get_bot_config(phone_number_id: str) -> dict | None:
 # PostgreSQL
 # ---------------------------------------------------------------------------
 POSTGRES_DSN: str = os.getenv("POSTGRES_DSN", "")
+POSTGRES_MAX_CONN: int = int(os.getenv("POSTGRES_MAX_CONN", "10"))
+
+# ---------------------------------------------------------------------------
+# Manager API (Google Apps Script → backend)
+# ---------------------------------------------------------------------------
+MANAGER_API_KEY: str = os.getenv("MANAGER_API_KEY", "")
+MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
 
 # ---------------------------------------------------------------------------
 # Google Sheets
 # ---------------------------------------------------------------------------
 GOOGLE_CREDENTIALS_PATH: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "./secrets/google_credentials.json")
 GOOGLE_SPREADSHEET_ID: str = os.getenv("GOOGLE_SPREADSHEET_ID", "")
-GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Текущая неделя")
+GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Bookings")
 
 # ---------------------------------------------------------------------------
 # Booking (Bot 1 — Dopshy field rental only)
@@ -69,6 +76,10 @@ BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
 BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1800"))  # seconds
 PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "3600"))   # 1 hour
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
+
+# Payment receipt validation
+PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
+PAYMENT_RECEIPT_MAX_AGE_HOURS: int = int(os.getenv("PAYMENT_RECEIPT_MAX_AGE_HOURS", "24"))
 
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:

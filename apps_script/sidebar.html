@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 13px; padding: 8px; }
+      label { display: block; margin-top: 10px; font-weight: bold; }
+      input, select, textarea { width: 100%; box-sizing: border-box; padding: 5px; margin-top: 3px; }
+      button { margin-top: 14px; padding: 8px 14px; cursor: pointer; }
+      #msg { margin-top: 12px; padding: 8px; border-radius: 4px; display: none; }
+      .ok { background: #e6f4ea; color: #137333; }
+      .err { background: #fce8e6; color: #c5221f; }
+    </style>
+  </head>
+  <body>
+    <label>Поле</label>
+    <select id="field"></select>
+
+    <label>Дата</label>
+    <input type="date" id="date">
+
+    <label>Начало</label>
+    <input type="time" id="start" step="300">
+
+    <label>Конец</label>
+    <input type="time" id="end" step="300">
+
+    <label>Клиент (имя / телефон)</label>
+    <input type="text" id="customer">
+
+    <label>Примечание</label>
+    <textarea id="notes" rows="2"></textarea>
+
+    <button id="submit" onclick="submit()">Создать бронь</button>
+    <div id="msg"></div>
+
+    <script>
+      google.script.run.withSuccessHandler(function (opts) {
+        var sel = document.getElementById('field');
+        opts.forEach(function (o) {
+          var el = document.createElement('option');
+          el.value = o.id; el.textContent = o.label;
+          sel.appendChild(el);
+        });
+      }).getFieldOptions();
+
+      function show(ok, text) {
+        var m = document.getElementById('msg');
+        m.className = ok ? 'ok' : 'err';
+        m.textContent = text;
+        m.style.display = 'block';
+      }
+
+      function submit() {
+        var form = {
+          field: document.getElementById('field').value,
+          date: document.getElementById('date').value,
+          start: document.getElementById('start').value,
+          end: document.getElementById('end').value,
+          customer: document.getElementById('customer').value,
+          notes: document.getElementById('notes').value
+        };
+        if (!form.field || !form.date || !form.start || !form.end) {
+          return show(false, 'Заполните поле, дату и время.');
+        }
+        if (form.end <= form.start) {
+          return show(false, 'Конец должен быть позже начала.');
+        }
+        document.getElementById('submit').disabled = true;
+        google.script.run
+          .withSuccessHandler(function (res) {
+            document.getElementById('submit').disabled = false;
+            show(res.ok, res.message);
+          })
+          .withFailureHandler(function (err) {
+            document.getElementById('submit').disabled = false;
+            show(false, err.message);
+          })
+          .submitNewBooking(form);
+      }
+    </script>
+  </body>
+</html>

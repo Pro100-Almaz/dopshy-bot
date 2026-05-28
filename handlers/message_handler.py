@@ -9,9 +9,9 @@ import threading
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from rag.retriever import retrieve_context
-from handlers.whatsapp_client import send_text_message, mark_as_read
+from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.booking_session import handle_booking_turn, start_booking_flow
-from integrations import postgres, sheets
+from integrations import booking_service, payment_validation, postgres, sheets
 import config
 
 logger = logging.getLogger(__name__)
@@ -51,9 +51,10 @@ def handle_incoming_message(payload: dict) -> None:
         if message_id:
             mark_as_read(phone_number_id, message_id)
 
-        # Document = payment receipt — mark the booking as paid
+        # Document = payment receipt — confirm the booking
         if msg_type == "document":
-            _handle_payment_receipt(phone_number_id, sender_id)
+            media_id = message.get("document", {}).get("id")
+            _handle_payment_receipt(phone_number_id, sender_id, media_id)
             return
 
         # Only handle text messages
@@ -172,11 +173,35 @@ def handle_incoming_message(payload: dict) -> None:
             pass
 
 
-def _handle_payment_receipt(phone_number_id: str, sender_phone: str) -> None:
+def _refresh_booking_sheet(booking: dict, state: str) -> None:
+    """Push a booking's current state to the flat Bookings sheet (background)."""
+    row = {
+        "id":            booking["id"],
+        "field":         booking["field"],
+        "date":          booking["date"],
+        "time_start":    booking["time_start"],
+        "time_end":      booking["time_end"],
+        "customer_name": booking.get("customer_name", ""),
+        "players":       booking.get("players"),
+        "state":         state,
+        "notes":         "",
+    }
+
+    def _run():
+        try:
+            sheets.upsert_booking_row(row)
+        except Exception as exc:
+            logger.error("[PAYMENT] Sheet update failed for booking id=%s: %s", booking["id"], exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
+                            proof_media_id: str | None = None) -> None:
     """
     Called when a user sends a document (assumed to be a payment receipt).
-    Finds their most recent awaiting_payment booking, marks it paid, and
-    refreshes Google Sheets in the background.
+    Finds their most recent awaiting_payment booking, confirms it via the
+    service layer, and refreshes Google Sheets in the background.
     """
     booking = postgres.get_awaiting_payment_booking(sender_phone)
 
@@ -189,18 +214,51 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str) -> None:
         )
         return
 
-    postgres.update_booking_status(booking["id"], "paid")
-    logger.info("[PAYMENT] Booking id=%d marked as paid for phone=%s", booking["id"], sender_phone)
+    # Download the receipt PDF and validate it before confirming.
+    pdf = download_media(phone_number_id, proof_media_id) if proof_media_id else None
+    if not pdf:
+        logger.warning("[PAYMENT] Could not download media for booking id=%d", booking["id"])
+        send_text_message(
+            phone_number_id, sender_phone,
+            "Не удалось загрузить чек. Пожалуйста, отправьте PDF-чек ещё раз.\n"
+            "Чекті жүктеу мүмкін болмады. PDF-чекті қайта жіберіңіз.",
+        )
+        return
+
+    result = payment_validation.validate_receipt(booking, pdf)
+
+    if not result["ok"]:
+        booking_service.reject_payment(booking["id"], result["reason"], result["parsed"])
+        logger.info("[PAYMENT] Booking id=%d receipt rejected: %s", booking["id"], result["code"])
+        send_text_message(
+            phone_number_id, sender_phone,
+            f"❌ Чек не принят: {result['reason']}\n"
+            f"Вы можете отправить корректный чек ещё раз, пока бронь не истекла. "
+            f"Если нужна помощь — свяжитесь с администратором.\n\n"
+            f"❌ Чек қабылданбады: {result['reason']}\n"
+            f"Бронь мерзімі біткенше дұрыс чекті қайта жіберуге болады. "
+            f"Қажет болса — әкімшімен хабарласыңыз.",
+        )
+        return
+
+    res = booking_service.submit_payment_proof(
+        booking["id"], parsed=result["parsed"], proof_media_id=proof_media_id
+    )
+    if not res["ok"]:
+        msg = ("Этот чек уже был использован. Свяжитесь с администратором.\n"
+               "Бұл чек бұрын қолданылған. Әкімшімен хабарласыңыз."
+               if res["code"] == "PAYMENT_DUPLICATE"
+               else "Не удалось подтвердить оплату. Свяжитесь с администратором.\n"
+                    "Төлемді растау мүмкін болмады. Әкімшімен хабарласыңыз.")
+        logger.error("[PAYMENT] submit_payment_proof failed for id=%d: %s", booking["id"], res)
+        send_text_message(phone_number_id, sender_phone, msg)
+        return
+
+    logger.info("[PAYMENT] Booking id=%d confirmed for phone=%s", booking["id"], sender_phone)
+
+    _refresh_booking_sheet(booking, "confirmed")
 
     booking_date = booking["date"]
-    def _refresh_sheets():
-        try:
-            sheets.maybe_refresh_week(force=True, target_date=booking_date)
-        except Exception as exc:
-            logger.error("[PAYMENT] Sheet refresh failed for booking id=%d: %s", booking["id"], exc)
-
-    threading.Thread(target=_refresh_sheets, daemon=True).start()
-
     ts = str(booking["time_start"])[:5]
     te = str(booking["time_end"])[:5]
     send_text_message(

@@ -4,7 +4,8 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 import config
-from integrations import postgres, sheets
+from integrations import postgres
+from utils import now_almaty, today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ def _parse_time(t: str) -> time:
 
 
 def get_week_range() -> tuple[date, date]:
-    today = date.today()
+    today = today_almaty()
     return today, today + timedelta(days=6)
 
 
@@ -50,11 +51,8 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
 
 
 def get_all_booked(week_start: date, week_end: date) -> list[dict]:
-    """Merged booked slots from PostgreSQL and Google Sheets for a date range."""
-    return (
-        postgres.get_booked_slots(str(week_start), str(week_end))
-        + sheets.get_booked_slots(str(week_start), str(week_end))
-    )
+    """Booked slots from PostgreSQL (the single source of truth) for a date range."""
+    return postgres.get_booked_slots(str(week_start), str(week_end))
 
 
 def is_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:
@@ -83,8 +81,8 @@ def get_free_windows() -> list[dict]:
     booked   = get_all_booked(week_start, week_end)
     open_t   = _parse_time(config.BOOKING_OPEN_TIME)
     close_t  = _parse_time(config.BOOKING_CLOSE_TIME)
-    today    = date.today()
-    now_time = datetime.now().time()
+    today    = today_almaty()
+    now_time = now_almaty().time()
 
     result = []
     current = week_start
@@ -167,8 +165,7 @@ def format_user_booking_context(bookings: list[dict]) -> str:
 
     status_map = {
         "awaiting_payment": "⏳ ожидает оплату",
-        "paid": "✅ оплачено",
-        "completed": "✅ завершено",
+        "confirmed": "✅ оплачено",
     }
 
     lines = ["Брони этого пользователя:"]
@@ -178,7 +175,7 @@ def format_user_booking_context(bookings: list[dict]) -> str:
         ts = str(b["time_start"])[:5]
         te = str(b["time_end"])[:5]
         day_label = f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}"
-        status_str = status_map.get(b.get("status", ""), b.get("status", ""))
+        status_str = status_map.get(b.get("state", ""), b.get("state", ""))
         lines.append(
             f"  {day_label} {ts}–{te} | Поле {b['field']} ({b['format']}) | "
             f"{b.get('players', '?')} игр. | {status_str}"
