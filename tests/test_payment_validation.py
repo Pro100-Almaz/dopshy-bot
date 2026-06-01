@@ -43,7 +43,14 @@ def test_accept_genuine_kaspi(no_date_limit):
     assert res["ok"], res
 
 
-def test_reject_wrong_recipient(no_date_limit):
+def test_reject_wrong_recipient(no_date_limit, monkeypatch):
+    # Pin recipients to only the legacy DOPSHY BIN so the fixture receipt
+    # (bin 250740003149) is treated as unknown.
+    monkeypatch.setattr(
+        payment_validation.postgres,
+        "get_payment_recipients",
+        lambda: [{"bank": "kaspi", "bin": "870203301478", "name": "DOPSHY", "phone": None}],
+    )
     b = _awaiting()
     res = payment_validation.validate_receipt(b, _pdf("receipt (3).pdf"))  # bin 250740003149
     assert not res["ok"]

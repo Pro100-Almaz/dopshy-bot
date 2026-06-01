@@ -30,7 +30,69 @@ from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 
-_WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_WEEKDAY = {
+    "ru": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
+    "kk": ["Дс", "Сс", "Ср", "Бс", "Жм", "Сб", "Жс"],
+}
+# Cyrillic letters that exist only in Kazakh — presence flips the session lang to kk.
+_KZ_CHARS = set("әғіңөұүһқ")
+
+
+def _detect_lang(text: str) -> str:
+    """Crude lang detection: any Kazakh-only Cyrillic letter → kk, else ru."""
+    return "kk" if any(c in _KZ_CHARS for c in text.lower()) else "ru"
+
+
+_T = {
+    "ask_date_header":        {"ru": "📅 Выберите дату (введите номер):",
+                                "kk": "📅 Күнді таңдаңыз (нөмірді енгізіңіз):"},
+    "ask_date_invalid":       {"ru": "Пожалуйста, введите номер из списка.",
+                                "kk": "Тізімдегі нөмірді енгізіңіз."},
+    "ask_time_header":        {"ru": "Свободное время по полям:",
+                                "kk": "Алаңдардың бос уақыты:"},
+    "ask_time_prompt":        {"ru": "Введите время начала и окончания:",
+                                "kk": "Басталу және аяқталу уақытын енгізіңіз:"},
+    "ask_time_example":       {"ru": "Например: *10:00 до 12:00* или *10:20-11:45*",
+                                "kk": "Мысалы: *10:00 - 12:00* немесе *10:20-11:45*"},
+    "time_not_recognized":    {"ru": "Не распознал время. Пример: *10:00 до 12:00*",
+                                "kk": "Уақыт танылмады. Мысалы: *10:00 - 12:00*"},
+    "time_inverted":          {"ru": "Время окончания должно быть позже времени начала. Пример: *10:00 до 12:00*",
+                                "kk": "Аяқталу уақыты басталу уақытынан кейін болуы керек. Мысалы: *10:00 - 12:00*"},
+    "no_free_fields":         {"ru": "К сожалению, нет свободных полей с {start} до {end}. Выберите другое время.",
+                                "kk": "Өкінішке орай, {start}–{end} аралығында бос алаң жоқ. Басқа уақыт таңдаңыз."},
+    "ask_field_header":       {"ru": "Выберите поле:",
+                                "kk": "Алаңды таңдаңыз:"},
+    "ask_field_invalid":      {"ru": "Пожалуйста, введите номер поля.",
+                                "kk": "Алаң нөмірін енгізіңіз."},
+    "field_free_advance":     {"ru": "Поле {id} ({fmt}) — свободно ✅\n\nСколько игроков будет?",
+                                "kk": "Алаң {id} ({fmt}) — бос ✅\n\nҚанша ойыншы болады?"},
+    "ask_players":            {"ru": "Сколько игроков будет?",
+                                "kk": "Қанша ойыншы болады?"},
+    "ask_players_invalid":    {"ru": "Пожалуйста, введите количество игроков (например: *8*).",
+                                "kk": "Ойыншылар санын енгізіңіз (мысалы: *8*)."},
+    "ask_name":               {"ru": "Укажите ваше имя:",
+                                "kk": "Атыңызды жазыңыз:"},
+    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 Игроков: {players}\n👤 Имя: {name}\n\nПодтвердить? Ответьте *да* или *нет*.",
+                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "confirm_reshow":         {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
+                                "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "declined":               {"ru": "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂",
+                                "kk": "Брондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"},
+    "slot_taken":             {"ru": "К сожалению, этот слот только что заняли. Начните бронирование заново.\n\n",
+                                "kk": "Өкінішке орай, бұл слотты жаңа ғана алып қойды. Брондауды қайта бастаңыз.\n\n"},
+    "request_payment_error":  {"ru": "Произошла ошибка при создании брони. Пожалуйста, попробуйте ещё раз.\nЕсли проблема повторяется, свяжитесь с администратором.",
+                                "kk": "Брондау жасау кезінде қате шықты. Қайталап көріңіз.\nҚайталанса — әкімшімен хабарласыңыз."},
+    "no_availability":        {"ru": "К сожалению, свободных слотов на ближайшие 7 дней нет. Пожалуйста, свяжитесь с администратором.",
+                                "kk": "Өкінішке орай, келесі 7 күнде бос слот жоқ. Әкімшімен хабарласыңыз."},
+    "booking_pending":        {"ru": "📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 {players} игроков\n👤 {name}\n\n⏳ Статус: ожидает оплаты\n\nДля подтверждения брони оплатите по ссылке:\n{pay_url}\n\nПосле оплаты отправьте PDF-чек из Kaspi сюда в чат — и мы сразу подтвердим вашу бронь. 🙏\n\n⚠️ Если оплата не поступит в течение 1 часа — бронь будет автоматически отменена.",
+                                "kk": "📋 Брондау тіркелді, бірақ әлі расталмады!\n\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 {players} ойыншы\n👤 {name}\n\n⏳ Күй: төлем күтілуде\n\nБрондауды растау үшін төлем жасаңыз:\n{pay_url}\n\nТөлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n⚠️ 1 сағат ішінде төлем келмесе — бронь автоматты түрде жойылады."},
+    "field_label":            {"ru": "Поле", "kk": "Алаң"},
+}
+
+
+def _t(lang: str, key: str, **fmt) -> str:
+    val = _T[key].get(lang) or _T[key]["ru"]
+    return val.format(**fmt) if fmt else val
 
 
 def _save(chat_id: str, state: str, params: dict) -> None:
@@ -50,6 +112,15 @@ _MY_BOOKING_KW = {
     "менің брон", "менің уақыт", "менің жазба",
 }
 
+# Substrings (lowercased) that mean "user wants to make a new booking right now".
+# Checked AFTER _MY_BOOKING_KW so phrases like "я забронировал" stay on my_booking.
+_NEW_BOOKING_KW = (
+    "забронир", "хочу забронир", "хочу поле", "нужно поле", "снять поле",
+    "арендова", "хочу играть",
+    "брондау", "брон қой", "бронь қой", "қояйын", "брондамақ",
+    "алаң жалда",
+)
+
 # Substrings (matched in lowercased message) that abort an in-flight booking
 # session at any step. Strong cancel intents only — short tokens like "нет" are
 # intentionally excluded because they're valid step_confirm inputs.
@@ -67,16 +138,18 @@ def _is_cancel_intent(text: str) -> bool:
 
 def detect_intent(text: str) -> str | None:
     """
-    Detects only my_booking intent — requires injecting user-specific data
-    the LLM cannot fetch on its own.
+    Deterministic intent detection. my_booking is checked first so phrases like
+    "я забронировал" don't get routed to new_booking by the "забронир" substring.
 
-    new_booking: handled by LLM via [BOOK] tag.
-    availability: handled by LLM with live slot data injected in message_handler.py.
+    availability: still handled by the LLM with injected slot data.
     """
     lower = text.lower()
     for kw in _MY_BOOKING_KW:
         if kw in lower:
             return "my_booking"
+    for kw in _NEW_BOOKING_KW:
+        if kw in lower:
+            return "new_booking"
     return None
 
 
@@ -84,21 +157,23 @@ def detect_intent(text: str) -> str | None:
 # Public entry points
 # ---------------------------------------------------------------------------
 
-def start_booking_flow(chat_id: str, sender_phone: str) -> str:
+def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru") -> str:
     """
     Create a new booking session (step_date) and return the date-selection prompt.
-    Called from message_handler when LLM reply contains [BOOK].
+    Called from message_handler when the LLM calls the start_booking tool, or
+    directly from handle_booking_turn on a deterministic booking-intent match.
+    `lang` is stored in the session so every subsequent step reuses it.
     """
     free = booking_logic.get_free_windows()
     available_days = sorted({w["date"] for w in free})
     logger.info(
-        "[BOOKING:start_flow] chat_id=%s free_windows=%d available_days=%s",
-        chat_id, len(free), available_days,
+        "[BOOKING:start_flow] chat_id=%s lang=%s free_windows=%d available_days=%s",
+        chat_id, lang, len(free), available_days,
     )
 
     if not available_days:
         logger.warning("[BOOKING:start_flow] No available days — aborting flow")
-        return "К сожалению, свободных слотов на ближайшие 7 дней нет. Пожалуйста, свяжитесь с администратором."
+        return _t(lang, "no_availability")
 
     client_token = str(uuid.uuid4())
     draft = booking_service.create_draft(chat_id, sender_phone, client_token)
@@ -112,13 +187,14 @@ def start_booking_flow(chat_id: str, sender_phone: str) -> str:
             "available_days": [str(d) for d in available_days],
             "booking_id": booking_id,
             "client_token": client_token,
+            "lang": lang,
         },
     )
     logger.info(
         "[BOOKING:start_flow] Draft booking_id=%d created — step_date. Showing %d days",
         booking_id, len(available_days),
     )
-    return _ask_date(available_days)
+    return _ask_date(available_days, lang)
 
 
 def handle_booking_turn(
@@ -162,7 +238,7 @@ def handle_booking_turn(
         if "booking_id" not in params:
             logger.warning("[BOOKING] Stale session without booking_id — restarting flow for %s", chat_id)
             postgres.delete_session(chat_id)
-            return start_booking_flow(chat_id, sender_phone)
+            return start_booking_flow(chat_id, sender_phone, _detect_lang(user_text))
 
         if state == "step_date":
             return _handle_step_date(chat_id, user_text, params)
@@ -194,9 +270,14 @@ def handle_booking_turn(
         ctx = booking_logic.format_user_booking_context(bookings)
         return get_booking_reply(user_text, ctx)
 
-    # All other intents (including new_booking and availability) fall through
-    # to the RAG/LLM pipeline. The LLM emits [BOOK] to start a booking flow,
-    # and receives live availability data injected by message_handler.py.
+    if intent == "new_booking":
+        lang = _detect_lang(user_text)
+        logger.info("[BOOKING] new_booking intent — starting deterministic flow (lang=%s)", lang)
+        return start_booking_flow(chat_id, sender_phone, lang)
+
+    # availability and other intents fall through to the RAG/LLM pipeline.
+    # The LLM may still call the start_booking tool for phrasings the keyword
+    # list doesn't catch.
     return None
 
 
@@ -205,6 +286,7 @@ def handle_booking_turn(
 # ---------------------------------------------------------------------------
 
 def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
+    lang = params.get("lang", "ru")
     # Always recompute available_days here so a session that crossed midnight
     # doesn't keep offering yesterday's date.
     free_now = booking_logic.get_free_windows()
@@ -243,7 +325,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
             "[BOOKING:step_date] REJECTED — chosen=%s not in available_days=%s",
             chosen, available_days,
         )
-        return _ask_date(available_days) + "\n\nПожалуйста, введите номер из списка."
+        return _ask_date(available_days, lang) + "\n\n" + _t(lang, "ask_date_invalid")
 
     free = booking_logic.get_free_windows()
     day_windows = [w for w in free if w["date"] == chosen]
@@ -255,10 +337,11 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
     params["date"] = str(chosen)
     booking_service.update_draft(params["booking_id"], date=str(chosen))
     _save(chat_id, "step_time", params)
-    return _ask_time(chosen, day_windows)
+    return _ask_time(chosen, day_windows, lang)
 
 
 def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
+    lang = params.get("lang", "ru")
     chosen_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
     free        = booking_logic.get_free_windows()
     day_windows = [w for w in free if w["date"] == chosen_date]
@@ -272,12 +355,16 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
     m = _TIME_RANGE_RE.search(user_text)
     if not m:
         logger.info("[BOOKING:step_time] REJECTED — regex did not match user_text=%.80s", user_text)
-        return _ask_time(chosen_date, day_windows) + "\n\nНе распознал время. Пример: *10:00 до 12:00*"
+        return _ask_time(chosen_date, day_windows, lang) + "\n\n" + _t(lang, "time_not_recognized")
 
     time_start, time_end = m.group(1), m.group(2)
     time_start = _pad_time(time_start)
     time_end   = _pad_time(time_end)
     logger.info("[BOOKING:step_time] parsed time_start=%s time_end=%s", time_start, time_end)
+
+    if time_start >= time_end:
+        logger.info("[BOOKING:step_time] REJECTED — inverted range %s >= %s", time_start, time_end)
+        return _ask_time(chosen_date, day_windows, lang) + "\n\n" + _t(lang, "time_inverted")
 
     week_start, week_end = booking_logic.get_week_range()
     booked = booking_logic.get_all_booked(week_start, week_end)
@@ -299,9 +386,9 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
     if not free_fields:
         logger.info("[BOOKING:step_time] REJECTED — no free fields for requested time")
         return (
-            f"К сожалению, нет свободных полей с {time_start} до {time_end}. "
-            f"Выберите другое время.\n\n"
-            + _ask_time(chosen_date, day_windows)
+            _t(lang, "no_free_fields", start=time_start, end=time_end)
+            + "\n\n"
+            + _ask_time(chosen_date, day_windows, lang)
         )
 
     params["time_start"] = time_start
@@ -317,15 +404,16 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
             field=f["id"], format=f["format"],
         )
         _save(chat_id, "step_players", params)
-        return f"Поле {f['id']} ({f['format']}) — свободно ✅\n\nСколько игроков будет?"
+        return _t(lang, "field_free_advance", id=f["id"], fmt=f["format"])
 
     logger.info("[BOOKING:step_time] multiple free fields=%s — advancing to step_field", [f["id"] for f in free_fields])
     booking_service.update_draft(params["booking_id"], time_start=time_start, time_end=time_end)
     _save(chat_id, "step_field", params)
-    return _ask_field(free_fields)
+    return _ask_field(free_fields, lang)
 
 
 def _handle_step_field(chat_id: str, user_text: str, params: dict) -> str:
+    lang = params.get("lang", "ru")
     week_start, week_end = booking_logic.get_week_range()
     booked      = booking_logic.get_all_booked(week_start, week_end)
     free_fields = [
@@ -344,7 +432,7 @@ def _handle_step_field(chat_id: str, user_text: str, params: dict) -> str:
         )
 
     if not chosen_field:
-        return _ask_field(free_fields) + "\n\nПожалуйста, введите номер поля."
+        return _ask_field(free_fields, lang) + "\n\n" + _t(lang, "ask_field_invalid")
 
     params["field"]  = chosen_field["id"]
     params["format"] = chosen_field["format"]
@@ -352,20 +440,21 @@ def _handle_step_field(chat_id: str, user_text: str, params: dict) -> str:
         params["booking_id"], field=chosen_field["id"], format=chosen_field["format"]
     )
     _save(chat_id, "step_players", params)
-    return "Сколько игроков будет?"
+    return _t(lang, "ask_players")
 
 
 def _handle_step_players(chat_id: str, user_text: str, params: dict) -> str:
+    lang = params.get("lang", "ru")
     m = re.search(r"\b(\d+)\b", user_text)
     if not m:
         logger.info("[BOOKING:step_players] REJECTED — no digit found in user_text=%.80s", user_text)
-        return "Пожалуйста, введите количество игроков (например: *8*)."
+        return _t(lang, "ask_players_invalid")
 
     params["players"] = int(m.group(1))
     logger.info("[BOOKING:step_players] players=%d — advancing to step_name", params["players"])
     booking_service.update_draft(params["booking_id"], players=params["players"])
     _save(chat_id, "step_name", params)
-    return "Укажите ваше имя:"
+    return _t(lang, "ask_name")
 
 
 def _handle_step_name(chat_id: str, user_text: str, params: dict) -> str:
@@ -388,6 +477,8 @@ def _handle_step_confirm(
     _YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын", "👍"}
     _NO  = {"нет", "жоқ", "no", "отмена", "изменить", "өзгерт", "болмайды", "бастапқы"}
 
+    lang = params.get("lang", "ru")
+
     if any(w in lower for w in _YES):
         logger.info("[BOOKING:step_confirm] YES received — confirming booking. params=%s", params)
         return _confirm_booking(chat_id, sender_phone, params)
@@ -399,13 +490,10 @@ def _handle_step_confirm(
                 params["booking_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined"
             )
         postgres.delete_session(chat_id)
-        return (
-            "Бронирование отменено. Если захотите снова — просто напишите, "
-            "что хотите забронировать поле. 🙂"
-        )
+        return _t(lang, "declined")
 
     logger.info("[BOOKING:step_confirm] unrecognised response=%.80s — re-showing summary", user_text)
-    return _format_summary(params) + "\n\nПодтвердить бронь? Ответьте *да* или *нет*."
+    return _format_summary(params) + "\n\n" + _t(lang, "confirm_reshow")
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +501,7 @@ def _handle_step_confirm(
 # ---------------------------------------------------------------------------
 
 def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
+    lang           = params.get("lang", "ru")
     time_start_str = params["time_start"]
     time_end_str   = params["time_end"]
     field          = int(params["field"])
@@ -429,16 +518,9 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
         if res["code"] == "SLOT_TAKEN":
             logger.warning("[BOOKING:confirm] slot taken mid-flow for booking_id=%d", booking_id)
             free = booking_logic.get_free_windows()
-            return (
-                "К сожалению, этот слот только что заняли. "
-                "Начните бронирование заново.\n\n"
-                + booking_logic.format_availability_context(free)
-            )
+            return _t(lang, "slot_taken") + booking_logic.format_availability_context(free)
         logger.error("[BOOKING:confirm] request_payment failed: %s", res)
-        return (
-            "Произошла ошибка при создании брони. Пожалуйста, попробуйте ещё раз.\n"
-            "Если проблема повторяется, свяжитесь с администратором."
-        )
+        return _t(lang, "request_payment_error")
 
     logger.info("[BOOKING:confirm] booking_id=%d → awaiting_payment", booking_id)
 
@@ -464,28 +546,17 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
     threading.Thread(target=_write_to_sheets, daemon=True).start()
     postgres.delete_session(chat_id)
 
-    date_display = _fmt_date(params["date"])
-    return (
-        f"📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n"
-        f"📅 {date_display}\n"
-        f"⏰ {time_start_str}–{time_end_str}\n"
-        f"⚽ Поле {field} ({params['format']})\n"
-        f"👥 {params.get('players')} игроков\n"
-        f"👤 {params.get('customer_name', '')}\n\n"
-        f"⏳ Статус: ожидает оплаты\n\n"
-        f"Для подтверждения брони оплатите по ссылке:\n"
-        f"{config.KASPI_PAYMENT_URL}\n\n"
-        f"После оплаты отправьте PDF-чек из Kaspi сюда в чат — "
-        f"и мы сразу подтвердим вашу бронь. 🙏\n\n"
-        f"⚠️ Если оплата не поступит в течение 1 часа — бронь будет автоматически отменена.\n\n"
-        f"— — —\n"
-        f"📋 Брондау тіркелді, бірақ әлі расталмады!\n\n"
-        f"⏳ Күй: төлем күтілуде\n\n"
-        f"Брондауды растау үшін төлем жасаңыз:\n"
-        f"{config.KASPI_PAYMENT_URL}\n\n"
-        f"Төлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — "
-        f"брондауыңызды бірден растаймыз. 🙏\n\n"
-        f"⚠️ 1 сағат ішінде төлем келмесе — бронь автоматты түрде жойылады."
+    return _t(
+        lang,
+        "booking_pending",
+        date=_fmt_date(params["date"], lang),
+        start=time_start_str,
+        end=time_end_str,
+        field=field,
+        fmt=params["format"],
+        players=params.get("players"),
+        name=params.get("customer_name", ""),
+        pay_url=config.KASPI_PAYMENT_URL,
     )
 
 
@@ -493,16 +564,17 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
 # Prompt builders
 # ---------------------------------------------------------------------------
 
-def _ask_date(available_days: list[date]) -> str:
-    lines = ["📅 Выберите дату (введите номер):"]
+def _ask_date(available_days: list[date], lang: str = "ru") -> str:
+    lines = [_t(lang, "ask_date_header")]
     for i, d in enumerate(available_days, 1):
-        lines.append(f"  {i}. {_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m.%Y')}")
+        lines.append(f"  {i}. {_WEEKDAY[lang][d.weekday()]} {d.strftime('%d.%m.%Y')}")
     return "\n".join(lines)
 
 
-def _ask_time(chosen_date: date, day_windows: list[dict]) -> str:
-    lines = [f"📅 {_WEEKDAY_RU[chosen_date.weekday()]} {chosen_date.strftime('%d.%m.%Y')}\n"]
-    lines.append("Свободное время по полям:")
+def _ask_time(chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
+    field_label = _t(lang, "field_label")
+    lines = [f"📅 {_WEEKDAY[lang][chosen_date.weekday()]} {chosen_date.strftime('%d.%m.%Y')}\n"]
+    lines.append(_t(lang, "ask_time_header"))
 
     by_field: dict = {}
     for w in day_windows:
@@ -514,29 +586,33 @@ def _ask_time(chosen_date: date, day_windows: list[dict]) -> str:
             f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
             for w in windows
         )
-        lines.append(f"  Поле {field_id} ({fmt}): {range_str}")
+        lines.append(f"  {field_label} {field_id} ({fmt}): {range_str}")
 
-    lines.append("\nВведите время начала и окончания:")
-    lines.append("Например: *10:00 до 12:00* или *10:20-11:45*")
+    lines.append("\n" + _t(lang, "ask_time_prompt"))
+    lines.append(_t(lang, "ask_time_example"))
     return "\n".join(lines)
 
 
-def _ask_field(free_fields: list[dict]) -> str:
-    lines = ["Выберите поле:"]
+def _ask_field(free_fields: list[dict], lang: str = "ru") -> str:
+    field_label = _t(lang, "field_label")
+    lines = [_t(lang, "ask_field_header")]
     for f in free_fields:
-        lines.append(f"  {f['id']}. Поле {f['id']} ({f['format']})")
+        lines.append(f"  {f['id']}. {field_label} {f['id']} ({f['format']})")
     return "\n".join(lines)
 
 
 def _format_summary(params: dict) -> str:
-    return (
-        f"📋 Детали брони:\n"
-        f"📅 {_fmt_date(params.get('date', ''))}\n"
-        f"⏰ {params.get('time_start', '?')}–{params.get('time_end', '?')}\n"
-        f"⚽ Поле {params.get('field', '?')} ({params.get('format', '?')})\n"
-        f"👥 Игроков: {params.get('players', '?')}\n"
-        f"👤 Имя: {params.get('customer_name', '?')}\n\n"
-        f"Подтвердить? Ответьте *да* или *нет*."
+    lang = params.get("lang", "ru")
+    return _t(
+        lang,
+        "summary",
+        date=_fmt_date(params.get("date", ""), lang),
+        start=params.get("time_start", "?"),
+        end=params.get("time_end", "?"),
+        field=params.get("field", "?"),
+        fmt=params.get("format", "?"),
+        players=params.get("players", "?"),
+        name=params.get("customer_name", "?"),
     )
 
 
@@ -544,10 +620,10 @@ def _format_summary(params: dict) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fmt_date(date_str: str) -> str:
+def _fmt_date(date_str: str, lang: str = "ru") -> str:
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        return f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m.%Y')}"
+        return f"{_WEEKDAY[lang][d.weekday()]} {d.strftime('%d.%m.%Y')}"
     except (ValueError, TypeError):
         return date_str or "?"
 

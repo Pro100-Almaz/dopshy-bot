@@ -16,6 +16,16 @@ def _parse_time(t: str) -> time:
     return datetime.strptime(t, "%H:%M").time()
 
 
+def _snap_up(t: time, step_minutes: int) -> time:
+    """Round `t` up to the next multiple of `step_minutes` from midnight."""
+    if step_minutes <= 0:
+        return t
+    total = t.hour * 60 + t.minute + (1 if t.second or t.microsecond else 0)
+    snapped = ((total + step_minutes - 1) // step_minutes) * step_minutes
+    snapped = min(snapped, 23 * 60 + 59)
+    return time(snapped // 60, snapped % 60)
+
+
 def get_week_range() -> tuple[date, date]:
     today = today_almaty()
     return today, today + timedelta(days=6)
@@ -99,8 +109,13 @@ def get_free_windows() -> list[dict]:
                 key=lambda b: datetime.strptime(str(b["time_start"])[:5], "%H:%M").time(),
             )
 
-            # For today, don't show time that has already passed
-            floor = max(open_t, now_time) if current == today else open_t
+            # For today, don't show time that has already passed. Snap up to the
+            # next slot boundary so the LLM/UI never offers a non-aligned start
+            # (e.g. 10:47 → 11:00 when slot duration is 60 min).
+            if current == today:
+                floor = max(open_t, _snap_up(now_time, config.BOOKING_SLOT_DURATION))
+            else:
+                floor = open_t
             cursor = floor
 
             for b in day_booked:

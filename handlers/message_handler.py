@@ -10,7 +10,7 @@ from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
-from handlers.booking_session import handle_booking_turn, start_booking_flow
+from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
 from integrations import booking_service, payment_validation, postgres, sheets
 import config
 
@@ -139,8 +139,9 @@ def handle_incoming_message(payload: dict) -> None:
 
         # 5. LLM called start_booking tool — launch deterministic booking flow
         if should_book:
-            logger.info("[BOOKING] LLM called start_booking tool — starting booking flow")
-            booking_prompt = start_booking_flow(chat_id, sender_id)
+            lang = _detect_lang(user_text)
+            logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
+            booking_prompt = start_booking_flow(chat_id, sender_id, lang)
             reply = (reply + "\n\n" + booking_prompt) if reply else booking_prompt
 
         # 6. Save to history
