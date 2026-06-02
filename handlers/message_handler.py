@@ -18,6 +18,65 @@ logger = logging.getLogger(__name__)
 
 RESET_COMMANDS = {"/reset", "/сброс", "/тазалау", "сброс", "reset"}
 
+# Distinct user-facing messages per payment_validation rejection code.
+# Format placeholders {paid} and {required} are filled in for the "amount" code.
+_PAYMENT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
+    "unreadable": (
+        "❌ Не удалось распознать чек.\n"
+        "Отправьте, пожалуйста, официальный PDF-чек из приложения Kaspi или Halyk "
+        "(не скриншот и не фото).",
+        "❌ Чекті тану мүмкін болмады.\n"
+        "Kaspi немесе Halyk қосымшасынан ресми PDF-чекті жіберіңіз "
+        "(скриншот немесе фото емес).",
+    ),
+    "recipient": (
+        "❌ Платёж отправлен не на счёт «Допши».\n"
+        "Проверьте, что получатель — это БИН/телефон из инструкции к оплате, "
+        "и отправьте новый чек.",
+        "❌ Төлем «Допши» шотына түспеген.\n"
+        "Алушы — төлем нұсқаулығындағы БСН/телефон екеніне көз жеткізіп, "
+        "жаңа чек жіберіңіз.",
+    ),
+    "amount": (
+        "❌ Сумма в чеке меньше необходимой предоплаты ({paid}₸ < {required}₸).\n"
+        "Доплатите разницу и отправьте новый чек, либо чек на полную сумму.",
+        "❌ Чектегі сома қажетті алдын ала төлемнен кем ({paid}₸ < {required}₸).\n"
+        "Айырмашылықты төлеп жаңа чек жіберіңіз немесе толық сомаға чек жіберіңіз.",
+    ),
+    "date": (
+        "❌ Чек устарел или дата некорректна.\n"
+        "Отправьте свежий чек (не старше 24 часов).",
+        "❌ Чек ескірген немесе күні дұрыс емес.\n"
+        "Жаңа чек жіберіңіз (24 сағаттан аспаған).",
+    ),
+}
+
+_PAYMENT_REJECT_FOOTER_RU = (
+    "Вы можете отправить корректный чек ещё раз, пока бронь не истекла. "
+    "Если нужна помощь — свяжитесь с администратором."
+)
+_PAYMENT_REJECT_FOOTER_KK = (
+    "Бронь мерзімі біткенше дұрыс чекті қайта жіберуге болады. "
+    "Қажет болса — әкімшімен хабарласыңыз."
+)
+
+
+def _format_payment_reject_message(
+    code: str, parsed: dict, booking: dict
+) -> str:
+    """Build the bilingual user message for a rejected payment receipt."""
+    ru, kk = _PAYMENT_REJECT_MESSAGES.get(code, _PAYMENT_REJECT_MESSAGES["unreadable"])
+    if code == "amount":
+        paid = int(parsed.get("amount") or 0)
+        required = int(float(booking.get("price_total") or 0) * config.PAYMENT_MIN_FRACTION)
+        ru = ru.format(paid=paid, required=required)
+        kk = kk.format(paid=paid, required=required)
+    return (
+        f"{ru}\n\n{_PAYMENT_REJECT_FOOTER_RU}\n\n"
+        f"— — —\n\n"
+        f"{kk}\n\n{_PAYMENT_REJECT_FOOTER_KK}"
+    )
+
 
 def handle_incoming_message(payload: dict) -> None:
     """
@@ -233,12 +292,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
         logger.info("[PAYMENT] Booking id=%d receipt rejected: %s", booking["id"], result["code"])
         send_text_message(
             phone_number_id, sender_phone,
-            f"❌ Чек не принят: {result['reason']}\n"
-            f"Вы можете отправить корректный чек ещё раз, пока бронь не истекла. "
-            f"Если нужна помощь — свяжитесь с администратором.\n\n"
-            f"❌ Чек қабылданбады: {result['reason']}\n"
-            f"Бронь мерзімі біткенше дұрыс чекті қайта жіберуге болады. "
-            f"Қажет болса — әкімшімен хабарласыңыз.",
+            _format_payment_reject_message(result["code"], result["parsed"], booking),
         )
         return
 

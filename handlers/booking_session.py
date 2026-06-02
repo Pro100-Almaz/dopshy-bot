@@ -106,11 +106,28 @@ _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2
 # Read-only intent keywords (keep for quick queries without starting a session)
 # ---------------------------------------------------------------------------
 
-_MY_BOOKING_KW = {
-    "моя бронь", "мой слот", "моё время", "мое время", "я забронировал",
-    "мне забронировали", "моя игра", "моя запись",
-    "менің брон", "менің уақыт", "менің жазба",
-}
+# Substring stems for "show me my existing booking". Stems are intentionally
+# short so Russian declensions (моя/мою/моей/моих) and Kazakh possessives
+# (брондауым/брондауыма) are all caught with a single `in` check.
+# Checked BEFORE _NEW_BOOKING_KW so past-tense "я забронировал" doesn't get
+# misrouted by the "забронир" stem in new_booking.
+_MY_BOOKING_KW = (
+    # Russian — possessive + key noun (covers multiple declensions)
+    "моя брон", "мою брон", "моей брон", "моих брон", "мои брон", "мой брон",
+    "мой слот", "моего слот", "моих слот",
+    "моё врем", "мое врем", "моего врем",
+    "моя игр", "мою игр", "моей игр",
+    "моя зап", "моей зап", "моих зап",
+    "мой заказ", "моего заказ",
+    # Past-tense "I already booked" / "they booked for me" forms
+    "я забронир", "мы забронир", "мне забронир", "нам забронир",
+    # Verb-led queries about an existing booking
+    "покажи брон", "посмотреть брон", "проверить брон", "статус брон",
+    "где брон", "когда брон", "что с брон",
+    # Kazakh
+    "менің брон", "менің уақыт", "менің жазб",
+    "брондауым", "брондауыма", "брондауымды", "брондауымның",
+)
 
 # Substrings (lowercased) that mean "user wants to make a new booking right now".
 # Checked AFTER _MY_BOOKING_KW so phrases like "я забронировал" stay on my_booking.
