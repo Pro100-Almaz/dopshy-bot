@@ -14,6 +14,7 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 (scoped to awaiting_payment + confirmed), not by application checks.
 """
 
+import json
 import logging
 from zoneinfo import ZoneInfo
 
@@ -247,6 +248,172 @@ def cancel_booking(booking_id: int, actor_type: str = "whatsapp",
     if not row:
         return _err("NOT_FOUND", "Бронь не найдена.")
     return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+
+
+# Fields a client may patch via the self-service edit flow.
+_CLIENT_EDIT_FIELDS = {"date", "time_start", "time_end", "field", "players", "customer_name"}
+# Edits closer than this to start_at must go through a manager.
+_CLIENT_EDIT_WINDOW_HOURS = 48
+
+
+def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -> dict:
+    """Client self-service edit of a future awaiting_payment / confirmed booking.
+
+    Implemented as cancel-old + insert-new in one transaction so the existing
+    `bookings_no_overlap` EXCLUDE constraint catches slot clashes atomically.
+
+    Rules:
+      - state ∈ {awaiting_payment, confirmed}                  → else INVALID_STATE
+      - start_at > NOW() + 48 hours                            → else EDIT_WINDOW_CLOSED
+      - predecessor_booking_id IS NULL on the source row       → else ALREADY_EDITED
+      - At least one field in `patch` actually changes a value → else NO_CHANGE
+      - New (field, time-range) doesn't clash with another     → else SLOT_TAKEN
+
+    On success: old row → state=cancelled + client_edited_at=NOW();
+    new row → state preserved from old (so paid bookings stay paid),
+    predecessor_booking_id = old.id, payment rows re-pointed to the new id,
+    price_total recomputed from the new (field × duration).
+    """
+    diff = {k: v for k, v in patch.items() if k in _CLIENT_EDIT_FIELDS and v is not None}
+    if not diff:
+        return _err("NO_CHANGE", "Не указано, что именно изменить.")
+
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, phone, date, time_start, time_end, field, format, "
+                    "       players, customer_name, notes, state, price_total, "
+                    "       reserved_until, source, predecessor_booking_id, start_at, "
+                    "       start_at > NOW() + make_interval(hours => %s) AS in_window "
+                    "FROM bookings WHERE id = %s FOR UPDATE",
+                    (_CLIENT_EDIT_WINDOW_HOURS, booking_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return _err("NOT_FOUND", "Бронь не найдена.")
+                if row["state"] not in ("awaiting_payment", "confirmed"):
+                    return _err("INVALID_STATE", "Эту бронь уже нельзя изменить.")
+                if not row["in_window"]:
+                    return _err(
+                        "EDIT_WINDOW_CLOSED",
+                        "До игры меньше 48 часов — изменить может только администратор.",
+                    )
+                if row["predecessor_booking_id"] is not None:
+                    return _err(
+                        "ALREADY_EDITED",
+                        "Эту бронь уже один раз меняли. Следующее изменение — через администратора.",
+                    )
+
+                # Merge the diff onto the current row to compute the new slot.
+                new_date    = diff.get("date",          str(row["date"]))
+                new_ts      = diff.get("time_start",    str(row["time_start"])[:5])
+                new_te      = diff.get("time_end",      str(row["time_end"])[:5])
+                new_field   = int(diff.get("field",     row["field"]))
+                new_players = diff.get("players",       row["players"])
+                new_name    = diff.get("customer_name", row["customer_name"])
+
+                old_snap = {
+                    "date":          str(row["date"]),
+                    "time_start":    str(row["time_start"])[:5],
+                    "time_end":      str(row["time_end"])[:5],
+                    "field":         row["field"],
+                    "players":       row["players"],
+                    "customer_name": row["customer_name"],
+                }
+                new_snap = {
+                    "date":          new_date,
+                    "time_start":    new_ts,
+                    "time_end":      new_te,
+                    "field":         new_field,
+                    "players":       new_players,
+                    "customer_name": new_name,
+                }
+                if old_snap == new_snap:
+                    return _err("NO_CHANGE", "Детали брони не изменились.")
+
+                # Format lookup for the (possibly new) field.
+                conf = next((f for f in config.BOOKING_FIELDS if f["id"] == new_field), None)
+                new_format = conf["format"] if conf else row["format"]
+
+                # 1) Cancel the old row. This drops it out of the EXCLUDE
+                #    constraint's WHERE clause (which is scoped to
+                #    awaiting_payment + confirmed) so the new INSERT can take
+                #    the same slot — unless a third booking already holds it.
+                cur.execute(
+                    "UPDATE bookings SET state = 'cancelled', "
+                    "  client_edited_at = NOW(), updated_at = NOW() "
+                    "WHERE id = %s",
+                    (booking_id,),
+                )
+                _record_event(
+                    cur, booking_id, "client_edit_cancelled", "whatsapp", actor_id,
+                    note=json.dumps({"from": old_snap, "to": new_snap},
+                                    ensure_ascii=False, default=str),
+                )
+
+                # 2) Insert the new row with state preserved (confirmed →
+                #    confirmed, awaiting_payment → awaiting_payment with the
+                #    original reserved_until). price_total is recomputed using
+                #    the same formula as request_payment so a field-format
+                #    change is priced correctly.
+                cur.execute(
+                    "INSERT INTO bookings "
+                    "  (phone, customer_name, date, time_start, time_end, field, format, "
+                    "   players, notes, state, source, client_token, predecessor_booking_id, "
+                    "   reserved_until, start_at, end_at, price_total) "
+                    "VALUES "
+                    "  (%s, %s, %s::date, %s::time, %s::time, %s, %s, "
+                    "   %s, %s, %s, %s, gen_random_uuid(), %s, "
+                    "   %s, "
+                    "   (%s::date + %s::time) AT TIME ZONE %s, "
+                    "   (%s::date + %s::time) AT TIME ZONE %s, "
+                    "   (SELECT price_per_hour FROM fields WHERE id = %s) "
+                    "   * (EXTRACT(EPOCH FROM (%s::time - %s::time)) / 3600.0)) "
+                    "RETURNING id",
+                    (row["phone"], new_name, new_date, new_ts, new_te,
+                     new_field, new_format,
+                     new_players, row["notes"], row["state"], row["source"], booking_id,
+                     row["reserved_until"],
+                     new_date, new_ts, config.BOOKING_TIMEZONE,
+                     new_date, new_te, config.BOOKING_TIMEZONE,
+                     new_field, new_te, new_ts),
+                )
+                new_id = cur.fetchone()["id"]
+                _record_event(
+                    cur, new_id, "client_edited", "whatsapp", actor_id,
+                    note=json.dumps({"from": old_snap, "to": new_snap,
+                                     "predecessor_id": booking_id},
+                                    ensure_ascii=False, default=str),
+                )
+
+                # 3) Re-point payment rows onto the new booking so a confirmed
+                #    edit keeps its payment linkage and the receipt UNIQUE
+                #    index still protects against re-use of the same receipt.
+                cur.execute(
+                    "UPDATE payments SET booking_id = %s WHERE booking_id = %s",
+                    (new_id, booking_id),
+                )
+
+                cur.execute(
+                    "SELECT id, phone, customer_name, date, time_start, time_end, "
+                    "       field, format, players, state, price_total "
+                    "FROM bookings WHERE id = %s",
+                    (new_id,),
+                )
+                new_booking = dict(cur.fetchone())
+
+    except psycopg2.errors.ExclusionViolation:
+        logger.info("[BOOKING_SERVICE] client_edit_booking id=%d — new slot taken", booking_id)
+        return _err("SLOT_TAKEN", "Это время уже занято — выберите другое.")
+
+    return _ok({
+        "booking_id":     new_id,
+        "predecessor_id": booking_id,
+        "from":           old_snap,
+        "to":             new_snap,
+        "new_booking":    new_booking,
+    })
 
 
 _MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total"}

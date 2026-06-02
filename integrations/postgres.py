@@ -81,6 +81,29 @@ def get_user_upcoming_bookings(phone: str) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+def get_user_editable_bookings(phone: str) -> list[dict]:
+    """Bookings this client could potentially edit (future, slot-holding state).
+
+    The 48h window + once-only checks live in booking_service.client_edit_booking
+    so callers see *all* editable-shaped rows here, including ones that the
+    service layer will then reject. This avoids the handler having to duplicate
+    policy when it disambiguates between multiple bookings.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, date, time_start, time_end, field, format, players,
+                       customer_name, state, start_at, client_edited_at,
+                       predecessor_booking_id
+                FROM bookings
+                WHERE phone = %s
+                  AND state IN ('awaiting_payment', 'confirmed')
+                  AND start_at > NOW()
+                ORDER BY start_at
+            """, (phone,))
+            return [dict(r) for r in cur.fetchall()]
+
+
 def get_awaiting_payment_booking(phone: str) -> dict | None:
     """Return the most recent awaiting_payment booking for this phone."""
     with _conn() as conn:

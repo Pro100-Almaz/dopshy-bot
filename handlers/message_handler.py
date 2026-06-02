@@ -11,6 +11,7 @@ from chat.llm import get_ai_response
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
+from handlers.edit_booking import handle_edit_request
 from integrations import booking_service, payment_validation, postgres, sheets
 import config
 
@@ -187,21 +188,28 @@ def handle_incoming_message(payload: dict) -> None:
         logger.info("[LLM] History length: %d messages", len(history))
 
         # 4. Generate response
-        reply, should_book = get_ai_response(
+        reply, tool_call = get_ai_response(
             phone_number_id=phone_number_id,
             chat_id=chat_id,
             user_message=user_text,
             history=history,
             context=context,
         )
-        logger.info("[LLM] Raw reply (%.120s) | should_book=%s", reply, should_book)
+        logger.info("[LLM] Raw reply (%.120s) | tool_call=%s", reply, tool_call)
 
-        # 5. LLM called start_booking tool — launch deterministic booking flow
-        if should_book:
-            lang = _detect_lang(user_text)
-            logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
-            booking_prompt = start_booking_flow(chat_id, sender_id, lang)
-            reply = (reply + "\n\n" + booking_prompt) if reply else booking_prompt
+        # 5. LLM may have asked us to launch a deterministic sub-flow.
+        if tool_call:
+            if tool_call["name"] == "start_booking":
+                lang = _detect_lang(user_text)
+                logger.info(
+                    "[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang
+                )
+                booking_prompt = start_booking_flow(chat_id, sender_id, lang)
+                reply = (reply + "\n\n" + booking_prompt) if reply else booking_prompt
+            elif tool_call["name"] == "edit_booking":
+                logger.info("[EDIT] LLM called edit_booking tool — diff=%s", tool_call["args"])
+                edit_reply = handle_edit_request(chat_id, sender_id, tool_call["args"])
+                reply = (reply + "\n\n" + edit_reply) if reply else edit_reply
 
         # 6. Save to history
         append_message(chat_id, "user", user_text)
