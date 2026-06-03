@@ -120,6 +120,8 @@ def create_booking():
     if booking_row:
         sheets.upsert_booking_row(booking_row)
 
+    refresh_week_sheet()
+
     return jsonify(res), (200 if res["ok"] else 409)
 
 
@@ -140,6 +142,8 @@ def patch_booking(booking_id: int):
         if booking_row:
             sheets.upsert_booking_row(booking_row)
 
+    refresh_week_sheet()
+
     return jsonify(res), (200 if res["ok"] else 404)
 
 
@@ -152,6 +156,8 @@ def delete_booking(booking_id: int):
         booking_row = postgres.get_booking(booking_id)
         if booking_row:
             sheets.upsert_booking_row(booking_row)
+
+    refresh_week_sheet()
     return jsonify(res), (200 if res["ok"] else 404)
 
 

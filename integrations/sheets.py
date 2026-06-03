@@ -285,11 +285,12 @@ def _build_weekly_sheet(worksheet) -> None:
     requests = []
     requests.append(_get_paint_background_request(worksheet.id, 0, 49, 0, 8, 1, 1, 1))
     requests.append(_get_paint_background_request(worksheet.id, 0, 1, 1, 8, 1, 0.67, 0.1))
+    requests.append(_get_unmerge_request(worksheet.id, 0, 49, 0, 8))
 
     worksheet.spreadsheet.batch_update({'requests': requests})
 
 
-def _get_paint_background_request(worksheet_id, start_row_id, end_row_id, start_col_id, end_col_id, r, g, b):
+def _get_paint_background_request(worksheet_id, start_row_id, end_row_id, start_col_id, end_col_id, r, g, b) -> dict:
     return {
         'repeatCell': {
             "range": {
@@ -306,9 +307,24 @@ def _get_paint_background_request(worksheet_id, start_row_id, end_row_id, start_
                         "green": g,
                         "blue": b
                     },
-                }
+                },
+                "note": "",
             },
-            "fields": "userEnteredFormat.backgroundColor"
+            "fields": "userEnteredFormat.backgroundColor, note"
+        }
+    }
+
+
+def _get_unmerge_request(worksheet_id, start_row_id, end_row_id, start_col_id, end_col_id,) -> dict:
+    return {
+        "unmergeCells": {
+            "range": {
+                "sheetId": worksheet_id,
+                "startRowIndex": start_row_id,
+                "endRowIndex": end_row_id,
+                "startColumnIndex": start_col_id,
+                "endColumnIndex": end_col_id,
+            }
         }
     }
 
@@ -386,6 +402,19 @@ def _paint_booking_start_cells(worksheet, bookings):
                     }
                 },
                 "fields": "note, userEnteredFormat"
+            }
+        })
+
+        requests.append({
+            "mergeCells": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": start_slot_index + 1,
+                    "endRowIndex": end_slot_index + 1,
+                    "startColumnIndex": col - 1,
+                    "endColumnIndex": col
+                },
+                'mergeType': 'MERGE_ALL'
             }
         })
 
