@@ -65,17 +65,12 @@ services:
       - certbot_webroot:/var/www/certbot
     # Obtain a cert on first run (no-op if already valid), then renew every 12h.
     # SERVER_NAME and CERTBOT_EMAIL come from .env so dev and prod share this image.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - >
-        certbot certonly --webroot --webroot-path=/var/www/certbot
-          --email "$$CERTBOT_EMAIL" --agree-tos --no-eff-email --non-interactive
-          -d "$$SERVER_NAME" || true;
-        while true; do
-          sleep 12h;
-          certbot renew --webroot --webroot-path=/var/www/certbot --quiet;
-        done
+    # Single-line shell command on purpose: YAML `>` folding breaks `sh -c` because
+    # continuation lines start with leading spaces and end up being interpreted as
+    # separate shell commands. Override `command: []` so the certbot image's
+    # default `--help` CMD doesn't tag along after our script.
+    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email \"$$CERTBOT_EMAIL\" --agree-tos --no-eff-email --non-interactive -d \"$$SERVER_NAME\" || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
+    command: []
     depends_on:
       - nginx
     restart: unless-stopped
