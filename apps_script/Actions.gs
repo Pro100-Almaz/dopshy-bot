@@ -55,5 +55,5 @@ function refreshFromServer() {
 
   sheet.clearContents();
   sheet.getRange(1, 1, rows.length, header.length).setValues(rows);
-  sheet.toast('Обновлено: ' + (rows.length - 1) + ' броней');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Обновлено: ' + (rows.length - 1) + ' броней');
 }
