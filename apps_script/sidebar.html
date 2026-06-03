@@ -16,8 +16,21 @@
     <label>Поле</label>
     <select id="field"></select>
 
+    <label>Повторить</label>
+    <select id="repeat">
+      <option value="none" selected>Нет</option>
+      <option value="daily">Ежедневно</option>
+      <option value="weekly">Еженедельно</option>
+      <option value="monthly">Ежемесячно</option>
+    </select>
+
     <label>Дата</label>
     <input type="date" id="date">
+
+    <div id="endDateDiv" hidden>
+      <label>Конечная дата</label>
+      <input type="date" id="endDate">
+    </div>
 
     <label>Начало</label>
     <input type="time" id="start" step="300">
@@ -58,13 +71,20 @@
           start: document.getElementById('start').value,
           end: document.getElementById('end').value,
           customer: document.getElementById('customer').value,
-          notes: document.getElementById('notes').value
+          notes: document.getElementById('notes').value,
+          repeat: document.getElementById('repeat').value,
+          endDate: document.getElementById('endDate').value,
         };
         if (!form.field || !form.date || !form.start || !form.end) {
           return show(false, 'Заполните поле, дату и время.');
         }
         if (form.end <= form.start) {
           return show(false, 'Конец должен быть позже начала.');
+        }
+        if (form.repeat !== 'none') {
+            if (!form.endDate || !form.date || form.date >= form.endDate) {
+                return show(false, 'Заполните даты правильно');
+            }
         }
         document.getElementById('submit').disabled = true;
         google.script.run
@@ -78,6 +98,16 @@
           })
           .submitNewBooking(form);
       }
+
+      const endDateDiv = document.getElementById('endDateDiv');
+      const repeatSelect = document.getElementById('repeat');
+      repeatSelect.addEventListener('change', function (e) {
+          if (repeatSelect.value !== 'none') {
+              endDateDiv.style.display = 'block';
+          } else {
+              endDateDiv.style.display = 'none';
+          }
+      });
     </script>
   </body>
 </html>

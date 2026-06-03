@@ -29,10 +29,14 @@ function submitNewBooking(form) {
       time_end: form.end,              // HH:MM
       customer: form.customer || '',
       notes: form.notes || '',
+      repeat: form.repeat || 'none',    // none, daily, weekly, monthly
+      end_date: form.endDate,
       client_token: Utilities.getUuid()
     };
     var res = apiCreateBooking(payload);
     if (!res.ok) return { ok: false, message: res.message || 'Ошибка' };
+
+    refreshFromServer()
 
     var bookingId = res.data.booking_id;
     var sheet = _bookingsSheet();
