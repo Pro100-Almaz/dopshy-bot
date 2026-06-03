@@ -291,7 +291,6 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 for d in dates:
                     d_str = datetime.strftime(d, format="%Y-%m-%d")
-                    client_token = str(uuid.uuid4())
                     cur.execute(
                         "INSERT INTO bookings "
                         "  (phone, customer_name, date, time_start, time_end, field, format, "
@@ -306,6 +305,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                          d_str, time_start, config.BOOKING_TIMEZONE,
                          d_str, time_end, config.BOOKING_TIMEZONE),
                     )
+                    client_token = str(uuid.uuid4())
                     booking_id = cur.fetchone()["id"]
                     _record_event(cur, booking_id, "manager_created", "manager", actor_id)
     except psycopg2.errors.ExclusionViolation:
