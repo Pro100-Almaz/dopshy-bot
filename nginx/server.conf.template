@@ -1,0 +1,66 @@
+server {
+    listen 80;
+    server_name ${SERVER_NAME};
+
+    # Let's Encrypt ACME challenge — keep reachable on HTTP for renewals.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate     /etc/letsencrypt/live/${SERVER_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${SERVER_NAME}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # Receipt PDFs can be a few MB; default 1m is too small.
+    client_max_body_size 16m;
+
+    # Meta requires HTTPS for webhook delivery.
+    location /webhook {
+        proxy_pass         http://bot:5000;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    location /admin/ {
+        proxy_pass         http://bot:5000;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    # Apps Script manager UI calls these endpoints; X-API-Key auth handles
+    # access control, nginx just proxies.
+    location /api/manager/ {
+        proxy_pass         http://bot:5000;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    location /health {
+        proxy_pass http://bot:5000;
+        access_log off;
+    }
+
+    # Everything else is rejected — prevents accidental exposure of internals.
+    location / {
+        return 404;
+    }
+}
