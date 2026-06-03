@@ -1,14 +1,12 @@
 """ChromaDB vector store — document loading and indexing."""
 
-import os
-import glob
 from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.document_loaders import TextLoader, DirectoryLoader
+from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 import config

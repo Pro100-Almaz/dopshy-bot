@@ -1,0 +1,41 @@
+# Dev overrides — layer on top of docker-compose.yml.
+#
+# Use this on the dev server (bot-dev.dopsy.kz) for fast iteration:
+# source is bind-mounted into the container so `git pull` propagates
+# without a rebuild, and gunicorn reloads on file changes.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f bot
+#
+# Or set COMPOSE_FILE once per shell:
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml
+#   docker compose up -d
+
+services:
+  postgres:
+    # Surface Postgres logs in dev for easier debugging.
+    command: ["postgres", "-c", "log_statement=mod", "-c", "log_min_duration_statement=200"]
+
+  bot:
+    # Mount the full source so code changes propagate without a rebuild.
+    # Named volumes for chroma_db and data take precedence over the bind mount.
+    volumes:
+      - ./:/app:rw
+      - chroma_data:/app/chroma_db
+      - bot_data:/app/data
+      - ./documents:/app/documents:ro
+      - ./secrets:/app/secrets:ro
+    # Single-worker + --reload so gunicorn restarts on file changes.
+    command:
+      - gunicorn
+      - app:app
+      - --bind=0.0.0.0:5000
+      - --workers=1
+      - --timeout=60
+      - --access-logfile=-
+      - --reload
+      - --reload-extra-file=/app/migrations
+    environment:
+      LOG_LEVEL: DEBUG
+      PYTHONDONTWRITEBYTECODE: "1"
