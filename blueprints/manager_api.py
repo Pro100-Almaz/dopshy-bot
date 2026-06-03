@@ -20,7 +20,8 @@ from decimal import Decimal
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import booking_service, postgres
+from integrations import booking_service, postgres, sheets
+from integrations.sheets import upsert_booking_row, refresh_week_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,11 @@ def create_booking():
         client_token=body.get("client_token"),
         actor_id=_api_key_actor(),
     )
+
+    booking_row = postgres.get_booking(res['data']['booking_id'])
+    if booking_row:
+        sheets.upsert_booking_row(booking_row)
+
     return jsonify(res), (200 if res["ok"] else 409)
 
 
@@ -128,6 +134,12 @@ def patch_booking(booking_id: int):
     if "price_total" in body:
         patch["price_total"] = body["price_total"]
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
+
+    if res["ok"]:
+        booking_row = postgres.get_booking(booking_id)
+        if booking_row:
+            sheets.upsert_booking_row(booking_row)
+
     return jsonify(res), (200 if res["ok"] else 404)
 
 
@@ -136,4 +148,14 @@ def delete_booking(booking_id: int):
     res = booking_service.cancel_booking(
         booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
+    if res["ok"]:
+        booking_row = postgres.get_booking(booking_id)
+        if booking_row:
+            sheets.upsert_booking_row(booking_row)
     return jsonify(res), (200 if res["ok"] else 404)
+
+
+@manager_api.post("/api/manager/bookings/daily_refresh")
+def daily_refresh():
+    refresh_week_sheet()
+    return jsonify({"ok": True}), 200

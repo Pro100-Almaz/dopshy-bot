@@ -15,7 +15,8 @@ from typing import Any
 
 import config
 from integrations import postgres
-from utils import now_almaty
+from utils import now_almaty, today_almaty
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -210,3 +211,196 @@ def setup_sheet_template() -> None:
         logger.info("Bookings sheet template applied.")
     except Exception as exc:
         logger.error("setup_sheet_template failed: %s", exc)
+
+
+_WEEK_SHEET_NAMES = [(1, "This Week 1"), (2, "This Week 2"), (3, "This Week 3")]
+_TIME_SLOTS = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
+_DAY_HEADERS = ["Time", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+_week_worksheets: dict[int, Any] = {}
+_week_ws_lock = threading.Lock()
+
+
+def _get_week_worksheet(field_num : int):
+    global _week_worksheets
+    with _week_ws_lock:
+        if field_num not in _week_worksheets:
+            ss = _get_spreadsheet()
+            sheet_name = dict(_WEEK_SHEET_NAMES)[field_num]
+            try:
+                _week_worksheets[field_num] = ss.worksheet(sheet_name)
+            except Exception:
+                _week_worksheets[field_num] = ss.add_worksheet(
+                    title=sheet_name, rows=50, cols=8
+                )
+                _week_worksheets[field_num].update("A1:H1", [_DAY_HEADERS])
+        return _week_worksheets[field_num]
+
+
+def _get_current_week_bookings(field_num: int) -> list[dict]:
+    today = today_almaty()
+    last_day = today + datetime.timedelta(days=6)
+
+    bookings = postgres.get_bookings_in_range(
+        str(today), str(last_day), states=("awaiting_payment", "confirmed")
+    )
+
+    filtered_bookings = []
+    for booking in bookings:
+        if booking['field'] == field_num:
+            filtered_bookings.append(booking)
+    return filtered_bookings
+
+
+def _display_week_dates() -> list[datetime.date]:
+    today = today_almaty()
+    monday = today - datetime.timedelta(days=today.weekday())
+    dates = []
+    for weekday in range(7):
+        d = monday + datetime.timedelta(days=weekday)
+        if d < today:
+            d = d + datetime.timedelta(days=7)
+
+        dates.append(d)
+
+    return dates
+
+
+def _build_weekly_sheet(worksheet) -> None:
+    dates = _display_week_dates()
+    header = ['Time']
+    i = 0
+    for d in dates:
+        header.append(f"{_DAY_HEADERS[i + 1]} {d.strftime('%d.%m')}")
+        i += 1
+
+    rows = [header]
+    for slot in _TIME_SLOTS:
+        rows.append([slot] + [""] * 7)
+
+    worksheet.clear()
+    worksheet.update(f"A1:H{len(rows)}", rows, value_input_option="USER_ENTERED")
+
+    requests = []
+    requests.append(_get_paint_background_request(worksheet.id, 0, 49, 0, 8, 1, 1, 1))
+    requests.append(_get_paint_background_request(worksheet.id, 0, 1, 1, 8, 1, 0.67, 0.1))
+
+    worksheet.spreadsheet.batch_update({'requests': requests})
+
+
+def _get_paint_background_request(worksheet_id, start_row_id, end_row_id, start_col_id, end_col_id, r, g, b):
+    return {
+        'repeatCell': {
+            "range": {
+                "sheetId": worksheet_id,
+                "startRowIndex": start_row_id,
+                "endRowIndex": end_row_id,
+                "startColumnIndex": start_col_id,
+                "endColumnIndex": end_col_id
+            },
+            'cell': {
+                "userEnteredFormat": {
+                    "backgroundColor": {
+                        "red": r,
+                        "green": g,
+                        "blue": b
+                    },
+                }
+            },
+            "fields": "userEnteredFormat.backgroundColor"
+        }
+    }
+
+
+def _floor_time_to_30_minutes(t: datetime.time) -> str:
+    hour = t.hour
+    if t.minute < 15:
+        minute = 0
+    elif t.minute > 45:
+        minute = 0
+        hour += 1
+    else:
+        minute = 30
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _paint_booking_start_cells(worksheet, bookings):
+    requests = []
+
+    for booking in bookings:
+        booking_date = booking['date']
+        booking_start_time = _floor_time_to_30_minutes(booking['time_start'])
+        booking_end_time = _floor_time_to_30_minutes(booking['time_end'])
+
+
+        col = booking_date.weekday() + 2
+
+        start_slot_index = _TIME_SLOTS.index(booking_start_time)
+        end_slot_index = _TIME_SLOTS.index(booking_end_time)
+
+        sheet_row = start_slot_index + 2
+
+        cell_text = (
+            f"{booking.get('customer_name') or 'No Customer name'}\n"
+            f"{booking_start_time} - {booking_end_time}\n"
+            f"{booking.get('notes') or ''}"
+        ).strip()
+
+        worksheet.update_cell(sheet_row, col, cell_text)
+
+
+        note_text = (
+            f"Booking ID: {booking.get('id')}\n"
+            f"Customer: {booking.get('customer_name') or 'No customer name'}\n"
+            f"Phone: {booking.get('phone') or '-'}\n"
+            f"Notes: {booking.get('notes') or '-'}\n"
+            f"Price: {booking.get('price_total') or '-'}\n"
+            f"Status: {booking.get('state') or '-'}"
+        )
+
+        requests.append({
+            'repeatCell': {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": start_slot_index + 1,
+                    "endRowIndex": end_slot_index + 1,
+                    "startColumnIndex": col - 1,
+                    "endColumnIndex": col
+                },
+                'cell': {
+                    "note" : note_text,
+                    "userEnteredFormat": {
+                        "backgroundColor": {
+                            "red": 0.65,
+                            "green": 0.95,
+                            "blue": 0.65
+                        },
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "wrapStrategy" : "WRAP",
+                        "textFormat": {
+                            "bold" : True,
+                            "fontSize": 9
+                        }
+                    }
+                },
+                "fields": "note, userEnteredFormat"
+            }
+        })
+
+    if requests:
+        worksheet.spreadsheet.batch_update({"requests": requests})
+
+
+def refresh_week_sheet() -> None:
+    try:
+        for i in range(3):
+            ws = _get_week_worksheet(i + 1)
+
+            _build_weekly_sheet(ws)
+            bookings = _get_current_week_bookings(i + 1)
+            _paint_booking_start_cells(ws, bookings)
+
+    except Exception as exc:
+        logger.exception("REFRESH_WEEK_SHEET FAILSED: %s", exc)

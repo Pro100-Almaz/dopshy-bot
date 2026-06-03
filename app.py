@@ -15,6 +15,7 @@ from flask import Flask, request, jsonify, abort
 
 import config
 from handlers.message_handler import handle_incoming_message
+from integrations.sheets import refresh_week_sheet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -213,6 +214,7 @@ def admin_setup_sheet():
     try:
         setup_sheet_template()
         refresh_all_bookings()
+        refresh_week_sheet()
         return jsonify({"status": "ok"}), 200
     except Exception as exc:
         logger.exception("Sheet setup failed: %s", exc)

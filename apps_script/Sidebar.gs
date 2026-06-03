@@ -31,6 +31,7 @@ function submitNewBooking(form) {
       notes: form.notes || '',
       client_token: Utilities.getUuid()
     };
+    console.log("Cleint Token:", payload.client_token);
     var res = apiCreateBooking(payload);
     if (!res.ok) return { ok: false, message: res.message || 'Ошибка' };
 
@@ -41,6 +42,7 @@ function submitNewBooking(form) {
       payload.customer, payload.notes, (res.data.status || 'CONFIRMED'),
       Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm')
     ]);
+    refreshFromServer();
     return { ok: true, message: 'Бронь создана (#' + bookingId + ')' };
   } catch (err) {
     return { ok: false, message: err.message };

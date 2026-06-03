@@ -13,6 +13,7 @@ function showSetupDialog() {
     API_BASE_URL: url.getResponseText().trim(),
     API_KEY: key.getResponseText().trim(),
     BOOKINGS_SHEET_NAME: 'Bookings',
+    WEEK_SHEET_NAMES: ["This Week 1", "This Week 2", "This Week 3"],
     TZ_OFFSET: '+05:00'
   });
   ui.alert('Сохранено.');
