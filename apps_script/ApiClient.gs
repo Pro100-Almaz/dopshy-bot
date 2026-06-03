@@ -20,7 +20,10 @@ function _request(method, path, body) {
   var options = {
     method: method,
     contentType: 'application/json',
-    headers: { 'X-API-Key': _apiKey() },
+    headers: {
+      'X-API-Key': _apiKey(),
+      'ngrok-skip-browser-warning': 'true'
+    },
     muteHttpExceptions: true
   };
   if (body) options.payload = JSON.stringify(body);
@@ -38,6 +41,5 @@ function _request(method, path, body) {
 function apiCreateBooking(payload) { return _request('post',   '/api/manager/bookings', payload); }
 function apiCancelBooking(id)      { return _request('delete', '/api/manager/bookings/' + id); }
 function apiPatch(id, patch)       { return _request('patch',  '/api/manager/bookings/' + id, patch); }
-function apiListBookings(from, to) {
-  return _request('get', '/api/manager/bookings?from=' + from + '&to=' + to);
-}
+function apiListBookings(from, to) { return _request('get', '/api/manager/bookings?from=' + from + '&to=' + to);}
+function apiDailyRefresh() {return _request('post', '/api/manager/bookings/daily_refresh');}

@@ -27,6 +27,8 @@ function cancelSelectedRow() {
   } catch (err) {
     ui.alert('Не удалось отменить: ' + err.message);
   }
+  refreshFromServer();
+  apiDailyRefresh();
 }
 
 /** Overwrite the sheet with the backend's current view for the next ~60 days. */
@@ -57,3 +59,6 @@ function refreshFromServer() {
   sheet.getRange(1, 1, rows.length, header.length).setValues(rows);
   SpreadsheetApp.getActiveSpreadsheet().toast('Обновлено: ' + (rows.length - 1) + ' броней');
 }
+
+
+

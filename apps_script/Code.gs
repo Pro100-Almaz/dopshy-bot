@@ -54,4 +54,6 @@ function onEdit(e) {
     e.range.setValue(e.oldValue || '');
     SpreadsheetApp.getUi().alert('Не удалось обновить: ' + err.message);
   }
+  refreshFromServer();
+  apiDailyRefresh();
 }
