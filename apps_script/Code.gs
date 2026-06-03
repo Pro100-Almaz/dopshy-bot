@@ -49,7 +49,7 @@ function onEdit(e) {
   patch[field] = e.value;
   try {
     apiPatch(bookingId, patch);
-    sheet.toast('Обновлено: ' + field, 'Менеджер', 3);
+    e.source.toast('Обновлено: ' + field, 'Менеджер', 3);
   } catch (err) {
     e.range.setValue(e.oldValue || '');
     SpreadsheetApp.getUi().alert('Не удалось обновить: ' + err.message);

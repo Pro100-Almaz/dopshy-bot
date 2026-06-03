@@ -16,6 +16,9 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 
 import json
 import logging
+import uuid
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -24,6 +27,7 @@ import psycopg2.extras
 
 import config
 from integrations.postgres import _conn
+from integrations.sheets import refresh_all_bookings
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +442,7 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
 
 
 def manager_create_booking(field: int, date: str, time_start: str, time_end: str,
+                           end_date: str, repeat: str = 'none',
                            customer: str | None = None, phone: str | None = None,
                            notes: str | None = None, price_total=None,
                            actor_id: str | None = None,
@@ -448,24 +453,28 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
         format_ = conf["format"] if conf else ""
     try:
+        dates = list(generate_dates(date, end_date, repeat))
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "INSERT INTO bookings "
-                    "  (phone, customer_name, date, time_start, time_end, field, format, "
-                    "   notes, price_total, state, source, client_token, start_at, end_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'manager', "
-                    "        COALESCE(%s, gen_random_uuid()), "
-                    "        (%s::date + %s::time) AT TIME ZONE %s, "
-                    "        (%s::date + %s::time) AT TIME ZONE %s) "
-                    "RETURNING id",
-                    (phone, customer, date, time_start, time_end, int(field), format_,
-                     notes, price_total, client_token,
-                     date, time_start, config.BOOKING_TIMEZONE,
-                     date, time_end, config.BOOKING_TIMEZONE),
-                )
-                booking_id = cur.fetchone()["id"]
-                _record_event(cur, booking_id, "manager_created", "manager", actor_id)
+                for d in dates:
+                    d_str = datetime.strftime(d, format="%Y-%m-%d")
+                    cur.execute(
+                        "INSERT INTO bookings "
+                        "  (phone, customer_name, date, time_start, time_end, field, format, "
+                        "   notes, price_total, state, source, client_token, start_at, end_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'manager', "
+                        "        COALESCE(%s, gen_random_uuid()), "
+                        "        (%s::date + %s::time) AT TIME ZONE %s, "
+                        "        (%s::date + %s::time) AT TIME ZONE %s) "
+                        "RETURNING id",
+                        (phone, customer, d_str, time_start, time_end, int(field), format_,
+                         notes, price_total, client_token,
+                         d_str, time_start, config.BOOKING_TIMEZONE,
+                         d_str, time_end, config.BOOKING_TIMEZONE),
+                    )
+                    client_token = str(uuid.uuid4())
+                    booking_id = cur.fetchone()["id"]
+                    _record_event(cur, booking_id, "manager_created", "manager", actor_id)
     except psycopg2.errors.ExclusionViolation:
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     except psycopg2.errors.UniqueViolation:
@@ -478,3 +487,21 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
             return _ok({"booking_id": row["id"], "status": "CONFIRMED"})
         raise
     return _ok({"booking_id": booking_id, "status": "CONFIRMED"})
+
+
+def generate_dates(start_date, end_date, repeat):
+    current = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+
+    while current <= end:
+        yield current
+        if repeat == "none":
+            break
+        elif repeat == "daily":
+            current += timedelta(days=1)
+        elif repeat == "weekly":
+            current += timedelta(weeks=1)
+        elif repeat == "monthly":
+            current += relativedelta(months=1)
+        else:
+            raise ValueError("Unknown repeat type")

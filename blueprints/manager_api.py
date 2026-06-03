@@ -98,13 +98,15 @@ def get_booking(booking_id: int):
 def create_booking():
     body = request.get_json(silent=True) or {}
     required = ("field", "date", "time_start", "time_end")
-    if not all(body.get(k) for k in required):
+    if not all(body.get(k) for k in required) or (body["repeat"] != 'none' and not body["end_date"]):
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "field, date, time_start, time_end are required."}), 400
 
     res = booking_service.manager_create_booking(
         field=int(body["field"]),
+        repeat=body["repeat"],
         date=body["date"],
+        end_date=body.get("end_date") or body["date"],
         time_start=body["time_start"],
         time_end=body["time_end"],
         customer=body.get("customer"),
