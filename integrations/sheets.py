@@ -213,7 +213,7 @@ def setup_sheet_template() -> None:
         logger.error("setup_sheet_template failed: %s", exc)
 
 
-_WEEK_SHEET_NAMES = [(1, "This Week 1"), (2, "This Week 2"), (3, "This Week 3")]
+_WEEK_SHEET_NAMES = [(1, "Поле 1"), (2, "Поле 2"), (3, "Поле 3")]
 _TIME_SLOTS = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
 _DAY_HEADERS = ["Time", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
