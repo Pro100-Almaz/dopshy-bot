@@ -71,7 +71,8 @@ def _future_date_str(days_ahead: int = 3) -> str:
 def _seed_confirmed_booking(field_id: int, date_str: str, ts: str, te: str) -> int:
     """Insert a confirmed booking to occupy a slot (so SLOT_TAKEN fires)."""
     res = svc.manager_create_booking(
-        field=field_id, date=date_str, time_start=ts, time_end=te,
+        field=field_id, date=date_str, end_date=date_str,
+        time_start=ts, time_end=te,
         customer="Blocker", phone="7700000000",
     )
     assert res["ok"], f"seed failed: {res}"
@@ -309,7 +310,7 @@ class TestStepTimeHandling:
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
-            reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "просто текст без времени")
+            handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "просто текст без времени")
 
         session = get_active_session(chat_id)
         assert session["state"] == "step_time"
@@ -347,7 +348,6 @@ class TestFullHappyPath:
 
         chat_id = _chat_id()
         target = today_almaty() + timedelta(days=4)
-        date_str = str(target)
         fake = _fake_windows_for_date(target)
 
         # ── step_date: start the flow ────────────────────────────────────────
@@ -730,7 +730,7 @@ class TestStepPlayers:
         session = get_active_session(chat_id)
         assert session["state"] == "step_players"
 
-        reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "8")
+        handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "8")
         session = get_active_session(chat_id)
         assert session["state"] == "step_name"
         assert _get_draft_fields(bid)["players"] == 8
@@ -813,7 +813,7 @@ class TestStepConfirm:
             upsert_session(chat_id, "step_confirm", params, booking_id=booking_id)
 
             with patch("handlers.booking_session.sheets.upsert_booking_row"):
-                reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, yes_word)
+                handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, yes_word)
 
             assert _booking_state(booking_id) == "awaiting_payment", \
                 f"'{yes_word}' did not confirm — got state {_booking_state(booking_id)}"

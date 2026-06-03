@@ -52,7 +52,8 @@ def _near_date(days_ahead: int = 3) -> str:
 def _confirmed_booking(field: int, date_str: str, ts: str, te: str) -> int:
     """Create a confirmed booking via manager_create_booking (fastest path)."""
     res = svc.manager_create_booking(
-        field=field, date=date_str, time_start=ts, time_end=te,
+        field=field, date=date_str, end_date=date_str,
+        time_start=ts, time_end=te,
         customer="Test", phone="77001234567",
     )
     assert res["ok"], f"manager_create_booking failed: {res}"

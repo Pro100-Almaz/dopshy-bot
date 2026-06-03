@@ -147,7 +147,8 @@ def test_cancel_releases_slot():
 
 def test_manager_create_booking_confirmed():
     res = svc.manager_create_booking(
-        field=2, date="2026-07-05", time_start="12:00", time_end="13:00",
+        field=2, date="2026-07-05", end_date="2026-07-05",
+        time_start="12:00", time_end="13:00",
         customer="Манагер", phone="7701", actor_id="mgr-key",
     )
     assert res["ok"]
@@ -157,8 +158,10 @@ def test_manager_create_booking_confirmed():
 
 
 def test_manager_create_booking_slot_taken():
-    svc.manager_create_booking(field=2, date="2026-07-05", time_start="12:00", time_end="13:00")
-    res = svc.manager_create_booking(field=2, date="2026-07-05", time_start="12:30", time_end="13:30")
+    svc.manager_create_booking(field=2, date="2026-07-05", end_date="2026-07-05",
+                               time_start="12:00", time_end="13:00")
+    res = svc.manager_create_booking(field=2, date="2026-07-05", end_date="2026-07-05",
+                                     time_start="12:30", time_end="13:30")
     assert not res["ok"]
     assert res["code"] == "SLOT_TAKEN"
 

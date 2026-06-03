@@ -36,31 +36,49 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    # Bind only to localhost — nginx fronts the public traffic.
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
 
-#  nginx:
-#    build: ./nginx
-#    ports:
-#      - "80:80"
-#      - "443:443"
-#    volumes:
-#      - certbot_certs:/etc/letsencrypt
-#      - certbot_webroot:/var/www/certbot
-#    depends_on:
-#      - bot
-#    restart: unless-stopped
+  nginx:
+    build: ./nginx
+    env_file:
+      - .env
+    environment:
+      SERVER_NAME: ${SERVER_NAME}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    depends_on:
+      - bot
+    restart: unless-stopped
 
-#  certbot:
-#    image: certbot/certbot:latest
-#    volumes:
-#      - certbot_certs:/etc/letsencrypt
-#      - certbot_webroot:/var/www/certbot
-#    # Obtain cert on first run (no-op if already valid), then renew every 12h
-#    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email admin@dopsy.kz --agree-tos --no-eff-email --non-interactive -d bot.dopsy.kz || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
-#    depends_on:
-#      - nginx
-#    restart: unless-stopped
+  certbot:
+    image: certbot/certbot:latest
+    env_file:
+      - .env
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    # Obtain a cert on first run (no-op if already valid), then renew every 12h.
+    # SERVER_NAME and CERTBOT_EMAIL come from .env so dev and prod share this image.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        certbot certonly --webroot --webroot-path=/var/www/certbot
+          --email "$$CERTBOT_EMAIL" --agree-tos --no-eff-email --non-interactive
+          -d "$$SERVER_NAME" || true;
+        while true; do
+          sleep 12h;
+          certbot renew --webroot --webroot-path=/var/www/certbot --quiet;
+        done
+    depends_on:
+      - nginx
+    restart: unless-stopped
 
   # Directus admin panel — runs against the same Postgres as the bot.
   # First run will auto-create the directus_* system tables. Domain tables
@@ -111,5 +129,5 @@ volumes:
   postgres_data:
   directus_uploads:
   directus_extensions:
-#  certbot_certs:
-#  certbot_webroot:
+  certbot_certs:
+  certbot_webroot:

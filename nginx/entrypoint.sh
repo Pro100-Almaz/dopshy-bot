@@ -1,29 +1,33 @@
 #!/bin/sh
 set -e
 
-CERT=/etc/letsencrypt/live/bot.dopsy.kz/fullchain.pem
-HTTP_CONF=/etc/nginx/http-only.conf
-HTTPS_CONF=/etc/nginx/bot.dopsy.kz.conf
+# ── Validate config ────────────────────────────────────────────────────────
+: "${SERVER_NAME:?SERVER_NAME env var is required (e.g. bot-dev.dopsy.kz)}"
+
+CERT=/etc/letsencrypt/live/${SERVER_NAME}/fullchain.pem
+HTTP_TPL=/etc/nginx/templates/http-only.conf.template
+HTTPS_TPL=/etc/nginx/templates/server.conf.template
 ACTIVE_CONF=/etc/nginx/conf.d/default.conf
 
-# Start with HTTP-only config so certbot can complete the ACME challenge
-cp "$HTTP_CONF" "$ACTIVE_CONF"
+# ── Bootstrap: HTTP-only first so certbot can solve the ACME challenge ────
+echo "[nginx] Rendering HTTP-only config for ${SERVER_NAME}"
+envsubst '${SERVER_NAME}' < "$HTTP_TPL" > "$ACTIVE_CONF"
 nginx -g "daemon on;"
 
-# Wait for certbot to obtain the certificate
-echo "Waiting for TLS certificate..."
+# ── Wait for certbot to drop the cert into the shared volume ──────────────
+echo "[nginx] Waiting for TLS certificate at ${CERT}..."
 while [ ! -f "$CERT" ]; do
     sleep 5
 done
-echo "Certificate found, switching to HTTPS config."
+echo "[nginx] Certificate found, switching to HTTPS config."
 
-# Switch to full HTTPS config and reload
-cp "$HTTPS_CONF" "$ACTIVE_CONF"
+# ── Render full HTTPS config and reload ───────────────────────────────────
+envsubst '${SERVER_NAME}' < "$HTTPS_TPL" > "$ACTIVE_CONF"
 nginx -s reload
 
-# Reload nginx every 24h so renewed certificates are picked up
+# Reload every 24h so renewed certs are picked up without a restart.
 while true; do
     sleep 24h
     nginx -s reload
-    echo "nginx reloaded to pick up renewed certificate."
+    echo "[nginx] reloaded to pick up renewed certificate."
 done

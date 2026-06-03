@@ -21,7 +21,7 @@ from flask import Blueprint, jsonify, request
 
 import config
 from integrations import booking_service, postgres, sheets
-from integrations.sheets import upsert_booking_row, refresh_week_sheet
+from integrations.sheets import refresh_week_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -99,15 +99,17 @@ def get_booking(booking_id: int):
 def create_booking():
     body = request.get_json(silent=True) or {}
     required = ("field", "date", "time_start", "time_end")
-    if not all(body.get(k) for k in required) or (body["repeat"] != 'none' and not body["end_date"]):
+    repeat = body.get("repeat", "none")
+    end_date = body.get("end_date")
+    if not all(body.get(k) for k in required) or (repeat != "none" and not end_date):
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "field, date, time_start, time_end are required."}), 400
 
     res = booking_service.manager_create_booking(
         field=int(body["field"]),
-        repeat=body["repeat"],
+        repeat=repeat,
         date=body["date"],
-        end_date=body.get("end_date") or body["date"],
+        end_date=end_date or body["date"],
         time_start=body["time_start"],
         time_end=body["time_end"],
         customer=body.get("customer"),
@@ -118,11 +120,11 @@ def create_booking():
         actor_id=_api_key_actor(),
     )
 
-    booking_row = postgres.get_booking(res['data']['booking_id'])
-    if booking_row:
-        sheets.upsert_booking_row(booking_row)
-
-    refresh_week_sheet()
+    if res["ok"] and res.get("data", {}).get("booking_id"):
+        booking_row = postgres.get_booking(res["data"]["booking_id"])
+        if booking_row:
+            sheets.upsert_booking_row(booking_row)
+        refresh_week_sheet()
 
     return jsonify(res), (200 if res["ok"] else 409)
 

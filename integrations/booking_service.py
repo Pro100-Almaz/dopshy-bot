@@ -27,7 +27,6 @@ import psycopg2.extras
 
 import config
 from integrations.postgres import _conn
-from integrations.sheets import refresh_all_bookings
 
 logger = logging.getLogger(__name__)
 
