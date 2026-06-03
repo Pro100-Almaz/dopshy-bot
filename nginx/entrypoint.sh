@@ -2,7 +2,7 @@
 set -e
 
 # ── Validate config ────────────────────────────────────────────────────────
-: "${SERVER_NAME:?SERVER_NAME env var is required (e.g. bot-dev.dopsy.kz)}"
+: "${SERVER_NAME:?SERVER_NAME env var is required (e.g. bot.dopsy.kz)}"
 
 CERT=/etc/letsencrypt/live/${SERVER_NAME}/fullchain.pem
 HTTP_TPL=/etc/nginx/templates/http-only.conf.template
