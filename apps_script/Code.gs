@@ -34,24 +34,23 @@ function onOpen() {
  * Free-edit columns (customer, notes) are PATCHed to the backend. On failure
  * the cell is reverted to its previous value.
  */
-function onEdit(e) {
-  var col = e.range.getColumn();
+function onEditManual() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet();
+  var col = Number(sheet.getActiveRange().getColumn());
   if (col !== COL.CUSTOMER && col !== COL.NOTES) return;
-  var row = e.range.getRow();
+  var row = Number(sheet.getActiveRange().getRow());
   if (row === 1) return; // header
 
-  var sheet = e.source.getActiveSheet();
-  var bookingId = sheet.getRange(row, COL.BOOKING_ID).getValue();
+  var bookingId = sheet.getActiveSheet().getRange(row, COL.BOOKING_ID).getValue();
   if (!bookingId) return; // unsynced row being typed manually
 
   var field = col === COL.CUSTOMER ? 'customer' : 'notes';
   var patch = {};
-  patch[field] = e.value;
+  patch[field] = sheet.getActiveSheet().getRange(row, col).getValue();
   try {
     apiPatch(bookingId, patch);
-    e.source.toast('Обновлено: ' + field, 'Менеджер', 3);
+    sheet.toast('Обновлено: ' + field, 'Менеджер', 3);
   } catch (err) {
-    e.range.setValue(e.oldValue || '');
     SpreadsheetApp.getUi().alert('Не удалось обновить: ' + err.message);
   }
   refreshFromServer();
