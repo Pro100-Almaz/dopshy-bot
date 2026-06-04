@@ -146,9 +146,9 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     "  price_total = (SELECT price_per_hour FROM fields WHERE id = bookings.field) "
                     "                * (EXTRACT(EPOCH FROM ((date + time_end) - (date + time_start))) / 3600.0), "
                     "  updated_at = NOW() "
-                    "WHERE id = %s",
+                    "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
                     (config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
-                     config.BOOKING_TIMEZONE, booking_id),
+                     config.BOOKING_TIMEZONE, booking_id, booking_id),
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
@@ -193,8 +193,9 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
                      parsed.get("amount"), parsed.get("ref"), receipt_dt),
                 )
                 cur.execute(
-                    "UPDATE bookings SET state = 'confirmed', updated_at = NOW() WHERE id = %s",
-                    (booking_id,),
+                    "UPDATE bookings SET state = 'confirmed', updated_at = NOW() "
+                    "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
+                    (booking_id, booking_id,),
                 )
                 _record_event(cur, booking_id, "payment_received", "whatsapp",
                               note=parsed.get("ref"))
@@ -237,9 +238,9 @@ def cancel_booking(booking_id: int, actor_type: str = "whatsapp",
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "UPDATE bookings SET state = 'cancelled', updated_at = NOW() "
-                "WHERE group_transition = (SELECT group_transition FROM bookings WHERE id = %s) "
+                "WHERE (id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)) "
                 "AND state NOT IN ('cancelled', 'failed') RETURNING id",
-                (booking_id,),
+                (booking_id, booking_id,),
             )
             if cur.fetchone():
                 _record_event(cur, booking_id, "cancelled", actor_type, actor_id, reason)
@@ -262,8 +263,11 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "UPDATE bookings SET state = 'cancelled', updated_at = NOW() FROM bookings "
-                "target WHERE target.id = %s AND bookings.group_repetition = target.group_repetition "
-                "AND b.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed') "
+                "target WHERE target.id = %s AND "
+                "(bookings.id = target.id "
+                "OR bookings.group_repetition = target.group_repetition "
+                "OR bookings.group_transition = target.group_transition) "
+                "AND bookings.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed') "
                 "RETURNING bookings.id",
                 (booking_id,),
             )
@@ -448,7 +452,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total"}
+_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state"}
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
@@ -487,7 +491,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                          (phone, customer_name, date, time_start, time_end, field, format,
                           notes, price_total, state, source, client_token, start_at, end_at,
                           group_repetition, group_transition)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'manager',
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', 'manager',
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
                                  (%s::date + %s::time) AT TIME ZONE %s,
@@ -518,9 +522,9 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                 cur.execute("SELECT id FROM bookings WHERE client_token = %s", (client_token,))
                 row = cur.fetchone()
         if row:
-            return _ok({"booking_id": row["id"], "status": "CONFIRMED"})
+            return _ok({"booking_id": row["id"], "status": "ОЖИДАНИЕ"})
         raise
-    return _ok({"booking_id": booking_id, "status": "CONFIRMED"})
+    return _ok({"booking_id": booking_id, "status": "ОЖИДАНИЕ"})
 
 
 def generate_dates(start_date, end_date, start_time, end_time, repeat):

@@ -22,7 +22,9 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Менеджер')
     .addItem('Новая бронь…', 'showNewBookingSidebar')
-    .addItem('Отменить выбранную строку', 'cancelSelectedRow')
+    .addItem('Изменить статус выбранной строки', 'showCancelDialog')
+    // .addItem('Отменить выбранную строку', 'cancelSelectedRow')
+    .addItem('Отменить последующие брони этой группы', 'cancelRepetitiveBooking')
     .addSeparator()
     .addItem('Обновить с сервера', 'refreshFromServer')
     .addSeparator()
@@ -54,5 +56,5 @@ function onEditManual() {
     SpreadsheetApp.getUi().alert('Не удалось обновить: ' + err.message);
   }
   refreshFromServer();
-  apiDailyRefresh();
+  // apiDailyRefresh();
 }
