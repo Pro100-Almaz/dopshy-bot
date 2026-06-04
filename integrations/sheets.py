@@ -35,6 +35,15 @@ _STATE_DISPLAY = {
     "failed":           "FAILED",
 }
 
+_STATES_RUSSIAN = {
+    "draft":            "ЧЕРНОВИК",
+    "awaiting_payment": "ОЖИДАЕТ ОПЛАТЫ",
+    "confirmed":        "ПОДТВЕРЖДЕНО",
+    "cancelled":        "ОТМЕНЕНО",
+    "failed":           "ПРОВАЛИЛОСЬ",
+}
+
+
 _client: Any = None
 _spreadsheet: Any = None
 _worksheet: Any = None
@@ -363,11 +372,11 @@ def _paint_confirmed_booking(worksheet, booking, requests) -> None:
 
     note_text = (
         f"Booking ID: {booking.get('id')}\n"
-        f"Customer: {booking.get('customer_name') or 'No customer name'}\n"
-        f"Phone: {booking.get('phone') or '-'}\n"
-        f"Notes: {booking.get('notes') or '-'}\n"
-        f"Price: {booking.get('price_total') or '-'}\n"
-        f"Status: {booking.get('state') or '-'}"
+        f"Клиент: {booking.get('customer_name') or 'No customer name'}\n"
+        f"Номер Телефона: {booking.get('phone') or '-'}\n"
+        f"Заметки: {booking.get('notes') or '-'}\n"
+        f"Цена: {booking.get('price_total') or '-'}\n"
+        f"Статус: {_STATES_RUSSIAN[booking.get('state')] or '-'}"
     )
 
     requests.append({
