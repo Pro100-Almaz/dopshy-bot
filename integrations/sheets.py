@@ -284,6 +284,7 @@ def _build_weekly_sheet(worksheet) -> None:
 
     requests = []
     requests.append(_get_paint_background_request(worksheet.id, 0, 49, 0, 8, 1, 1, 1))
+    requests.append(_get_border_request(worksheet.id, 0, 49, 0, 8))
     requests.append(_get_paint_background_request(worksheet.id, 0, 1, 1, 8, 1, 0.67, 0.1))
     requests.append(_get_unmerge_request(worksheet.id, 0, 49, 0, 8))
 
@@ -341,82 +342,82 @@ def _floor_time_to_30_minutes(t: datetime.time) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
-def _paint_booking_start_cells(worksheet, bookings):
-    requests = []
+def _paint_confirmed_booking(worksheet, booking, requests) -> None:
+    booking_date = booking['date']
+    booking_start_time = _floor_time_to_30_minutes(booking['time_start'])
+    booking_end_time = _floor_time_to_30_minutes(booking['time_end'])
 
-    for booking in bookings:
-        booking_date = booking['date']
-        booking_start_time = _floor_time_to_30_minutes(booking['time_start'])
-        booking_end_time = _floor_time_to_30_minutes(booking['time_end'])
+    col = booking_date.weekday() + 2
+    start_slot_index = _TIME_SLOTS.index(booking_start_time)
+    end_slot_index = _TIME_SLOTS.index(booking_end_time)
 
+    sheet_row = start_slot_index + 2
 
-        col = booking_date.weekday() + 2
+    cell_text = (
+        f"{booking.get('customer_name') or 'No Customer name'}\n"
+        f"{booking_start_time} - {booking_end_time}\n"
+        f"{booking.get('notes') or ''}"
+    ).strip()
 
-        start_slot_index = _TIME_SLOTS.index(booking_start_time)
-        end_slot_index = _TIME_SLOTS.index(booking_end_time)
+    worksheet.update_cell(sheet_row, col, cell_text)
 
-        sheet_row = start_slot_index + 2
+    note_text = (
+        f"Booking ID: {booking.get('id')}\n"
+        f"Customer: {booking.get('customer_name') or 'No customer name'}\n"
+        f"Phone: {booking.get('phone') or '-'}\n"
+        f"Notes: {booking.get('notes') or '-'}\n"
+        f"Price: {booking.get('price_total') or '-'}\n"
+        f"Status: {booking.get('state') or '-'}"
+    )
 
-        cell_text = (
-            f"{booking.get('customer_name') or 'No Customer name'}\n"
-            f"{booking_start_time} - {booking_end_time}\n"
-            f"{booking.get('notes') or ''}"
-        ).strip()
-
-        worksheet.update_cell(sheet_row, col, cell_text)
-
-
-        note_text = (
-            f"Booking ID: {booking.get('id')}\n"
-            f"Customer: {booking.get('customer_name') or 'No customer name'}\n"
-            f"Phone: {booking.get('phone') or '-'}\n"
-            f"Notes: {booking.get('notes') or '-'}\n"
-            f"Price: {booking.get('price_total') or '-'}\n"
-            f"Status: {booking.get('state') or '-'}"
-        )
-
-        requests.append({
-            'repeatCell': {
-                "range": {
-                    "sheetId": worksheet.id,
-                    "startRowIndex": start_slot_index + 1,
-                    "endRowIndex": end_slot_index + 1,
-                    "startColumnIndex": col - 1,
-                    "endColumnIndex": col
-                },
-                'cell': {
-                    "note" : note_text,
-                    "userEnteredFormat": {
-                        "backgroundColor": {
-                            "red": 0.65,
-                            "green": 0.95,
-                            "blue": 0.65
-                        },
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
-                        "wrapStrategy" : "WRAP",
-                        "textFormat": {
-                            "bold" : True,
-                            "fontSize": 9
-                        }
+    requests.append({
+        'repeatCell': {
+            "range": {
+                "sheetId": worksheet.id,
+                "startRowIndex": start_slot_index + 1,
+                "endRowIndex": end_slot_index + 1,
+                "startColumnIndex": col - 1,
+                "endColumnIndex": col
+            },
+            'cell': {
+                "note": note_text,
+                "userEnteredFormat": {
+                    "backgroundColor": {
+                        "red": 0.65,
+                        "green": 0.95,
+                        "blue": 0.65
+                    },
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "WRAP",
+                    "textFormat": {
+                        "bold": True,
+                        "fontSize": 9
                     }
-                },
-                "fields": "note, userEnteredFormat"
-            }
-        })
+                }
+            },
+            "fields": "note, userEnteredFormat"
+        }
+    })
 
-        requests.append({
-            "mergeCells": {
-                "range": {
-                    "sheetId": worksheet.id,
-                    "startRowIndex": start_slot_index + 1,
-                    "endRowIndex": end_slot_index + 1,
-                    "startColumnIndex": col - 1,
-                    "endColumnIndex": col
-                },
-                'mergeType': 'MERGE_ALL'
-            }
-        })
+    requests.append({
+        "mergeCells": {
+            "range": {
+                "sheetId": worksheet.id,
+                "startRowIndex": start_slot_index + 1,
+                "endRowIndex": end_slot_index + 1,
+                "startColumnIndex": col - 1,
+                "endColumnIndex": col
+            },
+            'mergeType': 'MERGE_ALL'
+        }
+    })
+
+
+def _paint_weekly_bookings(worksheet, bookings):
+    requests = []
+    for booking in bookings:
+        _paint_confirmed_booking(worksheet, booking, requests)
 
     if requests:
         worksheet.spreadsheet.batch_update({"requests": requests})
@@ -429,7 +430,85 @@ def refresh_week_sheet() -> None:
 
             _build_weekly_sheet(ws)
             bookings = _get_current_week_bookings(i + 1)
-            _paint_booking_start_cells(ws, bookings)
+            _paint_weekly_bookings(ws, bookings)
 
     except Exception as exc:
         logger.exception("REFRESH_WEEK_SHEET FAILSED: %s", exc)
+
+
+def _get_border_request(worksheet_id, start_row_id, end_row_id, start_col_id, end_col_id) -> dict:
+    border = {
+        'style' : 'SOLID',
+        'width' : 1,
+        'color' : {
+            'red': 0,
+            'green' : 0,
+            'blue' : 0
+        }
+    }
+
+    return {
+        "updateBorders": {
+            "range": {
+                "sheetId": worksheet_id,
+                "startRowIndex": start_row_id,
+                "endRowIndex": end_row_id,
+                "startColumnIndex": start_col_id,
+                "endColumnIndex": end_col_id
+            },
+            'top' : border,
+            'bottom' : border,
+            'left' : border,
+            'right' : border,
+            'innerHorizontal' : border,
+            'innerVertical' : border,
+        }
+    }
+
+
+def col_index_to_letter(index):
+    index += 1
+    letters = ""
+
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+
+    return letters
+
+
+def _single_table_write(booking):
+    field = booking.get('field')
+    worksheet = _get_week_worksheet(field)
+
+    requests = []
+    _paint_confirmed_booking(worksheet, booking, requests)
+
+    if requests:
+        worksheet.spreadsheet.batch_update({'requests': requests})
+
+
+def _single_table_erase(booking) -> None:
+    print('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+    field = booking.get('field')
+    worksheet = _get_week_worksheet(field)
+
+    booking_date = booking['date']
+    booking_start_time = _floor_time_to_30_minutes(booking['time_start'])
+    booking_end_time = _floor_time_to_30_minutes(booking['time_end'])
+
+    col = booking_date.weekday() + 1
+    start_slot_index = _TIME_SLOTS.index(booking_start_time) + 1
+    end_slot_index = _TIME_SLOTS.index(booking_end_time) + 1
+
+    col_letter = col_index_to_letter(col)
+    range_name = f"{col_letter}{start_slot_index}:{col_letter}{end_slot_index}"
+
+    worksheet.batch_clear([range_name])
+
+    requests = []
+    requests.append(_get_unmerge_request(worksheet.id, start_slot_index, end_slot_index, col, col + 1))
+    requests.append(_get_border_request(worksheet.id, start_slot_index, end_slot_index, col, col + 1))
+    requests.append(_get_paint_background_request(worksheet.id, start_slot_index, end_slot_index, col, col + 1, 1, 1, 1))
+    worksheet.spreadsheet.batch_update({'requests': requests})
+
