@@ -489,7 +489,6 @@ def _single_table_write(booking):
 
 
 def _single_table_erase(booking) -> None:
-    print('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
     field = booking.get('field')
     worksheet = _get_week_worksheet(field)
 
