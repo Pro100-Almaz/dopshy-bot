@@ -14,6 +14,7 @@ repo emits it):
 import logging
 import threading
 import time
+import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -140,6 +141,8 @@ def patch_booking(booking_id: int):
         patch["notes"] = body["notes"]
     if "price_total" in body:
         patch["price_total"] = body["price_total"]
+    if "status" in body:
+        patch["state"] = body["status"]
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
     if res["ok"]:
@@ -165,6 +168,18 @@ def delete_booking(booking_id: int):
 
     return jsonify(res), (200 if res["ok"] else 404)
 
+@manager_api.delete("/api/manager/bookings/all/<int:booking_id>")
+def delete_repetitive_booking(booking_id: int):
+    res = booking_service.cancel_all_bookings(
+        booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
+    )
+    if res["ok"]:
+        booking_row = postgres.get_booking(booking_id)
+        if booking_row:
+            sheets.upsert_booking_row(booking_row)
+
+    refresh_week_sheet()
+    return jsonify(res), (200 if res["ok"] else 404)
 
 @manager_api.post("/api/manager/bookings/daily_refresh")
 def daily_refresh():

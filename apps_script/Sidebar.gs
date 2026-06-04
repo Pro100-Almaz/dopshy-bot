@@ -33,11 +33,8 @@ function submitNewBooking(form) {
       end_date: form.endDate,
       client_token: Utilities.getUuid()
     };
-    console.log("Cleint Token:", payload.client_token);
     var res = apiCreateBooking(payload);
     if (!res.ok) return { ok: false, message: res.message || 'Ошибка' };
-
-    refreshFromServer()
 
     var bookingId = res.data.booking_id;
     var sheet = _bookingsSheet();

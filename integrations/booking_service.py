@@ -146,9 +146,9 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     "  price_total = (SELECT price_per_hour FROM fields WHERE id = bookings.field) "
                     "                * (EXTRACT(EPOCH FROM ((date + time_end) - (date + time_start))) / 3600.0), "
                     "  updated_at = NOW() "
-                    "WHERE id = %s",
+                    "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
                     (config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
-                     config.BOOKING_TIMEZONE, booking_id),
+                     config.BOOKING_TIMEZONE, booking_id, booking_id),
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
@@ -193,8 +193,9 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
                      parsed.get("amount"), parsed.get("ref"), receipt_dt),
                 )
                 cur.execute(
-                    "UPDATE bookings SET state = 'confirmed', updated_at = NOW() WHERE id = %s",
-                    (booking_id,),
+                    "UPDATE bookings SET state = 'confirmed', updated_at = NOW() "
+                    "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
+                    (booking_id, booking_id,),
                 )
                 _record_event(cur, booking_id, "payment_received", "whatsapp",
                               note=parsed.get("ref"))
@@ -237,7 +238,37 @@ def cancel_booking(booking_id: int, actor_type: str = "whatsapp",
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "UPDATE bookings SET state = 'cancelled', updated_at = NOW() "
-                "WHERE id = %s AND state NOT IN ('cancelled', 'failed') RETURNING id",
+                "WHERE (id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)) "
+                "AND state NOT IN ('cancelled', 'failed') RETURNING id",
+                (booking_id, booking_id,),
+            )
+            if cur.fetchone():
+                _record_event(cur, booking_id, "cancelled", actor_type, actor_id, reason)
+                cur.execute(
+                    "DELETE FROM booking_sessions WHERE booking_id = %s", (booking_id,)
+                )
+                return _ok({"booking_id": booking_id})
+            cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
+            row = cur.fetchone()
+    if not row:
+        return _err("NOT_FOUND", "Бронь не найдена.")
+    return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+
+
+def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
+                   actor_id: str | None = None, reason: str | None = None) -> dict:
+    """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
+    and clears any conversation session still referencing it."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "UPDATE bookings SET state = 'cancelled', updated_at = NOW() FROM bookings "
+                "target WHERE target.id = %s AND "
+                "(bookings.id = target.id "
+                "OR bookings.group_repetition = target.group_repetition "
+                "OR bookings.group_transition = target.group_transition) "
+                "AND bookings.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed') "
+                "RETURNING bookings.id",
                 (booking_id,),
             )
             if cur.fetchone():
@@ -251,6 +282,8 @@ def cancel_booking(booking_id: int, actor_type: str = "whatsapp",
     if not row:
         return _err("NOT_FOUND", "Бронь не найдена.")
     return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+
+
 
 
 # Fields a client may patch via the self-service edit flow.
@@ -419,7 +452,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total"}
+_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state"}
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
@@ -452,24 +485,30 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
         format_ = conf["format"] if conf else ""
     try:
-        dates = list(generate_dates(date, end_date, repeat))
+        dates = list(generate_dates(date, end_date, time_start, time_end, repeat))
+        group_repetition = str(uuid.uuid4())
+        exec_string = """INSERT INTO bookings
+                         (phone, customer_name, date, time_start, time_end, field, format,
+                          notes, price_total, state, source, client_token, start_at, end_at,
+                          group_repetition, group_transition)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', 'manager',
+                                 COALESCE(%s, gen_random_uuid()),
+                                 (%s::date + %s::time) AT TIME ZONE %s,
+                                 (%s::date + %s::time) AT TIME ZONE %s,
+                                 %s, %s)
+                         RETURNING id"""
+
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                for d in dates:
+                for d, st, et, group_transition in dates:         # date, start_time, end_time, group_transition
                     d_str = datetime.strftime(d, format="%Y-%m-%d")
                     cur.execute(
-                        "INSERT INTO bookings "
-                        "  (phone, customer_name, date, time_start, time_end, field, format, "
-                        "   notes, price_total, state, source, client_token, start_at, end_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', 'manager', "
-                        "        COALESCE(%s, gen_random_uuid()), "
-                        "        (%s::date + %s::time) AT TIME ZONE %s, "
-                        "        (%s::date + %s::time) AT TIME ZONE %s) "
-                        "RETURNING id",
-                        (phone, customer, d_str, time_start, time_end, int(field), format_,
+                        exec_string,
+                        (phone, customer, d_str, st, et, int(field), format_,
                          notes, price_total, client_token,
-                         d_str, time_start, config.BOOKING_TIMEZONE,
-                         d_str, time_end, config.BOOKING_TIMEZONE),
+                         d_str, st, config.BOOKING_TIMEZONE,
+                         d_str, et, config.BOOKING_TIMEZONE,
+                         group_repetition, group_transition),
                     )
                     client_token = str(uuid.uuid4())
                     booking_id = cur.fetchone()["id"]
@@ -483,17 +522,24 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                 cur.execute("SELECT id FROM bookings WHERE client_token = %s", (client_token,))
                 row = cur.fetchone()
         if row:
-            return _ok({"booking_id": row["id"], "status": "CONFIRMED"})
+            return _ok({"booking_id": row["id"], "status": "ОЖИДАНИЕ"})
         raise
-    return _ok({"booking_id": booking_id, "status": "CONFIRMED"})
+    return _ok({"booking_id": booking_id, "status": "ОЖИДАНИЕ"})
 
 
-def generate_dates(start_date, end_date, repeat):
+def generate_dates(start_date, end_date, start_time, end_time, repeat):
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
+    transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
     while current <= end:
-        yield current
+        group_transition = str(uuid.uuid4())
+        if transitive:
+            yield current, start_time, "23:59:59", group_transition
+            yield current + timedelta(days=1), "00:00", end_time, group_transition
+        else:
+            yield current, start_time, end_time, group_transition
+
         if repeat == "none":
             break
         elif repeat == "daily":
