@@ -15,11 +15,15 @@
 services:
   postgres:
     # Surface Postgres logs in dev for easier debugging.
+    image: postgres:16-alpine
     command: ["postgres", "-c", "log_statement=mod", "-c", "log_min_duration_statement=200"]
 
   bot:
     # Mount the full source so code changes propagate without a rebuild.
     # Named volumes for chroma_db and data take precedence over the bind mount.
+    build: .
+    env_file:
+      - .env
     volumes:
       - ./:/app:rw
       - chroma_data:/app/chroma_db
@@ -36,6 +40,24 @@ services:
       - --access-logfile=-
       - --reload
       - --reload-extra-file=/app/migrations
+    ports:
+      - "127.0.0.1:5000:5000"
     environment:
       LOG_LEVEL: DEBUG
       PYTHONDONTWRITEBYTECODE: "1"
+
+  ingest:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - chroma_data:/app/chroma_db
+      - ./documents:/app/documents:ro
+    command: python scripts/ingest.py
+    profiles:
+      - ingest
+
+volumes:
+  chroma_data:
+  bot_data:
+  postgres_data:

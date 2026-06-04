@@ -21,7 +21,7 @@ from flask import Blueprint, jsonify, request
 
 import config
 from integrations import booking_service, postgres, sheets
-from integrations.sheets import refresh_week_sheet
+from integrations.sheets import refresh_week_sheet, _single_table_write, _single_table_erase
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,8 @@ def create_booking():
         booking_row = postgres.get_booking(res["data"]["booking_id"])
         if booking_row:
             sheets.upsert_booking_row(booking_row)
-        refresh_week_sheet()
+
+        _single_table_write(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 409)
 
@@ -146,7 +147,7 @@ def patch_booking(booking_id: int):
         if booking_row:
             sheets.upsert_booking_row(booking_row)
 
-    refresh_week_sheet()
+        _single_table_write(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 404)
 
@@ -160,8 +161,8 @@ def delete_booking(booking_id: int):
         booking_row = postgres.get_booking(booking_id)
         if booking_row:
             sheets.upsert_booking_row(booking_row)
+        _single_table_erase(booking_row)
 
-    refresh_week_sheet()
     return jsonify(res), (200 if res["ok"] else 404)
 
 
