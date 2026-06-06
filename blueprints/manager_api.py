@@ -14,16 +14,15 @@ repo emits it):
 import logging
 import threading
 import time
-import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import booking_service, postgres, sheets
+from integrations import booking_service, sheets
 from integrations.sheets import refresh_week_sheet, _single_table_write, _single_table_erase
-
+from integrations.repo import booking_repo as repo
 logger = logging.getLogger(__name__)
 
 manager_api = Blueprint("manager_api", __name__)
@@ -82,7 +81,7 @@ def list_bookings():
     today = date.today()
     start = request.args.get("from", str(today))
     end = request.args.get("to", str(today + timedelta(days=30)))
-    rows = postgres.get_bookings_in_range(
+    rows = repo.get_bookings_in_range(
         start, end, states=("draft", "awaiting_payment", "confirmed")
     )
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
@@ -90,7 +89,7 @@ def list_bookings():
 
 @manager_api.get("/api/manager/bookings/<int:booking_id>")
 def get_booking(booking_id: int):
-    row = postgres.get_booking(booking_id)
+    row = repo.get_booking(booking_id)
     if not row:
         return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Бронь не найдена."}), 404
     return jsonify({"ok": True, "data": _serialize(row)}), 200
@@ -122,7 +121,7 @@ def create_booking():
     )
 
     if res["ok"] and res.get("data", {}).get("booking_id"):
-        booking_row = postgres.get_booking(res["data"]["booking_id"])
+        booking_row = repo.get_booking(res["data"]["booking_id"])
         if booking_row:
             sheets.upsert_booking_row(booking_row)
 
@@ -146,7 +145,7 @@ def patch_booking(booking_id: int):
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
     if res["ok"]:
-        booking_row = postgres.get_booking(booking_id)
+        booking_row = repo.get_booking(booking_id)
         if booking_row:
             sheets.upsert_booking_row(booking_row)
 
@@ -161,7 +160,7 @@ def delete_booking(booking_id: int):
         booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
-        booking_row = postgres.get_booking(booking_id)
+        booking_row = repo.get_booking(booking_id)
         if booking_row:
             sheets.upsert_booking_row(booking_row)
         _single_table_erase(booking_row)
@@ -174,7 +173,7 @@ def delete_repetitive_booking(booking_id: int):
         booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
-        booking_row = postgres.get_booking(booking_id)
+        booking_row = repo.get_booking(booking_id)
         if booking_row:
             sheets.upsert_booking_row(booking_row)
 

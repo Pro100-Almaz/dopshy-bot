@@ -3,7 +3,7 @@
 import uuid
 
 from integrations import booking_service as svc
-from integrations.postgres import _conn
+from integrations.repo.postgres import _conn
 
 
 def _token() -> str:
@@ -198,20 +198,20 @@ def test_reject_payment_allows_retry():
 
 
 def test_cancel_clears_linked_session():
-    from integrations import postgres
+    from integrations.repo import booking_repo as repo
     token = _token()
     bid = svc.create_draft("chatX", "7700", token)["data"]["booking_id"]
-    postgres.upsert_session("chatX", "step_date",
-                            {"booking_id": bid, "available_days": []}, booking_id=bid)
-    assert postgres.get_active_session("chatX") is not None
+    repo.upsert_session("chatX", "step_date",
+                        {"booking_id": bid, "available_days": []}, booking_id=bid)
+    assert repo.get_active_session("chatX") is not None
 
     svc.cancel_booking(bid, actor_type="whatsapp", reason="test")
 
-    assert postgres.get_active_session("chatX") is None
+    assert repo.get_active_session("chatX") is None
 
 
 def test_get_expired_bookings_selects_expired_only():
-    from integrations import postgres
+    from integrations.repo import booking_repo as repo
 
     # Expired awaiting_payment (reserved_until in the past).
     t1 = _token()
@@ -229,7 +229,7 @@ def test_get_expired_bookings_selects_expired_only():
     b_draft = svc.create_draft("c", "7700", t3)["data"]["booking_id"]
     _age_row(b_draft, created_at="2000-01-01 00:00:00+00")
 
-    expired_ids = {b["id"] for b in postgres.get_expired_bookings(1800)}
+    expired_ids = {b["id"] for b in repo.get_expired_bookings(1800)}
     assert b_expired in expired_ids
     assert b_draft in expired_ids
     assert b_fresh not in expired_ids

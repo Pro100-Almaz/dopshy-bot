@@ -12,7 +12,8 @@ from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
 from handlers.edit_booking import handle_edit_request
-from integrations import booking_service, payment_validation, postgres, sheets
+from integrations import booking_service, payment_validation, sheets
+from integrations.repo import booking_repo
 import config
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ def handle_incoming_message(payload: dict) -> None:
     Parse a WhatsApp Cloud API webhook payload and respond.
     Supports both individual and group messages.
     """
-    sender_id = "" 
+    sender_id = ""
 
     try:
         entry = payload.get("entry", [{}])[0]
@@ -169,6 +170,7 @@ def handle_incoming_message(payload: dict) -> None:
                 send_text_message(phone_number_id, sender_id, booking_reply)
                 return
             logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
+
 
         # 2. Retrieve relevant context from knowledge base
         context = retrieve_context(user_text)
@@ -271,7 +273,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     Finds their most recent awaiting_payment booking, confirms it via the
     service layer, and refreshes Google Sheets in the background.
     """
-    booking = postgres.get_awaiting_payment_booking(sender_phone)
+    booking = booking_repo.get_awaiting_payment_booking(sender_phone)
 
     if not booking:
         logger.info("[PAYMENT] Document from %s — no awaiting_payment booking found", sender_phone)

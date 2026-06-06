@@ -242,7 +242,7 @@ all_slots = [
     for field in BOOKING_FIELDS
 ]
 
-booked = postgres.get_booked_slots(week_start, week_end)
+booked = booking_repo.get_booked_slots(week_start, week_end)
 free_slots = [s for s in all_slots if s not in booked]
 ```
 

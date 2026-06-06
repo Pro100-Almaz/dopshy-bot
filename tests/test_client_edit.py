@@ -11,7 +11,7 @@ import uuid
 import psycopg2.extras
 
 from integrations import booking_service as svc
-from integrations.postgres import _conn
+from integrations.repo.postgres import _conn
 
 
 # ---------------------------------------------------------------------------

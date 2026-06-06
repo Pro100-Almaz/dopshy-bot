@@ -132,6 +132,7 @@ def get_ai_response(
     response = _client.chat.completions.create(**kwargs)
     msg = response.choices[0].message
     preamble = (msg.content or "").strip()
+    print(msg.tool_calls)
 
     if msg.tool_calls:
         for tc in msg.tool_calls:
