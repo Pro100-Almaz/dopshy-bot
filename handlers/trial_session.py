@@ -305,7 +305,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
     )
 
     params["date"] = str(chosen)
-    booking_service.update_draft(params["trial_id"], date=str(chosen), bot_name=bot_name)
+    postgres.update_draft('dopsy_bot', params["trial_id"], date=str(chosen), bot_name=bot_name)
     _save(chat_id, "step_time", params, bot_name)
     return _ask_time(chosen, day_windows, lang)
 
@@ -341,7 +341,7 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> s
 
 
     logger.info("[TRIAL:step_time] advancing to step_name")
-    booking_service.update_draft(params["trial_id"], time_start=time_start, time_end=time_end)
+    postgres.update_draft('dopsy_bot', params["trial_id"], time_start=time_start, time_end=time_end)
     _save(chat_id, "step_field", params, bot_name)
     return _t(lang, "ask_name")
 
@@ -350,7 +350,7 @@ def _handle_step_name(chat_id: str, user_text: str, params: dict, bot_name) -> s
     lang = params.get("lang", "ru")
     params["child_name"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_name=%r — advancing to step_age", params["child_name"])
-    booking_service.update_draft(params["trial_id"], child_name=params["child_name"], bot_name=bot_name)
+    postgres.update_draft('dopsy_bot', params["trial_id"], child_name=params["child_name"], bot_name=bot_name)
     _save(chat_id, "step_age", params, bot_name=bot_name)
     return _t(lang, "ask_age")
 
@@ -358,7 +358,7 @@ def _handle_step_name(chat_id: str, user_text: str, params: dict, bot_name) -> s
 def _handle_step_age(chat_id: str, user_text: str, params: dict, bot_name) -> str:
     params["child_age"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_age=%r — creating trial lesson for %r", params["child_age"], bot_name)
-    booking_service.update_draft(params["trial_id"], child_age=params["child_age"], bot_name=bot_name)
+    postgres.update_draft('dopsy_bot', params["trial_id"], child_age=params["child_age"], bot_name=bot_name)
     _save(chat_id, "step_lesson", params, bot_name=bot_name)
     return _format_summary(params)
 

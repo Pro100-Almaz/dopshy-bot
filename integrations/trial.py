@@ -3,8 +3,9 @@
 import logging
 from datetime import date, datetime, time, timedelta
 
+
 import config
-from integrations.repo import postgres
+from integrations.repo import postgres, academy_repo
 from utils import now_almaty, today_almaty
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ def get_trial_daytime(bot_name: str, days: list | None ) -> list[dict]:
     if days is None:
         days = [int(i) for i in range(7)]
 
-    all_group_info = postgres.get_group_info(bot_name=bot_name)  # method needed which returns [{group_id, training_day, time_start, time_end}]
+    all_group_info = academy_repo.get_group_info(bot_name=bot_name)  # method needed which returns [{group_id, training_day, time_start, time_end}]
     result = []
     for group_id, day, time_start, time_end in all_group_info:
         if day in days:

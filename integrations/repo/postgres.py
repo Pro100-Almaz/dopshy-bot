@@ -41,6 +41,7 @@ def create_draft(bot_name: str, **fields) -> dict:
     patch = {k: v for k, v in fields.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
     cols, vals = list(patch.keys()), list(patch.values())
     placeholders = ", ".join(["%s"] * len(vals))
+    type_string = "booking" if bot_name == "dopsy_bot" else "trial"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             table_name = "bookings" if bot_name == "dopsy_bot" else "academy_trials"
@@ -51,14 +52,14 @@ def create_draft(bot_name: str, **fields) -> dict:
             )
             row = cur.fetchone()
             if row:
-                object = row["id"]
+                object_id = row["id"]
                 # _record_event(cur, booking_id, "draft_created", "whatsapp", chat_id)
             else:
                 cur.execute(
                     f"SELECT id FROM {table_name} WHERE client_token = %s", (patch['client_token'],)
                 )
                 object_id = cur.fetchone()["id"]
-    return _ok({"object_id": object_id})
+    return _ok({f"{type_string}_id": object_id})
 
 
 def update_draft(bot_name: str, object_id: int, **patch) -> dict:
@@ -135,13 +136,13 @@ def cancel_booking_trial(bot_name:str, object_id: int, actor_type: str = "whatsa
 
 def get_active_session(bot_name: str, chat_id: str) -> dict | None:
     """Return the active (non-expired) session for chat_id, or None."""
-    table_name = "booking_sessions" if bot_name == "dopsy_bot" else "trial_sessions"
+    type_string = "booking" if bot_name == "dopsy_bot" else "trial"
 
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(f"""
-                SELECT chat_id, state, params, booking_id
-                FROM {table_name}
+                SELECT chat_id, state, params, {type_string}_id
+                FROM {type_string}_sessions
                 WHERE chat_id = %s AND expires_at > NOW()
             """, (chat_id,))
             row = cur.fetchone()
@@ -158,7 +159,7 @@ def upsert_session(
     with _conn() as conn:
         with conn.cursor() as cur:
             table_name = "booking_sessions" if bot_name == "dopsy_bot" else "trial_sessions"
-            id_object = "booking_id" if table_name == "booking_session" else "trial_id"
+            id_object = "booking_id" if table_name == "booking_sessions" else "trial_id"
 
             cur.execute(f"""
                 INSERT INTO {table_name} (chat_id, state, params, {id_object}, expires_at)
