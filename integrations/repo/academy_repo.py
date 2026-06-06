@@ -44,12 +44,14 @@ def setting_training_time(group_id: int, date: str, time_start: str, time_end: s
             )
 
 
-def get_group_info_repo(table_name: str, group_type : str):
+def get_group_info(bot_name: str):
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT group_id, training_day, time_start, time_end FROM {table_name} WHERE group_type = %s 
+                SELECT group_id, training_day, time_start, time_end FROM academy_group_schedules 
+                WHERE group_id IN (SELECT id FROM academy_groups WHERE group_type = %s) 
                 """, (group_type,)
             )
             return [dict(row) for row in cur.fetchall()]
