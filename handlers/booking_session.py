@@ -25,7 +25,8 @@ from datetime import date, datetime
 
 import config
 from integrations import booking as booking_logic
-from integrations import booking_service, postgres, sheets
+from integrations import booking_service, sheets
+from integrations.repo import booking_repo
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ def _t(lang: str, key: str, **fmt) -> str:
 
 def _save(chat_id: str, state: str, params: dict) -> None:
     """Persist the session, keeping booking_sessions.booking_id in sync."""
-    postgres.upsert_session(chat_id, state, params, booking_id=params.get("booking_id"))
+    booking_repo.upsert_session(chat_id, state, params, booking_id=params.get("booking_id"))
 
 # Regex to pull two HH:MM times from a single message (e.g. "10:00 до 12:00", "14:30-16:00")
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")
@@ -226,7 +227,7 @@ def handle_booking_turn(
     Returns a reply string if this turn was handled, or None to fall
     through to the regular RAG/LLM pipeline.
     """
-    session = postgres.get_active_session(chat_id)
+    session = booking_repo.get_active_session(chat_id)
 
     # ── Active session — dispatch to step handler ────────────────────────
     if session:
@@ -245,7 +246,7 @@ def handle_booking_turn(
                     bid, actor_type="whatsapp", actor_id=chat_id, reason="user_cancel_mid_flow"
                 )
             else:
-                postgres.delete_session(chat_id)
+                booking_repo.delete_session(chat_id)
             logger.info("[BOOKING] Cancel intent detected — session cleared for %s", chat_id)
             return ("Хорошо, бронь отменена. Если передумаете — просто напишите! 🙂\n\n"
                     "Жарайды, брондау тоқтатылды. Қайта қаласаңыз — жазыңыз!")
@@ -254,7 +255,7 @@ def handle_booking_turn(
         # Discard it and restart the flow cleanly rather than crashing.
         if "booking_id" not in params:
             logger.warning("[BOOKING] Stale session without booking_id — restarting flow for %s", chat_id)
-            postgres.delete_session(chat_id)
+            booking_repo.delete_session(chat_id)
             return start_booking_flow(chat_id, sender_phone, _detect_lang(user_text))
 
         if state == "step_date":
@@ -282,7 +283,7 @@ def handle_booking_turn(
     logger.info("[BOOKING] No active session. intent=%s | user_text=%.80s", intent, user_text)
 
     if intent == "my_booking":
-        bookings = postgres.get_user_upcoming_bookings(sender_phone)
+        bookings = booking_repo.get_user_upcoming_bookings(sender_phone)
         logger.info("[BOOKING] my_booking query — %d bookings found for %s", len(bookings), sender_phone)
         ctx = booking_logic.format_user_booking_context(bookings)
         return get_booking_reply(user_text, ctx)
@@ -506,7 +507,7 @@ def _handle_step_confirm(
             booking_service.cancel_booking(
                 params["booking_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined"
             )
-        postgres.delete_session(chat_id)
+        booking_repo.delete_session(chat_id)
         return _t(lang, "declined")
 
     logger.info("[BOOKING:step_confirm] unrecognised response=%.80s — re-showing summary", user_text)
@@ -531,7 +532,7 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
 
     res = booking_service.request_payment(booking_id, params["client_token"])
     if not res["ok"]:
-        postgres.delete_session(chat_id)
+        booking_repo.delete_session(chat_id)
         if res["code"] == "SLOT_TAKEN":
             logger.warning("[BOOKING:confirm] slot taken mid-flow for booking_id=%d", booking_id)
             free = booking_logic.get_free_windows()
@@ -561,7 +562,7 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
             logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 
     threading.Thread(target=_write_to_sheets, daemon=True).start()
-    postgres.delete_session(chat_id)
+    booking_repo.delete_session(chat_id)
 
     return _t(
         lang,
@@ -649,5 +650,4 @@ def _pad_time(t: str) -> str:
     """Ensure HH:MM format (zero-pad single-digit hours)."""
     h, m = t.split(":")
     return f"{int(h):02d}:{m}"
-
 

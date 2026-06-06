@@ -57,11 +57,11 @@ def _cancel_expired_bookings():
     if not config.POSTGRES_DSN:
         return
     try:
-        from integrations.postgres import get_expired_bookings
+        from integrations.repo import booking_repo
         from integrations import booking_service, sheets
         from handlers.whatsapp_client import send_text_message
 
-        expired = get_expired_bookings(config.BOOKING_SESSION_TTL)
+        expired = booking_repo.get_expired_bookings(config.BOOKING_SESSION_TTL)
         if not expired:
             return
 

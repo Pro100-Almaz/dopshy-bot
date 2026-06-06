@@ -1,4 +1,4 @@
-"""Tests for slot-availability functions in integrations/booking.py.
+"""Tests for slot-availability functions in integrations/booking_repo.py.
 
 Covers:
 - get_free_windows: empty DB, single booking subtraction, adjacent bookings,
@@ -151,7 +151,7 @@ class TestGetAllBooked:
         # failed directly (reject_payment keeps awaiting_payment; only manager/sweeper
         # transitions to failed via cancel path in older code).
         # We create an awaiting_payment booking, then manually flip it to failed.
-        from integrations.postgres import _conn
+        from integrations.repo.postgres import _conn
         date_str = _near_date(3)
         bid = _awaiting_booking(field=_field_ids()[0], date_str=date_str, ts="16:00", te="17:00")
         with _conn() as conn:
@@ -397,7 +397,7 @@ class TestGetFreeWindows:
 
     def test_failed_booking_does_not_block_slot(self):
         """failed state must not reduce free windows."""
-        from integrations.postgres import _conn
+        from integrations.repo.postgres import _conn
         target_date = (today_almaty() + timedelta(days=3)).isoformat()
         field_id = _field_ids()[0]
         bid = _awaiting_booking(field=field_id, date_str=target_date, ts="18:00", te="20:00")

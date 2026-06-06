@@ -22,7 +22,7 @@ from handlers.session.booking_session import (
     start_booking_flow,
 )
 from integrations import booking_service as svc
-from integrations.postgres import _conn, get_active_session
+from integrations.repo.postgres import _conn, get_active_session
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -452,7 +452,7 @@ class TestSlotTakenBranch:
                          field=field_id, format="5x5", players=8, customer_name="Racer")
 
         # Advance session to step_confirm by writing it directly
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str,
@@ -511,7 +511,7 @@ class TestSlotTakenBranch:
         svc.update_draft(booking_id, date=date_str, time_start="16:00", time_end="18:00",
                          field=field_id, format="6x6", players=6, customer_name="Test2")
 
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str, "time_start": "16:00", "time_end": "18:00",
@@ -600,7 +600,7 @@ class TestMidFlowCancel:
 
         svc.update_draft(booking_id, date=date_str, time_start="10:00", time_end="11:00",
                          field=field_id, format="5x5", players=8, customer_name="Тест")
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str, "time_start": "10:00", "time_end": "11:00",
@@ -770,7 +770,7 @@ class TestStepConfirm:
 
         svc.update_draft(booking_id, date=date_str, time_start="10:00", time_end="11:00",
                          field=field_id, format="5x5", players=8, customer_name="Тест")
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str, "time_start": "10:00", "time_end": "11:00",
@@ -804,7 +804,7 @@ class TestStepConfirm:
 
             svc.update_draft(booking_id, date=date_str, time_start=time_start, time_end=time_end,
                              field=field_id, format="5x5", players=8, customer_name="T")
-            from integrations.postgres import upsert_session
+            from integrations.repo.postgres import upsert_session
             params = session["params"].copy()
             params.update({
                 "date": date_str, "time_start": time_start, "time_end": time_end,

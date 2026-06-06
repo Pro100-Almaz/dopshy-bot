@@ -17,6 +17,8 @@ services:
     # Surface Postgres logs in dev for easier debugging.
     image: postgres:16-alpine
     command: ["postgres", "-c", "log_statement=mod", "-c", "log_min_duration_statement=200"]
+    ports:
+      - "5432:5432"
 
   bot:
     # Mount the full source so code changes propagate without a rebuild.

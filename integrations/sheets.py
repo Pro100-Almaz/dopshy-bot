@@ -14,7 +14,7 @@ import threading
 from typing import Any
 
 import config
-from integrations import postgres
+from integrations.repo import booking_repo
 from utils import now_almaty, today_almaty
 import datetime
 
@@ -156,7 +156,7 @@ def refresh_all_bookings() -> None:
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
-        rows = postgres.get_bookings_for_sheet()
+        rows = booking_repo.get_bookings_for_sheet()
         ws = _get_worksheet()
         ws.clear()
         data = [_HEADERS] + [_booking_to_row(b) for b in rows]
@@ -251,7 +251,7 @@ def _get_current_week_bookings(field_num: int) -> list[dict]:
     today = today_almaty()
     last_day = today + datetime.timedelta(days=6)
 
-    bookings = postgres.get_bookings_in_range(
+    bookings = booking_repo.get_bookings_in_range(
         str(today), str(last_day), states=("awaiting_payment", "confirmed")
     )
 
