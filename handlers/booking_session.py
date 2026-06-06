@@ -26,7 +26,7 @@ from datetime import date, datetime
 import config
 from integrations import booking as booking_logic
 from integrations import booking_service, sheets
-from integrations.repo import booking_repo
+from integrations.repo import booking_repo, postgres
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ def _t(lang: str, key: str, **fmt) -> str:
 
 def _save(chat_id: str, state: str, params: dict) -> None:
     """Persist the session, keeping booking_sessions.booking_id in sync."""
-    booking_repo.upsert_session(chat_id, state, params, booking_id=params.get("booking_id"))
+    postgres.upsert_session(chat_id, state, params, object_id=params.get("booking_id"))
 
 # Regex to pull two HH:MM times from a single message (e.g. "10:00 до 12:00", "14:30-16:00")
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")

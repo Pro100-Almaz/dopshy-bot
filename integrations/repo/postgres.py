@@ -146,6 +146,7 @@ def cancel_booking_trial(bot_name:str, object_id: int, actor_type: str = "whatsa
             )
             if cur.fetchone():
                 # _record_event(cur, object_id, "cancelled", actor_type, actor_id, reason)
+                table_del = "booking_sessions" if bot_name == "dopsy_bot" else "trials_session"
                 cur.execute(
                     "DELETE FROM booking_sessions WHERE booking_id = %s", (object_id,)
                 )
@@ -161,7 +162,7 @@ def cancel_booking_trial(bot_name:str, object_id: int, actor_type: str = "whatsa
 
 
 # ---------------------------------------------------------------------------
-# Booking sessions
+#  Booking/Trial sessions
 # ---------------------------------------------------------------------------
 
 def get_active_session(bot_name: str, chat_id: str) -> dict | None:

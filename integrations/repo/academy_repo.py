@@ -40,7 +40,7 @@ def setting_training_time(group_id: int, date: str, time_start: str, time_end: s
                                                                                          time_end     = EXCLUDED.time_end,
                                                                                          updated_at   = NOW()
 
-                """, (date, time_start, time_end,)
+                """, (group_id, date, time_start, time_end,)
             )
 
 
@@ -102,24 +102,30 @@ def get_all_user_trials(user_id: int) -> list[dict] | None:
             return [dict(trial) for trial in trials]
 
 
+def get_available_groups(curriculum: str) -> list:
+    if curriculum not in ["football", "boxing"]:
+        raise ValueError(f"Invalid curriculum: {curriculum}")
 
-
-
-def get_available_groups():
-    pass
-
-
-
-def upsert_trial():
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                    
+                SELECT t.training_day, t.time_start, t.time_end, t.group_id 
+                FROM academy_trials t JOIN academy_groups
+                    ON t.group_id = g.id
+                WHERE t.curriculum = $s 
+                """, (curriculum,)
+            )
+            groups = cur.fetchall()
+            return [dict(group) for group in groups]
+
+
+
+def edit_trial():
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                       
                 """
             )
-
-
-
-def cancel_trial():
-    pass

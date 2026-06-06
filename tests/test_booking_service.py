@@ -2,7 +2,7 @@
 
 import uuid
 
-from integrations import booking_service as svc
+from integrations.repo import postgres as svc
 from integrations.repo.postgres import _conn
 
 
@@ -29,7 +29,7 @@ def _events(booking_id: int) -> list[str]:
 
 def _ready_draft(token, date="2026-07-01", ts="18:00", te="19:00", field=1):
     """Create a fully-populated DRAFT ready for request_payment."""
-    res = svc.create_draft("chat1", "7700", token,
+    res = svc.create_draft("dopsy_bot",
                            date=date, time_start=ts, time_end=te,
                            field=field, format="5x5", players=8,
                            customer_name="Test")
@@ -40,8 +40,8 @@ def _ready_draft(token, date="2026-07-01", ts="18:00", te="19:00", field=1):
 
 def test_create_draft_is_idempotent():
     token = _token()
-    a = svc.create_draft("chat1", "7700", token)
-    b = svc.create_draft("chat1", "7700", token)
+    a = svc.create_draft("dopsy_bot", "7700", token)
+    b = svc.create_draft("dopsy_bot", "7700", token)
     assert a["ok"] and b["ok"]
     assert a["data"]["booking_id"] == b["data"]["booking_id"]
     # Only one draft_created event despite two calls.
