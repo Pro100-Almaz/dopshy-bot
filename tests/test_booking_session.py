@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 
 import config
-from handlers.booking_session import (
+from handlers.session.booking_session import (
     _TIME_RANGE_RE,
     _is_cancel_intent,
     _pad_time,

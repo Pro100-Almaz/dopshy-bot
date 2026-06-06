@@ -1,94 +1,24 @@
 """OpenAI GPT-4o-mini integration."""
+import config
 import json
 import logging
 
 from openai import OpenAI
-import config
+
+from chat.conversation import Message
+from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL
+from chat.tools.academy_tools import START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL
 
 logger = logging.getLogger(__name__)
 
 _client = OpenAI(api_key=config.OPENAI_API_KEY)
-
-# Tool definition for Bot 1: LLM calls this instead of emitting a text tag
-_START_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "start_booking",
-        "description": (
-            "Запустить пошаговый процесс бронирования футбольного поля. "
-            "ВЫЗЫВАЙ эту функцию при ЛЮБОМ намёке на желание забронировать, арендовать, "
-            "снять поле, занять время или просто прийти поиграть — даже если пользователь "
-            "ещё не уверен, не назвал дату/время или прислал только часть деталей. "
-            "Лучше вызвать функцию лишний раз, чем пропустить намерение: пошаговый процесс "
-            "сам спросит всё необходимое и сам сообщит, если бронировать сейчас нельзя. "
-            "Не пытайся собрать дату/время/состав в свободном тексте до вызова функции. "
-            "НЕ вызывай эту функцию, если пользователь хочет ИЗМЕНИТЬ уже существующую бронь — "
-            "для этого есть edit_booking."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-}
-
-# Tool definition for Bot 1: LLM extracts the diff for editing an existing
-# booking. The backend (booking_service.client_edit_booking) is the only place
-# that enforces the 48h window + once-only + slot-clash rules — this tool's
-# job is purely extraction, not policy.
-_EDIT_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "edit_booking",
-        "description": (
-            "Изменить детали уже существующей подтверждённой или ожидающей оплаты брони. "
-            "ВЫЗЫВАЙ эту функцию, когда пользователь хочет ПЕРЕНЕСТИ время/дату, СМЕНИТЬ "
-            "поле, изменить число игроков или своё имя в активной брони "
-            "(например: «перенесите на пятницу в 18:00», «давайте на другое поле», "
-            "«нас будет 10», «измените имя на Алмат»). "
-            "Заполняй ТОЛЬКО те параметры, которые пользователь действительно изменил — "
-            "остальные оставь пустыми, бэкенд возьмёт значения из текущей брони. "
-            "Если деталей нет вообще (например, «перенесите мою бронь» без новой даты), "
-            "всё равно вызывай функцию с пустыми параметрами — бот сам спросит детали. "
-            "Не пытайся сам проверить, можно ли редактировать (правило 48 часов и т.п.) — "
-            "это сделает бэкенд и вернёт понятную ошибку."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {
-                    "type": "string",
-                    "description": "Новая дата в формате YYYY-MM-DD. Опускай, если дата не меняется.",
-                },
-                "time_start": {
-                    "type": "string",
-                    "description": "Новое время начала в формате HH:MM (24h). Опускай, если время не меняется.",
-                },
-                "time_end": {
-                    "type": "string",
-                    "description": "Новое время окончания в формате HH:MM (24h). Опускай, если время не меняется.",
-                },
-                "field": {
-                    "type": "integer",
-                    "description": "Новый номер поля (1, 2, …). Опускай, если поле не меняется.",
-                },
-                "players": {
-                    "type": "integer",
-                    "description": "Новое количество игроков. Опускай, если число игроков не меняется.",
-                },
-                "customer_name": {
-                    "type": "string",
-                    "description": "Новое имя клиента. Опускай, если имя не меняется.",
-                },
-            },
-            "required": [],
-        },
-    },
-}
 
 
 def get_ai_response(
     phone_number_id: str,
     chat_id: str,
     user_message: str,
-    history: list[dict],
+    history: list[Message],
     context: str,
 ) -> tuple[str, dict | None]:
     """
@@ -102,6 +32,7 @@ def get_ai_response(
         The handler dispatches on `name` to launch the corresponding flow.
     """
     is_dopsy = config.BOT_CONFIGS[phone_number_id]["name"] == "dopsy_bot"
+    is_boxing = config.BOT_CONFIGS[phone_number_id]["name"] == "dopsy_boxing"
     system_content = config.BOT_CONFIGS[phone_number_id]["system_prompt"]
 
     # Inject factual field list for Bot 1 so the LLM never hallucinates field formats
@@ -126,7 +57,10 @@ def get_ai_response(
         max_tokens=512,
     )
     if is_dopsy:
-        kwargs["tools"] = [_START_BOOKING_TOOL, _EDIT_BOOKING_TOOL]
+        kwargs["tools"] = [START_BOOKING_TOOL, EDIT_BOOKING_TOOL]
+        kwargs["tool_choice"] = "auto"
+    elif is_boxing:
+        kwargs["tools"] = [START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL]
         kwargs["tool_choice"] = "auto"
 
     response = _client.chat.completions.create(**kwargs)
@@ -136,19 +70,18 @@ def get_ai_response(
     if msg.tool_calls:
         for tc in msg.tool_calls:
             name = tc.function.name
-            if name not in ("start_booking", "edit_booking"):
-                continue
-            args: dict = {}
-            if name == "edit_booking":
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "[LLM] edit_booking returned unparseable arguments: %r",
-                        tc.function.arguments,
-                    )
-                    args = {}
-            return preamble, {"name": name, "args": args}
+            if name in ("start_booking", "edit_booking", "start_trial", "edit_trial", "cancel_trial"):
+                args: dict = {}
+                if name in ("edit_booking", "edit_trial"):
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "[LLM] edit_booking returned unparseable arguments: %r",
+                            tc.function.arguments,
+                        )
+                        args = {}
+                return preamble, {"name": name, "args": args}
 
     return preamble, None
 

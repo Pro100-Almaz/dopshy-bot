@@ -31,7 +31,7 @@ BOT_CONFIGS = {
         "system_prompt": sp_2.SYSTEM_PROMPT,
     },
     WHATSAPP_PHONE_NUMBER_ID_BOT_3: {
-        "name": "chatbot_3",
+        "name": "dopsy_boxing",
         "access_token": WHATSAPP_TOKEN,
         "phone_number_id": WHATSAPP_PHONE_NUMBER_ID_BOT_3,
         "system_prompt": sp_3.SYSTEM_PROMPT,

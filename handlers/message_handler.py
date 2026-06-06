@@ -8,10 +8,12 @@ import threading
 
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
+from handlers.trial_session import handle_trial_turn, start_trial_flow
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
-from handlers.edit_booking import handle_edit_request
+from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
+from handlers.edit_trial import handle_edit_request as handle_edit_trial_request
 from integrations import booking_service, payment_validation, postgres, sheets
 import config
 
@@ -170,6 +172,22 @@ def handle_incoming_message(payload: dict) -> None:
                 return
             logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
 
+        elif bot_config["name"] == "dopsy_boxing":
+            logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
+            trial_reply = handle_trial_turn(
+                chat_id, phone_number_id, sender_id, user_text, bot_config["name"]
+            )
+            if trial_reply is not None:
+                logger.info(
+                    "[TRIAL] Trial branch handled message — skipping RAG/LLM. "
+                    "Reply preview: %.120s", trial_reply
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", trial_reply)
+                send_text_message(phone_number_id, sender_id, trial_reply)
+                return
+            logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
+
         # 2. Retrieve relevant context from knowledge base
         context = retrieve_context(user_text)
         logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
@@ -181,6 +199,13 @@ def handle_incoming_message(payload: dict) -> None:
             free = get_free_windows()
             availability_ctx = format_availability_context(free)
             logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
+            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
+
+        elif bot_config["name"] == "dopsy_boxing":
+            from integrations.trial import get_trial_daytime, format_availability_context
+            free = get_trial_daytime(bot_config["name"], None)
+            availability_ctx = format_availability_context(free)
+            logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
         # 3b. Get conversation history
@@ -199,17 +224,26 @@ def handle_incoming_message(payload: dict) -> None:
 
         # 5. LLM may have asked us to launch a deterministic sub-flow.
         if tool_call:
-            if tool_call["name"] == "start_booking":
+            handle_reply = reply
+            if tool_call["name"] in "start_booking":
                 lang = _detect_lang(user_text)
-                logger.info(
-                    "[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang
-                )
-                booking_prompt = start_booking_flow(chat_id, sender_id, lang)
-                reply = (reply + "\n\n" + booking_prompt) if reply else booking_prompt
+                logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
+                handle_reply = start_booking_flow(chat_id, sender_id, lang)
+
             elif tool_call["name"] == "edit_booking":
                 logger.info("[EDIT] LLM called edit_booking tool — diff=%s", tool_call["args"])
-                edit_reply = handle_edit_request(chat_id, sender_id, tool_call["args"])
-                reply = (reply + "\n\n" + edit_reply) if reply else edit_reply
+                handle_reply = handle_edit_booking_request(chat_id, sender_id, tool_call["args"])
+
+            elif tool_call["name"] == "start_trial":
+                lang = _detect_lang(user_text)
+                logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
+                handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
+
+            elif tool_call["name"] == "edit_trial":
+                logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])
+                handle_reply = handle_edit_trial_request(chat_id, sender_id, tool_call["args"], bot_config["name"])
+
+            reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 
         # 6. Save to history
         append_message(chat_id, "user", user_text)
