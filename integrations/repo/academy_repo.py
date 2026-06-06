@@ -46,7 +46,6 @@ def setting_training_time(group_id: int, date: str, time_start: str, time_end: s
 
 def get_group_info(bot_name: str):
     group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
-
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(

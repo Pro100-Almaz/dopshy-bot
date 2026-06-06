@@ -17,13 +17,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _ACADEMY_DRAFT_FIELDS = {
     "trial_day", "start_time", "end_time", "notes", "group_id", "user_id",
-    "state", "language", "group_id", "user_id"
+    "state", "language", "client_token", "sender_phone"
 }
 
 _FOOTBALL_DRAFT_FIELDS = {
     "date", "time_start", "time_end", "field", "format",
     "players", "customer_name", "notes",
-    "phone", "state", "client_token", "source", "client_token"
+    "phone", "state", "client_token", "source",
 }
 
 draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "football": _FOOTBALL_DRAFT_FIELDS}

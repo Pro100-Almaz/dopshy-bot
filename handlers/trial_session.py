@@ -165,7 +165,7 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
         return _t(lang, "no_availability")
 
     client_token = str(uuid.uuid4())
-    draft = booking_service.create_draft(chat_id, sender_phone, client_token, bot_name)
+    draft = postgres.create_draft(bot_name, chat_id=chat_id, sender_phone=sender_phone, client_token=client_token)
     trial_id = draft["data"]["trial_id"]
 
     _save(
