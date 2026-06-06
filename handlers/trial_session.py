@@ -25,7 +25,8 @@ from datetime import date, datetime
 
 import config
 from integrations import trial as trial_logic
-from integrations import booking_service, postgres, sheets
+from integrations import booking_service, sheets
+from integrations.repo import postgres
 from utils import today_almaty
 
 from integrations.trial import get_trial_daytime

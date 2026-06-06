@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 import config
-from integrations import postgres
+from integrations.repo import postgres
 from utils import now_almaty, today_almaty
 
 logger = logging.getLogger(__name__)

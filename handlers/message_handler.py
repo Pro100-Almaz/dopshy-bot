@@ -14,10 +14,10 @@ from handlers.whatsapp_client import send_text_message, mark_as_read, download_m
 from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request
-from integrations import booking_service, payment_validation, postgres, sheets
+from integrations import booking_service, payment_validation, sheets
 from handlers.edit_booking import handle_edit_request
 from integrations import booking_service, payment_validation, sheets
-from integrations.repo import booking_repo
+from integrations.repo import booking_repo, postgres
 import config
 
 logger = logging.getLogger(__name__)

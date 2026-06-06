@@ -12,7 +12,8 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from integrations import booking_service, postgres, sheets
+from integrations import booking_service, sheets
+from integrations.repo import postgres
 
 logger = logging.getLogger(__name__)
 

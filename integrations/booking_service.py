@@ -26,7 +26,7 @@ import psycopg2.errors
 import psycopg2.extras
 
 import config
-from integrations.repo.postgres import _conn
+from integrations.repo.utils import _conn, _err, _ok
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +36,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Result envelope
 # ---------------------------------------------------------------------------
-
-def _ok(data: dict | None = None, code: str = "OK", message: str = "") -> dict:
-    return {"ok": True, "code": code, "data": data, "message": message}
-
-
-def _err(code: str, message: str) -> dict:
-    return {"ok": False, "code": code, "data": None, "message": message}
-
 
 def _record_event(cur, booking_id: int, event: str, actor_type: str,
                   actor_id: str | None = None, note: str | None = None) -> None:

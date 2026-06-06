@@ -13,11 +13,11 @@ CREATE TABLE IF NOT EXISTS academy_groups (
 
 CREATE TABLE IF NOT EXISTS academy_group_schedules (
     id SERIAL PRIMARY KEY,
-    group_id INTEGER NOT NULL, REFERENCES academy_groups(id) ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES academy_groups(id) ON DELETE CASCADE,
     training_day INTEGER NOT NULL CHECK (TRAINING_DAY BETWEEN 0 AND 6),
     time_start TIME NOT NULL,
     time_end TIME NOT NULL,
-    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
 
     CHECK (time_start < time_end),
@@ -31,13 +31,12 @@ CREATE TABLE IF NOT EXISTS academy_users (
     child_age INTEGER,
     child_birth_date DATE,
     parent_phone VARCHAR(15),
-    shift VARCHAR(20),
     total_trials INTEGER DEFAULT 0,
     assigned_group_id BIGINT DEFAULT NULL,
     created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
 
-    FOREIGN KEY (assigned_group_id) REFERENCES boxing_groups(id)
+    FOREIGN KEY (assigned_group_id) REFERENCES academy_groups(id)
 );
 
 
@@ -60,15 +59,15 @@ CREATE TABLE IF NOT EXISTS academy_trials (
     created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
 
-    FOREIGN KEY (user_id) REFERENCES boxing_users(id),
-    FOREIGN KEY (group_id) REFERENCES boxing_groups(id)
+    FOREIGN KEY (user_id) REFERENCES academy_users(id),
+    FOREIGN KEY (group_id) REFERENCES academy_groups(id)
 );
 
 CREATE TABLE IF NOT EXISTS trial_sessions (
     chat_id    TEXT        PRIMARY KEY,
     state      VARCHAR(20) NOT NULL,
     params     JSONB       NOT NULL DEFAULT '{}',
-    trial_id INTEGER     REFERENCES bookings(id),
+    trial_id INTEGER     REFERENCES academy_trials(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL

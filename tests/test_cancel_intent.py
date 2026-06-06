@@ -2,7 +2,7 @@
 
 import pytest
 
-from handlers.session.booking_session import _is_cancel_intent
+from handlers.booking_session import _is_cancel_intent
 
 
 @pytest.mark.parametrize("text", [

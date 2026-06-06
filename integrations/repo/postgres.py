@@ -2,46 +2,15 @@
 
 import json
 import logging
-import threading
-from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
 import config
-from integrations.booking_service import _record_event, _ok, _err
+from integrations.repo.utils import _conn, _ok, _err
 
 logger = logging.getLogger(__name__)
-
-_pool: psycopg2.pool.ThreadedConnectionPool | None = None
-_pool_lock = threading.Lock()
-
-
-def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
-    global _pool
-    if _pool is None:
-        with _pool_lock:
-            if _pool is None:
-                _pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1, maxconn=config.POSTGRES_MAX_CONN, dsn=config.POSTGRES_DSN
-                )
-    return _pool
-
-
-@contextmanager
-def _conn():
-    pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
-
 
 # ---------------------------------------------------------------------------
 # Schema
