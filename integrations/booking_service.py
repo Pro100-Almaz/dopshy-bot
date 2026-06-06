@@ -30,7 +30,6 @@ from integrations.repo.utils import _conn, _err, _ok
 
 logger = logging.getLogger(__name__)
 
-# Patch fields a draft may set via update_draft.
 
 
 # ---------------------------------------------------------------------------

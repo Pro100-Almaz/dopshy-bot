@@ -18,7 +18,7 @@ from datetime import date, timedelta
 import pytest
 
 import config
-from integrations import booking_service as svc
+from integrations.repo import postgres as svc
 from integrations.booking import (
     format_availability_context,
     get_all_booked,
@@ -63,11 +63,19 @@ def _confirmed_booking(field: int, date_str: str, ts: str, te: str) -> int:
 def _awaiting_booking(field: int, date_str: str, ts: str, te: str) -> int:
     """Create a booking in awaiting_payment state via the normal flow."""
     token = _token()
-    res = svc.create_draft(
-        "chat_test", "77009999999", token,
-        date=date_str, time_start=ts, time_end=te,
-        field=field, format=_format_for(field), players=6,
-        customer_name="AwaitTest",
+    res = svc.create_draft('dopsy_bot',
+        {
+            # "chat_id": "chat_test",
+            "phone": "77009999999",
+            "token": token,
+            "date": date_str,
+            "time_start": ts,
+            "time_end": te,
+            "field": field,
+            "format": _format_for(field),
+            "players": 6,
+            "customer_name": "AwaitTest",
+        },
     )
     assert res["ok"]
     bid = res["data"]["booking_id"]
