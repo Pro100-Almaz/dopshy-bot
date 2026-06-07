@@ -15,7 +15,7 @@ from flask import Flask, request, jsonify, abort
 
 import config
 from handlers.message_handler import handle_incoming_message
-from integrations.sheets import refresh_week_sheet
+from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +45,7 @@ def _scheduled_sheet_refresh():
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
-        from integrations.sheets import refresh_all_bookings
+        from integrations.sheets.booking_sheets import refresh_all_bookings
         refresh_all_bookings()
         logger.info("Scheduled sheet refresh complete.")
     except Exception as exc:
@@ -58,7 +58,8 @@ def _cancel_expired_bookings():
         return
     try:
         from integrations.repo import booking_repo
-        from integrations import booking_service, sheets
+        from integrations import booking_service
+        from integrations.sheets import booking_sheets as sheets
         from handlers.whatsapp_client import send_text_message
 
         expired = booking_repo.get_expired_bookings(config.BOOKING_SESSION_TTL)
@@ -210,9 +211,8 @@ def admin_setup_sheet():
     if auth != config.WHATSAPP_VERIFY_TOKEN:
         abort(403)
 
-    from integrations.sheets import setup_sheet_template, refresh_all_bookings
+    from integrations.sheets.booking_sheets import refresh_all_bookings
     try:
-        setup_sheet_template()
         refresh_all_bookings()
         refresh_week_sheet()
         return jsonify({"status": "ok"}), 200

@@ -139,3 +139,5 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
             """, (session_ttl_seconds,))
             return [dict(r) for r in cur.fetchall()]
 
+
+

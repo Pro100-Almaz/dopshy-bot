@@ -64,7 +64,7 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
     return _ok({f"{type_string}_id": object_id})
 
 
-def update_draft(bot_name: str, object_id: int, **patch) -> dict:
+def update_draft(bot_name: str, object_id: int, draft: str = 'draft', **patch) -> dict:
     """Patch a DRAFT booking's collected fields. Rejects if not in DRAFT."""
     fields = {k: v for k, v in patch.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
     if not fields:
@@ -77,14 +77,15 @@ def update_draft(bot_name: str, object_id: int, **patch) -> dict:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"UPDATE {table_name} SET {set_clause} "
-                f"WHERE id = %s AND state = 'draft' RETURNING id",
+                f"WHERE id = %s AND state = {draft} RETURNING id",
                 vals,
             )
             if cur.fetchone():
+
                 # _record_event(cur, object_id, "draft_updated", "whatsapp")
                 return _ok({"object_id": object_id})
 
-            cur.execute("SELECT state FROM bookings WHERE id = %s", (object_id,))
+            cur.execute(f"SELECT state FROM {table_name} WHERE id = {object_id}")
             row = cur.fetchone()
     if not row:
         return _err("NOT_FOUND", "Запись не найдена.")

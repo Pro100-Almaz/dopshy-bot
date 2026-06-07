@@ -27,6 +27,7 @@ import config
 from integrations import booking as booking_logic
 from integrations import booking_service, sheets
 from integrations.repo import booking_repo, postgres
+from integrations.sheets.booking_sheets import upsert_booking_row
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
@@ -558,7 +559,7 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
 
     def _write_to_sheets():
         try:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
         except Exception as e:
             logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 

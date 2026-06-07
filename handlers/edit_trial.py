@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from integrations import booking_service, sheets
 from integrations.repo import postgres
+from integrations.sheets.booking_sheets import upsert_booking_row
 
 logger = logging.getLogger(__name__)
 
@@ -25,30 +26,24 @@ logger = logging.getLogger(__name__)
 # Each entry is (ru, kk). Curly placeholders are filled at format time.
 _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
     "NO_TRIAL": (
-        "У вас нет активной записи на пробную урок, которую можно изменить.",
+        "У вас нет активной записи на пробный урок, которое можно изменить.",
         "Сізде өзгертуге болатын белсенді жазылым жоқ.",
     ),
     "ALREADY_EDITED": (
         "❌ Эту бронь уже один раз меняли. Следующее изменение — через администратора.",
         "❌ Бұл бронь бір рет өзгертілген. Келесі өзгерісті әкімші арқылы жасаңыз.",
     ),
-    "SLOT_TAKEN": (
-        "❌ Это время уже занято. Выберите другое время или поле.",
-        "❌ Бұл уақыт алынған. Басқа уақыт немесе алаң таңдаңыз.",
-    ),
     "NO_CHANGE": (
-        "Я не понял, что именно изменить. Напишите новое время, дату, "
-        "поле или количество игроков.",
+        "Я не понял, что именно изменить. Напишите новое время, дату, ",
         "Нақты не өзгерту керек екенін түсінбедім. Жаңа уақытты, күнді, "
-        "алаңды немесе ойыншы санын жазыңыз.",
     ),
     "INVALID_STATE": (
         "❌ Эту бронь уже нельзя изменить.",
         "❌ Бұл бронды енді өзгертуге болмайды.",
     ),
     "NOT_FOUND": (
-        "❌ Бронь не найдена.",
-        "❌ Брон табылмады.",
+        "❌ Пробное занятие не найдено.",
+        "❌ Жахылым табылмады.",
     ),
 }
 
@@ -181,7 +176,7 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
     def _run():
         for r in rows:
             try:
-                sheets.upsert_booking_row(r)
+                upsert_booking_row(r)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[EDIT] Sheets sync failed for booking %s: %s", r["id"], exc)
 
@@ -193,12 +188,12 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
 # ---------------------------------------------------------------------------
 
 def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: str) -> str:
-    return _format_reject("NO_TRIAL")
+    # return _format_reject("NO_TRIAL")
     """Process a single edit_booking tool-call payload from the LLM."""
     diff = {k: v for k, v in (diff or {}).items() if v not in (None, "")}
     logger.info("[EDIT_TRIAL] chat_id=%s phone=%s diff=%s", chat_id, sender_phone, diff)
 
-    target = postgres.get_user_editable_trial(sender_phone, bot_name)
+    target = postgres.get_user_editable_booking(sender_phone, bot_name)
     if target is None:
         logger.info("[EDIT_TRIAL] No editable trial for %s — rejecting", sender_phone)
         return _format_reject("NO_TRIAL")
@@ -222,3 +217,5 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: s
     )
     _sync_sheets(target["id"], result["data"]["new_booking"], sender_phone)
     return _format_success(result["data"])
+
+

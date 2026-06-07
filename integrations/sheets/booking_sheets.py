@@ -167,60 +167,6 @@ def refresh_all_bookings() -> None:
         logger.error("Sheets refresh_all_bookings failed: %s", exc)
 
 
-def setup_sheet_template() -> None:
-    """Apply header, column widths, and the status dropdown (column H). Run once."""
-    if not config.GOOGLE_SPREADSHEET_ID:
-        return
-    col_widths = [110, 60, 110, 70, 70, 200, 240, 160, 150]
-    try:
-        ws = _get_worksheet()
-        ws.update("A1", [_HEADERS])
-        sheet_id = ws.id
-        requests = [
-            *[
-                {
-                    "updateDimensionProperties": {
-                        "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                                  "startIndex": i, "endIndex": i + 1},
-                        "properties": {"pixelSize": w},
-                        "fields": "pixelSize",
-                    }
-                }
-                for i, w in enumerate(col_widths)
-            ],
-            {
-                "repeatCell": {
-                    "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1},
-                    "cell": {"userEnteredFormat": {
-                        "textFormat": {"bold": True},
-                        "backgroundColor": {"red": 0.18, "green": 0.34, "blue": 0.62},
-                    }},
-                    "fields": "userEnteredFormat(textFormat,backgroundColor)",
-                }
-            },
-            {"updateSheetProperties": {
-                "properties": {"sheetId": sheet_id,
-                               "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
-            }},
-            {
-                "setDataValidation": {
-                    "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": 1000,
-                              "startColumnIndex": 7, "endColumnIndex": 8},
-                    "rule": {
-                        "condition": {"type": "ONE_OF_LIST",
-                                      "values": [{"userEnteredValue": v}
-                                                 for v in _STATE_DISPLAY.values()]},
-                        "showCustomUi": True, "strict": False,
-                    },
-                }
-            },
-        ]
-        ws.spreadsheet.batch_update({"requests": requests})
-        logger.info("Bookings sheet template applied.")
-    except Exception as exc:
-        logger.error("setup_sheet_template failed: %s", exc)
-
 
 _WEEK_SHEET_NAMES = [(1, "Поле 1"), (2, "Поле 2"), (3, "Поле 3")]
 _TIME_SLOTS = [f'{h:02d}:{m:02d}' for h in range(24) for m in [0, 30]]
