@@ -21,12 +21,14 @@ import logging
 import re
 import threading
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 import config
+from chat.conversation import clear_history
+from handlers.edit_trial import handle_cancel_trial_request
 from integrations import trial as trial_logic
 from integrations import booking_service, sheets
-from integrations.repo import postgres
+from integrations.repo import postgres, academy_repo
 from utils import today_almaty
 
 from integrations.trial import get_trial_daytime
@@ -73,10 +75,12 @@ _T = {
                                 "kk": "Қанша ойыншы болады?"},
     "ask_players_invalid":    {"ru": "Пожалуйста, введите количество игроков (например: *8*).",
                                 "kk": "Ойыншылар санын енгізіңіз (мысалы: *8*)."},
-    "ask_name":               {"ru": "Укажите ваше имя:",
-                                "kk": "Атыңызды жазыңыз:"},
-    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 Игроков: {players}\n👤 Имя: {name}\n\nПодтвердить? Ответьте *да* или *нет*.",
-                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "ask_name":               {"ru": "Укажите имя вашего ребенка:",
+                                "kk": "Балаңыздың есімін жазыңыз:"},
+    "ask_age":                {"ru": "Сколько лет вашему ребенку?",
+                               "kk": "Балаңызды жасы нешеде?"},
+    "summary":                {"ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n🎂 Возраст ребенка: {child_age}\n\nПодтвердить? Ответьте *да* или *нет*.",
+                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n🎂 Балаңыздың жасы: {child_age}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "confirm_reshow":         {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
                                 "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "declined":               {"ru": "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂",
@@ -90,6 +94,8 @@ _T = {
     "booking_pending":        {"ru": "📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 {players} игроков\n👤 {name}\n\n⏳ Статус: ожидает оплаты\n\nДля подтверждения брони оплатите по ссылке:\n{pay_url}\n\nПосле оплаты отправьте PDF-чек из Kaspi сюда в чат — и мы сразу подтвердим вашу бронь. 🙏\n\n⚠️ Если оплата не поступит в течение 1 часа — бронь будет автоматически отменена.",
                                 "kk": "📋 Брондау тіркелді, бірақ әлі расталмады!\n\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 {players} ойыншы\n👤 {name}\n\n⏳ Күй: төлем күтілуде\n\nБрондауды растау үшін төлем жасаңыз:\n{pay_url}\n\nТөлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n⚠️ 1 сағат ішінде төлем келмесе — бронь автоматты түрде жойылады."},
     "field_label":            {"ru": "Поле", "kk": "Алаң"},
+    "confirmed_trial":        {"ru": "Вы записаны на пробный урок, будем вас ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n🎂 Возраст ребенка: {child_age}\n",
+                               "kk": "Жазылым сәтті аяқталды, сізді қуана күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n🎂 Балаңыздың жасы: {child_age}\n"}
 }
 
 
@@ -123,6 +129,17 @@ _NEW_TRIAL_KW = (
     "жазылу", "тегін", "қатыс", "келу", "көру",
 )
 
+_CANCEL_PHRASES = (
+    "отмен", "стоп", "передум", "не хочу", "не хотим", "не нужно",
+    "не надо", "забуд", "забыть", "отбой", "отказыв",
+    "тоқтат", "керек емес", "ұнамайды", "болмайды", "бас тарт",
+)
+
+def _is_cancel_intent(text: str) -> bool:
+    low = text.lower()
+    return any(p in low for p in _CANCEL_PHRASES)
+
+
 # Substrings (matched in lowercased message) that abort an in-flight booking
 # session at any step. Strong cancel intents only — short tokens like "нет" are
 # intentionally excluded because they're valid step_confirm inputs.
@@ -138,7 +155,7 @@ def detect_intent(text: str) -> str | None:
     lower = text.lower()
     for kw in _NEW_TRIAL_KW:
         if kw in lower:
-            return "new_booking"
+            return "new_trial"
     return None
 
 
@@ -211,11 +228,22 @@ def handle_trial_turn(
             chat_id, state, params, user_text,
         )
 
+        if _is_cancel_intent(user_text):
+            tid = params.get("trial_id")
+            if tid:
+                handle_cancel_trial_request(chat_id, sender_phone, bot_name)
+                # postgres.cancel_booking_trial(bot_name, tid, actor_id=chat_id)
+            else:
+                postgres.delete_session(bot_name, chat_id)
+            logger.info("[TRIAL] Cancel intent detected — session cleared for %s", chat_id)
+            return ("Хорошо, запись отменена. Если передумаете — просто напишите! 🙂\n\n"
+                    "Жарайды, брондау тоқтатылды. Қайта қаласаңыз — жазыңыз!")
+
         # Legacy session from before the state-machine upgrade has no draft booking_id.
         # Discard it and restart the flow cleanly rather than crashing.
         if "trial_id" not in params:
             logger.warning("[TRIAL] Stale session without booking_id — restarting flow for %s", chat_id)
-            postgres.delete_session(chat_id, bot_name)
+            postgres.delete_session(bot_name, chat_id)
             return start_trial_flow(chat_id, sender_phone, bot_name, _detect_lang(user_text))
 
         if state == "step_date":
@@ -240,9 +268,9 @@ def handle_trial_turn(
     logger.info("[TRIAL] No active session. intent=%s | user_text=%.80s", intent, user_text)
 
 
-    if intent == "new_booking":
+    if intent == "new_trial":
         lang = _detect_lang(user_text)
-        logger.info("[TRIAL] new_booking intent — starting deterministic flow (lang=%s)", lang)
+        logger.info("[TRIAL] new_trial intent — starting deterministic flow (lang=%s)", lang)
         return start_trial_flow(chat_id, sender_phone, bot_name, lang)
 
     # availability and other intents fall through to the RAG/LLM pipeline.
@@ -297,7 +325,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
         )
         return _ask_date(available_days, lang) + "\n\n" + _t(lang, "ask_date_invalid")
 
-    free = trial_logic.get_trial_daytime(bot_name, [chosen])
+    free = trial_logic.get_trial_daytime(bot_name, [chosen.weekday()])
     day_windows = [w for w in free if w["date"] == chosen]
     logger.info(
         "[TRIAL:step_date] ACCEPTED date=%s — %d free windows → advancing to step_time",
@@ -313,12 +341,14 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
 def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> str:
     lang = params.get("lang", "ru")
     chosen_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
-    free        = trial_logic.get_trial_daytime(bot_name, [chosen_date])
+    free        = trial_logic.get_trial_daytime(bot_name, [chosen_date.weekday()])
     day_windows = [w for w in free if w["date"] == chosen_date]
+    print("day_windows:", day_windows)
+    print("chosen_date:", chosen_date)
     logger.info(
         "[TRIAL:step_time] date=%s free_windows=%s | user_text=%.80s",
         chosen_date,
-        [(w["field"], str(w["time_start"]), str(w["time_end"])) for w in day_windows],
+        [(str(w["time_start"]), str(w["time_end"])) for w in day_windows],
         user_text,
     )
 
@@ -332,17 +362,30 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> s
     time_end   = _pad_time(time_end)
     logger.info("[TRIAL:step_time] parsed time_start=%s time_end=%s", time_start, time_end)
 
+    print(_fmt_time(time_start), _fmt_time(time_end))
+    for w in day_windows:
+        print(w['time_start'], w['time_end'])
+
+    group_ids = [
+        w['group_id'] for w in day_windows
+        if w['time_start'] == _fmt_time(time_start)
+           and w['time_end'] == _fmt_time(time_end)
+    ]
+    if len(group_ids) == 0:
+        logger.info("[TRIAL:step_time] REJECTED — time range not found: time_start=%s time_end=%s", time_start, time_end)
+        return _t(lang, "time_not_recognized") + "\n\n" + _ask_time(chosen_date, day_windows, lang)
+
+
     if time_start >= time_end:
         logger.info("[TRIAL:step_time] REJECTED — inverted range %s >= %s", time_start, time_end)
-        return _ask_time(chosen_date, day_windows, lang) + "\n\n" + _t(lang, "time_inverted")
+        return _t(lang, "time_inverted") + "\n\n" + _ask_time(chosen_date, day_windows, lang)
 
     params["time_start"] = time_start
     params["time_end"]   = time_end
 
-
     logger.info("[TRIAL:step_time] advancing to step_name")
-    postgres.update_draft(bot_name, object_id=params["trial_id"], time_start=time_start, time_end=time_end)
-    _save(chat_id, "step_field", params, bot_name)
+    postgres.update_draft(bot_name, object_id=params["trial_id"], time_start=time_start, time_end=time_end, group_id=group_ids[0])
+    _save(chat_id, "step_name", params, bot_name)
     return _t(lang, "ask_name")
 
 
@@ -359,7 +402,7 @@ def _handle_step_age(chat_id: str, user_text: str, params: dict, bot_name) -> st
     params["child_age"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_age=%r — creating trial lesson for %r", params["child_age"], bot_name)
     postgres.update_draft(bot_name, object_id=params["trial_id"], child_age=params["child_age"])
-    _save(chat_id, "step_lesson", params, bot_name=bot_name)
+    _save(chat_id, "step_confirm", params, bot_name=bot_name)
     return _format_summary(params)
 
 
@@ -380,7 +423,7 @@ def _handle_step_confirm(
 
     if any(w in lower for w in _YES):
         logger.info("[TRIAL:step_confirm] YES received — confirming trial. params=%s", params)
-        return _confirm_booking(chat_id, sender_phone, params, bot_name)
+        return _confirm_trial(chat_id, sender_phone, params, bot_name)
 
     if any(w in lower for w in _NO):
         logger.info("[TRIAL:step_confirm] NO received — cancelling draft + session")
@@ -388,7 +431,8 @@ def _handle_step_confirm(
             postgres.cancel_booking_trial(
                 bot_name, object_id=params["trial_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined"
             )
-        postgres.delete_session(chat_id, bot_name)
+        postgres.delete_session(bot_name, chat_id)
+        clear_history(chat_id)
         return _t(lang, "declined")
 
     logger.info("[TRIAL:step_confirm] unrecognised response=%.80s — re-showing summary", user_text)
@@ -401,45 +445,38 @@ def _handle_step_confirm(
 # Prompt builders
 # ---------------------------------------------------------------------------
 
-def _confirm_booking(chat_id: str, sender_phone: str, params: dict, bot_name: str) -> str:
+def _confirm_trial(chat_id: str, sender_phone: str, params: dict, bot_name: str) -> str:
     lang           = params.get("lang", "ru")
     time_start_str = params["time_start"]
     time_end_str   = params["time_end"]
+    trial_date = params.get("date")
     trial_id     = params["trial_id"]
 
 
     logger.info("[TRIAL:confirm] trial_id=%d → writing to sheets", trial_id)
 
     trial_row = {
-        "bot_name":      bot_name,
-        "id":            trial_id,
-        "date":          params["date"],
-        "time_start":    time_start_str,
-        "time_end":      time_end_str,
+        "trial_day":     datetime.strptime(trial_date, '%Y-%m-%d') if trial_date else None,
+        "start_time":    time_start_str,
+        "end_time":      time_end_str,
         "child_name":    params.get("child_name", ""),
         "phone":         sender_phone,
-        "notes":         "",
+        "child_age":     params.get("child_age", ""),
     }
 
-    def _write_to_sheets():
-        try:
-            pass
-            # sheets.upsert_trial_row(trial_row)
-        except Exception as e:
-            logger.error("Sheets write failed for trial %d: %s", trial_id, e)
-
-    threading.Thread(target=_write_to_sheets, daemon=True).start()
-    postgres.delete_session(chat_id, bot_name)
+    postgres.update_draft(bot_name, object_id=params["trial_id"], **trial_row)
+    academy_repo.confirm_trial(params["trial_id"])
+    postgres.delete_session(bot_name, chat_id)
+    clear_history(chat_id)
 
     return _t(
         lang,
-        "trial_pending",
+        "confirmed_trial",
         date=_fmt_date(params["date"], lang),
         start=time_start_str,
         end=time_end_str,
-        name=params.get("customer_name", ""),
-        age=params["age"],
-        pay_url=config.KASPI_PAYMENT_URL,
+        child_name=params.get("child_name", ""),
+        child_age=params["child_age"],
     )
 
 
@@ -451,18 +488,17 @@ def _ask_date(available_days: list[date], lang: str = "ru") -> str:
 
 
 def _ask_time(chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
-    field_label = _t(lang, "field_label")
     lines = [f"📅 {_WEEKDAY[lang][chosen_date.weekday()]} {chosen_date.strftime('%d.%m.%Y')}\n"]
     lines.append(_t(lang, "ask_time_header"))
 
     windows = list({(w["time_start"], w["time_end"]) for w in day_windows})
     windows.sort()
 
-    range_str = ", ".join(
-        f"{w[0].strftime('%H:%M')}–{w[1].strftime('%H:%M')}"
+    range_str = "\n".join(
+        f"——\t\t\t{w[0].strftime('%H:%M')}–{w[1].strftime('%H:%M')}\t\t\t——"
         for w in windows
     )
-    lines.append(f"  {range_str}")
+    lines.append(f"{range_str}")
 
     lines.append("\n" + _t(lang, "ask_time_prompt"))
     lines.append(_t(lang, "ask_time_example"))
@@ -477,8 +513,8 @@ def _format_summary(params: dict) -> str:
         date=_fmt_date(params.get("date", ""), lang),
         start=params.get("time_start", "?"),
         end=params.get("time_end", "?"),
-        name=params.get("customer_name", "?"),
-        age=params.get("age", "?"),
+        child_name=params.get("child_name", "?"),
+        child_age=params.get("child_age", "?"),
     )
 
 
@@ -498,5 +534,10 @@ def _pad_time(t: str) -> str:
     """Ensure HH:MM format (zero-pad single-digit hours)."""
     h, m = t.split(":")
     return f"{int(h):02d}:{m}"
+
+def _fmt_time(value: str | datetime) -> str | time:
+    if isinstance(value, str):
+        return datetime.strptime(value, "%H:%M").time()
+    return datetime.strftime(value, "%H:%M")
 
 

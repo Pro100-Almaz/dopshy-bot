@@ -40,9 +40,13 @@ _DRAFTS_BY_BOTS = {
 def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
     """Create (or return existing) DRAFT booking/trial. Idempotent on client_token."""
     patch = {k: v for k, v in fields.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
-    cols, vals = list(patch.keys()), list(patch.values())
-    placeholders = ", ".join(["%s"] * len(vals))
+    cols, vals = list(patch.keys()) + ["state"], list(patch.values()) + ["draft"]
     type_string = "booking" if bot_name == "dopsy_bot" else "trial"
+    if type_string == "booking":
+        cols.extend(["source"])
+        vals.extend(["whatsapp"])
+    placeholders = ", ".join(["%s"] * len(vals))
+
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             table_name = "bookings" if bot_name == "dopsy_bot" else "academy_trials"
@@ -64,7 +68,7 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
     return _ok({f"{type_string}_id": object_id})
 
 
-def update_draft(bot_name: str, object_id: int, **patch) -> dict:
+def update_draft(bot_name: str, object_id: int, state: str = 'draft', **patch) -> dict:
     """Patch a DRAFT booking's collected fields. Rejects if not in DRAFT."""
     fields = {k: v for k, v in patch.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
     if not fields:
@@ -77,7 +81,7 @@ def update_draft(bot_name: str, object_id: int, **patch) -> dict:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"UPDATE {table_name} SET {set_clause} "
-                f"WHERE id = %s AND state = 'draft' RETURNING id",
+                f"WHERE id = %s AND state = '{state}' RETURNING id",
                 vals,
             )
             if cur.fetchone():
@@ -91,13 +95,15 @@ def update_draft(bot_name: str, object_id: int, **patch) -> dict:
     return _err("BOOKING_WRONG_STATE", "Эту запись уже нельзя изменить.")
 
 
-def cancel_booking_trial(bot_name:str, object_id: int, actor_type: str = "whatsapp",
+def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whatsapp",
                    actor_id: str | None = None, reason: str | None = None) -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
     table_name = "bookings" if bot_name == "dopsy_bot" else "academy_trials"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            extra = ""
+            params = (object_id,)
             if bot_name == "dopsy_bot":
                 extra = """
                     OR group_transition = (
@@ -107,9 +113,6 @@ def cancel_booking_trial(bot_name:str, object_id: int, actor_type: str = "whatsa
                     )
                 """
                 params = (object_id, object_id)
-            else:
-                extra = ""
-                params = (object_id,)
             cur.execute(
                 f"UPDATE {table_name} SET state = 'cancelled', updated_at = NOW() "
                 f"WHERE (id = %s ) {extra}"
@@ -117,10 +120,15 @@ def cancel_booking_trial(bot_name:str, object_id: int, actor_type: str = "whatsa
                 params,
             )
             if cur.fetchone():
-                # _record_event(cur, object_id, "cancelled", actor_type, actor_id, reason)
-                table_del = "booking_sessions" if bot_name == "dopsy_bot" else "trials_session"
+                table_del = "trial_sessions"
+                types_string = "trial"
+                if bot_name == "dopsy_bot":
+                    _record_event(cur, object_id, "cancelled", actor_type, actor_id, reason)
+                    table_del = "booking_sessions"
+                    types_string = "booking"
+
                 cur.execute(
-                    "DELETE FROM booking_sessions WHERE booking_id = %s", (object_id,)
+                    f"DELETE FROM {table_del} WHERE {types_string}_id = {object_id}"
                 )
                 return _ok({"object_id": object_id})
             cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
