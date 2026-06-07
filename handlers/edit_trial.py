@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from chat.conversation import clear_history
 from integrations import booking_service, sheets
+from integrations.sheets.booking_sheets import upsert_booking_row
 from integrations.repo import postgres, academy_repo
 from integrations.repo.academy_repo import get_all_active_trials, cancel_all_trials
 
@@ -34,23 +35,17 @@ _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
         "❌ Эту бронь уже один раз меняли. Следующее изменение — через администратора.",
         "❌ Бұл бронь бір рет өзгертілген. Келесі өзгерісті әкімші арқылы жасаңыз.",
     ),
-    "SLOT_TAKEN": (
-        "❌ Это время уже занято. Выберите другое время или поле.",
-        "❌ Бұл уақыт алынған. Басқа уақыт немесе алаң таңдаңыз.",
-    ),
     "NO_CHANGE": (
-        "Я не понял, что именно изменить. Напишите новое время, дату, "
-        "поле или количество игроков.",
+        "Я не понял, что именно изменить. Напишите новое время, дату, ",
         "Нақты не өзгерту керек екенін түсінбедім. Жаңа уақытты, күнді, "
-        "алаңды немесе ойыншы санын жазыңыз.",
     ),
     "INVALID_STATE": (
         "❌ Эту бронь уже нельзя изменить.",
         "❌ Бұл бронды енді өзгертуге болмайды.",
     ),
     "NOT_FOUND": (
-        "❌ Бронь не найдена.",
-        "❌ Брон табылмады.",
+        "❌ Пробное занятие не найдено.",
+        "❌ Жахылым табылмады.",
     ),
 }
 
@@ -171,7 +166,7 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
     def _run():
         for r in rows:
             try:
-                sheets.upsert_booking_row(r)
+                upsert_booking_row(r)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[EDIT] Sheets sync failed for booking %s: %s", r["id"], exc)
 

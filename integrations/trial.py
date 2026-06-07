@@ -30,7 +30,7 @@ def get_trial_daytime(bot_name: str, days: list | None ) -> list[dict]:
     if days is None:
         days = [int(i) for i in range(7)]
 
-    all_group_info = academy_repo.get_group_info(bot_name=bot_name)  # method needed which returns [{group_id, training_day, time_start, time_end}]
+    all_group_info = academy_repo.get_groups_info(bot_name=bot_name)  # method needed which returns [{group_id, training_day, time_start, time_end}]
     result = []
     for info in all_group_info:
         if info["training_day"] in days:

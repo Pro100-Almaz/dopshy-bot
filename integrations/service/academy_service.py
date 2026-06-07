@@ -25,13 +25,6 @@ def set_update_training_time(group_id: int, date: str, start_time: str, end_time
 def deactivate_group(group_id: int):
     deactivate_group_repo(group_id)
 
-def create_academy_user():
-    pass
-
-
-def create_student_trial():
-    pass
-
 
 def get_group_info(bot_name:str) -> dict | None:
     table_name = "academy_groups" if bot_name != "dopsy_bot" else None

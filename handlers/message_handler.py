@@ -9,6 +9,7 @@ import threading
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from handlers.trial_session import handle_trial_turn, start_trial_flow
+from integrations.sheets.booking_sheets import upsert_booking_row
 from integrations.repo.postgres import cancel_booking_trial
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
@@ -301,7 +302,7 @@ def _refresh_booking_sheet(booking: dict, state: str) -> None:
 
     def _run():
         try:
-            sheets.upsert_booking_row(row)
+            upsert_booking_row(row)
         except Exception as exc:
             logger.error("[PAYMENT] Sheet update failed for booking id=%s: %s", booking["id"], exc)
 

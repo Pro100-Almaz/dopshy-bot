@@ -20,9 +20,12 @@ from decimal import Decimal
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import booking_service, sheets
-from integrations.sheets import refresh_week_sheet, _single_table_write, _single_table_erase
+from integrations import booking_service
+from integrations.repo.academy_repo import deactivate_group_repo
+from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
+    upsert_booking_row
 from integrations.repo import booking_repo as repo, postgres
+from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +127,7 @@ def create_booking():
     if res["ok"] and res.get("data", {}).get("booking_id"):
         booking_row = repo.get_booking(res["data"]["booking_id"])
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
 
         _single_table_write(booking_row)
 
@@ -148,7 +151,7 @@ def patch_booking(booking_id: int):
     if res["ok"]:
         booking_row = repo.get_booking(booking_id)
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
 
         _single_table_write(booking_row)
 
@@ -163,7 +166,7 @@ def delete_booking(object_id: int):
     if res["ok"]:
         booking_row = repo.get_booking(object_id)
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
         _single_table_erase(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 404)
@@ -176,7 +179,7 @@ def delete_repetitive_booking(booking_id: int):
     if res["ok"]:
         booking_row = repo.get_booking(booking_id)
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
 
     refresh_week_sheet()
     return jsonify(res), (200 if res["ok"] else 404)
@@ -185,3 +188,29 @@ def delete_repetitive_booking(booking_id: int):
 def daily_refresh():
     refresh_week_sheet()
     return jsonify({"ok": True}), 200
+
+
+# @manager_api.post("/api/manager/academy_groups/refresh_all")
+# def refresh_academy_groups():
+#     refresh_academy_groups()
+#     return jsonify({"ok": True}), 200
+
+
+@manager_api.post("/api/manager/academy_groups")
+def create_academy_group():
+    pass
+
+
+@manager_api.patch("/api/manager/academy_groups/<int:trial_id>")
+def edit_academy_group():
+    pass
+
+
+@manager_api.delete("/api/manager/academy_groups/<int:trial_id>")
+def delete_academy_group(trial_id: int):
+    res = deactivate_group_repo(trial_id)
+    if res["ok"]:
+        refresh_all_groups()
+
+    return jsonify(res), (200 if res["ok"] else 404)
+

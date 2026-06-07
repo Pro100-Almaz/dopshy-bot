@@ -17,6 +17,10 @@ services:
     # Surface Postgres logs in dev for easier debugging.
     image: postgres:16-alpine
     command: ["postgres", "-c", "log_statement=mod", "-c", "log_min_duration_statement=200"]
+    environment:
+      POSTGRES_DB: dopshy
+      POSTGRES_USER: dopshy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
 

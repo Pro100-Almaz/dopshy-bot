@@ -85,10 +85,11 @@ def update_draft(bot_name: str, object_id: int, state: str = 'draft', **patch) -
                 vals,
             )
             if cur.fetchone():
+
                 # _record_event(cur, object_id, "draft_updated", "whatsapp")
                 return _ok({"object_id": object_id})
 
-            cur.execute("SELECT state FROM bookings WHERE id = %s", (object_id,))
+            cur.execute(f"SELECT state FROM {table_name} WHERE id = {object_id}")
             row = cur.fetchone()
     if not row:
         return _err("NOT_FOUND", "Запись не найдена.")
