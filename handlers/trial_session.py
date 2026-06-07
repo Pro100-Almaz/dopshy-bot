@@ -100,7 +100,7 @@ def _t(lang: str, key: str, **fmt) -> str:
 
 def _save(chat_id: str, state: str, params: dict, bot_name: str) -> None:
     """Persist the session, keeping booking_sessions.booking_id in sync."""
-    postgres.upsert_session(bot_name, chat_id, state, params, object_id=params.get("trial_id"))
+    postgres.upsert_session(bot_name, chat_id=chat_id, state=state, params=params, object_id=params.get("trial_id"))
 
 # Regex to pull two HH:MM times from a single message (e.g. "10:00 до 12:00", "14:30-16:00")
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")
@@ -305,7 +305,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
     )
 
     params["date"] = str(chosen)
-    postgres.update_draft('dopsy_bot', params["trial_id"], date=str(chosen), bot_name=bot_name)
+    postgres.update_draft(bot_name, object_id=params["trial_id"], date=str(chosen))
     _save(chat_id, "step_time", params, bot_name)
     return _ask_time(chosen, day_windows, lang)
 
@@ -341,7 +341,7 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> s
 
 
     logger.info("[TRIAL:step_time] advancing to step_name")
-    postgres.update_draft('dopsy_bot', params["trial_id"], time_start=time_start, time_end=time_end)
+    postgres.update_draft(bot_name, object_id=params["trial_id"], time_start=time_start, time_end=time_end)
     _save(chat_id, "step_field", params, bot_name)
     return _t(lang, "ask_name")
 
@@ -350,7 +350,7 @@ def _handle_step_name(chat_id: str, user_text: str, params: dict, bot_name) -> s
     lang = params.get("lang", "ru")
     params["child_name"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_name=%r — advancing to step_age", params["child_name"])
-    postgres.update_draft('dopsy_bot', params["trial_id"], child_name=params["child_name"], bot_name=bot_name)
+    postgres.update_draft(bot_name, object_id=params["trial_id"], child_name=params["child_name"])
     _save(chat_id, "step_age", params, bot_name=bot_name)
     return _t(lang, "ask_age")
 
@@ -358,7 +358,7 @@ def _handle_step_name(chat_id: str, user_text: str, params: dict, bot_name) -> s
 def _handle_step_age(chat_id: str, user_text: str, params: dict, bot_name) -> str:
     params["child_age"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_age=%r — creating trial lesson for %r", params["child_age"], bot_name)
-    postgres.update_draft('dopsy_bot', params["trial_id"], child_age=params["child_age"], bot_name=bot_name)
+    postgres.update_draft(bot_name, object_id=params["trial_id"], child_age=params["child_age"])
     _save(chat_id, "step_lesson", params, bot_name=bot_name)
     return _format_summary(params)
 
@@ -385,8 +385,8 @@ def _handle_step_confirm(
     if any(w in lower for w in _NO):
         logger.info("[TRIAL:step_confirm] NO received — cancelling draft + session")
         if params.get("trial_id"):
-            booking_service.cancel_booking_trial(
-                params["trial_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined", bot_name=bot_name
+            postgres.cancel_booking_trial(
+                bot_name, object_id=params["trial_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined"
             )
         postgres.delete_session(chat_id, bot_name)
         return _t(lang, "declined")
