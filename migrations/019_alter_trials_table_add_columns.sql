@@ -1,0 +1,7 @@
+
+
+ALTER TABLE academy_trials ADD COLUMN IF NOT EXISTS phone VARCHAR(30);
+ALTER TABLE academy_trials ADD COLUMN IF NOT EXISTS child_name VARCHAR(30);
+ALTER TABLE academy_trials ADD COLUMN IF NOT EXISTS child_age INTEGER;
+
+ALTER TABLE academy_trials DROP COLUMN user_id;
