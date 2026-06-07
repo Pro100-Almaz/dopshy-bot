@@ -100,7 +100,7 @@ def _t(lang: str, key: str, **fmt) -> str:
 
 def _save(chat_id: str, state: str, params: dict, bot_name: str) -> None:
     """Persist the session, keeping booking_sessions.booking_id in sync."""
-    postgres.upsert_session(chat_id, state, params, object_id=params.get("trial_id"), bot_name=bot_name)
+    postgres.upsert_session(bot_name, chat_id, state, params, object_id=params.get("trial_id"))
 
 # Regex to pull two HH:MM times from a single message (e.g. "10:00 до 12:00", "14:30-16:00")
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")
@@ -165,7 +165,7 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
         return _t(lang, "no_availability")
 
     client_token = str(uuid.uuid4())
-    draft = postgres.create_draft(bot_name, chat_id=chat_id, sender_phone=sender_phone, client_token=client_token)
+    draft = postgres.create_draft(bot_name, chat_id=chat_id, phone=sender_phone, client_token=client_token)
     trial_id = draft["data"]["trial_id"]
 
     _save(
@@ -200,7 +200,7 @@ def handle_trial_turn(
     Returns a reply string if this turn was handled, or None to fall
     through to the regular RAG/LLM pipeline.
     """
-    session = postgres.get_active_session(chat_id, bot_name)
+    session = postgres.get_active_session(bot_name, chat_id)
 
     # ── Active session — dispatch to step handler ────────────────────────
     if session:
@@ -297,7 +297,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
         )
         return _ask_date(available_days, lang) + "\n\n" + _t(lang, "ask_date_invalid")
 
-    free = trial_logic.get_trial_daytime(bot_name, chosen)
+    free = trial_logic.get_trial_daytime(bot_name, [chosen])
     day_windows = [w for w in free if w["date"] == chosen]
     logger.info(
         "[TRIAL:step_date] ACCEPTED date=%s — %d free windows → advancing to step_time",

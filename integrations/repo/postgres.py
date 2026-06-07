@@ -8,6 +8,7 @@ import psycopg2.extras
 import psycopg2.pool
 
 import config
+from integrations.booking_service import _record_event
 from integrations.repo.utils import _conn, _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -16,17 +17,17 @@ logger = logging.getLogger(__name__)
 # Schema
 # ---------------------------------------------------------------------------
 _ACADEMY_DRAFT_FIELDS = {
-    "trial_day", "start_time", "end_time", "notes", "group_id", "user_id",
-    "state", "language", "client_token", "sender_phone"
+    "trial_day", "start_time", "end_time", "notes", "group_id",
+    "state", "language", "client_token", "phone", "child_age", "child_name"
 }
 
-_FOOTBALL_DRAFT_FIELDS = {
+_ARENA_DRAFT_FIELDS = {
     "date", "time_start", "time_end", "field", "format",
     "players", "customer_name", "notes",
     "phone", "state", "client_token", "source",
 }
 
-draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "football": _FOOTBALL_DRAFT_FIELDS}
+draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "football": _ARENA_DRAFT_FIELDS}
 
 
 _DRAFTS_BY_BOTS = {
@@ -36,7 +37,7 @@ _DRAFTS_BY_BOTS = {
 }
 
 
-def create_draft(bot_name: str, **fields) -> dict:
+def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
     """Create (or return existing) DRAFT booking/trial. Idempotent on client_token."""
     patch = {k: v for k, v in fields.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
     cols, vals = list(patch.keys()), list(patch.values())
@@ -53,7 +54,8 @@ def create_draft(bot_name: str, **fields) -> dict:
             row = cur.fetchone()
             if row:
                 object_id = row["id"]
-                # _record_event(cur, booking_id, "draft_created", "whatsapp", chat_id)
+                if type_string == "booking":
+                    _record_event(cur, object_id, "draft_created", "whatsapp", chat_id)
             else:
                 cur.execute(
                     f"SELECT id FROM {table_name} WHERE client_token = %s", (patch['client_token'],)
