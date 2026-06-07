@@ -22,7 +22,8 @@ from flask import Blueprint, jsonify, request
 import config
 from integrations import booking_service, sheets
 from integrations.sheets import refresh_week_sheet, _single_table_write, _single_table_erase
-from integrations.repo import booking_repo as repo
+from integrations.repo import booking_repo as repo, postgres
+
 logger = logging.getLogger(__name__)
 
 manager_api = Blueprint("manager_api", __name__)
@@ -155,12 +156,12 @@ def patch_booking(booking_id: int):
 
 
 @manager_api.delete("/api/manager/bookings/<int:booking_id>")
-def delete_booking(booking_id: int):
-    res = booking_service.cancel_booking(
-        booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
+def delete_booking(object_id: int):
+    res = postgres.cancel_booking_trial(bot_name="dopsy_bot",
+        object_id=object_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
-        booking_row = repo.get_booking(booking_id)
+        booking_row = repo.get_booking(object_id)
         if booking_row:
             sheets.upsert_booking_row(booking_row)
         _single_table_erase(booking_row)
