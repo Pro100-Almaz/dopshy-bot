@@ -43,7 +43,8 @@ def setting_training_time(group_id: int, date: str, time_start: str, time_end: s
                 """, (group_id, date, time_start, time_end,)
             )
 
-def get_groups_info(group_type: str):
+def get_groups_info(bot_name: str):
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -143,7 +144,7 @@ def get_trials_by_type(group_type: str):
                     t.trial_day, t.start_time, t.end_time, t.state, t.notes, t.attended, t.subscribed
                 FROM academy_trials t 
                 JOIN academy_groups g ON t.group_id = g.id 
-                WHERE g.group_type = %s
+                WHERE g.group_type = %s AND t.state = 'confirmed'
                     
                 """, (group_type,)
             )

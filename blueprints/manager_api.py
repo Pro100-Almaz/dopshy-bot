@@ -190,10 +190,15 @@ def daily_refresh():
     return jsonify({"ok": True}), 200
 
 
-# @manager_api.post("/api/manager/academy_groups/refresh_all")
-# def refresh_academy_groups():
-#     refresh_academy_groups()
-#     return jsonify({"ok": True}), 200
+@manager_api.post("/api/manager/academy_groups/refresh_all")
+def refresh_academy_groups():
+    refresh_all_groups()
+    return jsonify({"ok": True}), 200
+
+@manager_api.get("/api/manager/academy_groups/refresh_all_trials")
+def refresh_academy_trials():
+    refresh_all_trials()
+    return jsonify({"ok": True}), 200
 
 
 @manager_api.post("/api/manager/academy_groups")

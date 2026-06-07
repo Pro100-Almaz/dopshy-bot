@@ -17,6 +17,7 @@ from integrations import booking_service, sheets
 from integrations.sheets.booking_sheets import upsert_booking_row
 from integrations.repo import postgres, academy_repo
 from integrations.repo.academy_repo import get_all_active_trials, cancel_all_trials
+from integrations.sheets.trial_sheets import refresh_all_trials
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: s
         "[EDIT_TRIAL] trial_id=%d → new id=%d successful", target["id"], result["data"]["object_id"]
     )
     trial = academy_repo.get_trial(result["data"]["object_id"])
-    # _sync_sheets(target["id"], result["data"]["new_booking"], sender_phone)
+    refresh_all_trials()
     return _format_success(trial)
 
 
@@ -224,8 +225,7 @@ def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) 
         return _format_cancel("NOT_FOUND")
     cancel_all_trials(trial_ids)
 
-
-
+    refresh_all_trials()
     logger.info("[CANCEL_TRIAL] successful",)
     return _format_cancel("SUCCESS")
 
