@@ -12,8 +12,10 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
+from chat.conversation import clear_history
 from integrations import booking_service, sheets
-from integrations.repo import postgres
+from integrations.repo import postgres, academy_repo
+from integrations.repo.academy_repo import get_all_active_trials, cancel_all_trials
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +27,8 @@ logger = logging.getLogger(__name__)
 # Each entry is (ru, kk). Curly placeholders are filled at format time.
 _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
     "NO_TRIAL": (
-        "У вас нет активной записи на пробную урок, которую можно изменить.",
-        "Сізде өзгертуге болатын белсенді жазылым жоқ.",
+        "У вас нет активной записи на пробный урок, которую можно изменить.",
+        "Сізде өзгертуге болатын белсенді сынақ сабағы жоқ.",
     ),
     "ALREADY_EDITED": (
         "❌ Эту бронь уже один раз меняли. Следующее изменение — через администратора.",
@@ -57,6 +59,17 @@ _REJECT_FALLBACK = (
     "❌ Бронды өзгерту мүмкін болмады. Әкімшімен хабарласыңыз.",
 )
 
+_CANCEL_MESSAGES = {
+    "SUCCESS": (
+        "Ваша запись на пробное занятие было успешно отменено.",
+        "Жазылым сәтті өшірілді."
+    ),
+    "NOT_FOUND": (
+        "Записи не найдены на ваш номер",
+        "Сіздің нөміріңізге сабаққа жазылым табылмады"
+    )
+}
+
 
 def _bilingual(ru: str, kk: str) -> str:
     return f"{ru}\n\n— — —\n\n{kk}"
@@ -67,56 +80,33 @@ def _format_reject(code: str) -> str:
     return _bilingual(ru, kk)
 
 
+def _format_cancel(code: str) -> str:
+    ru, kk = _CANCEL_MESSAGES.get(code)
+    return _bilingual(ru, kk)
+
+
 def _format_success(result_data: dict) -> str:
     """Render the diff so the user sees exactly what changed."""
-    src = result_data["from"]
-    dst = result_data["to"]
-    new = result_data["new_booking"]
-
+    print("result_data:", result_data)
     # Build a per-field "old → new" line only for fields that actually changed.
-    field_labels_ru = {
-        "date":          "Дата",
-        "time_start":    "Время начала",
-        "time_end":      "Время окончания",
-        "field":         "Поле",
-        "players":       "Игроков",
-        "customer_name": "Имя",
-    }
-    field_labels_kk = {
-        "date":          "Күні",
-        "time_start":    "Басталу уақыты",
-        "time_end":      "Аяқталу уақыты",
-        "field":         "Алаң",
-        "players":       "Ойыншылар",
-        "customer_name": "Аты",
-    }
-    diff_lines_ru: list[str] = []
-    diff_lines_kk: list[str] = []
-    for k in field_labels_ru:
-        if src.get(k) != dst.get(k):
-            diff_lines_ru.append(f"  • {field_labels_ru[k]}: {src.get(k)} → {dst.get(k)}")
-            diff_lines_kk.append(f"  • {field_labels_kk[k]}: {src.get(k)} → {dst.get(k)}")
 
     # Current booking card (resulting state)
-    ts = str(new["time_start"])[:5]
-    te = str(new["time_end"])[:5]
+    ts = str(result_data["start_time"])[:5]
+    te = str(result_data["end_time"])[:5]
+
     summary_ru = (
-        f"✅ Бронь обновлена!\n\n"
-        f"📅 {new['date']}\n"
+        f"✅ Запись обновлена!\n\n"
+        f"📅 {result_data['trial_day']}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {new['field']} ({new['format']})\n"
-        f"👥 Игроков: {new.get('players', '?')}\n"
-        f"👤 Имя: {new.get('customer_name', '')}\n\n"
-        f"Что изменилось:\n" + "\n".join(diff_lines_ru)
+        f"👤 Имя: {result_data.get('child_name', '')}\n"
+        f"🎂 Возраст: {result_data.get('child_age', '')}"
     )
     summary_kk = (
-        f"✅ Брон жаңартылды!\n\n"
-        f"📅 {new['date']}\n"
+        f"✅ Жазылым жаңартылды!\n\n"
+        f"📅 {result_data['trial_day']}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Алаң {new['field']} ({new['format']})\n"
-        f"👥 Ойыншылар: {new.get('players', '?')}\n"
-        f"👤 Аты: {new.get('customer_name', '')}\n\n"
-        f"Не өзгерді:\n" + "\n".join(diff_lines_kk)
+        f"👤 Аты: {result_data.get('child_name', '')}\n"
+        f"🎂 Жасы: {result_data.get('child_age', '')}\n\n"
     )
     return _bilingual(summary_ru, summary_kk)
 
@@ -193,12 +183,17 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
 # ---------------------------------------------------------------------------
 
 def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: str) -> str:
-    return _format_reject("NO_TRIAL")
     """Process a single edit_booking tool-call payload from the LLM."""
     diff = {k: v for k, v in (diff or {}).items() if v not in (None, "")}
     logger.info("[EDIT_TRIAL] chat_id=%s phone=%s diff=%s", chat_id, sender_phone, diff)
 
-    target = postgres.get_user_editable_trial(sender_phone, bot_name)
+    target = None
+    all_trials = academy_repo.get_all_active_trials(sender_phone, bot_name)
+    for trial in all_trials:
+        if trial["state"] == "confirmed":
+            target = trial
+            break
+
     if target is None:
         logger.info("[EDIT_TRIAL] No editable trial for %s — rejecting", sender_phone)
         return _format_reject("NO_TRIAL")
@@ -207,9 +202,7 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: s
         logger.info("[EDIT_TRIAL] trial_id=%d — empty diff, asking user", target["id"])
         return _format_reject("NO_CHANGE")
 
-    result = booking_service.client_edit_booking(
-        target["id"], actor_id=chat_id, **diff
-    )
+    result = postgres.update_draft(bot_name, target["id"], 'confirmed', **diff)
     if not result["ok"]:
         logger.info(
             "[EDIT_TRIAL] trial_id=%d rejected code=%s msg=%s",
@@ -218,7 +211,29 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: s
         return _format_reject(result["code"])
 
     logger.info(
-        "[EDIT_TRIAL] trial_id=%d → new id=%d successful", target["id"], result["data"]["trial_id"]
+        "[EDIT_TRIAL] trial_id=%d → new id=%d successful", target["id"], result["data"]["object_id"]
     )
-    _sync_sheets(target["id"], result["data"]["new_booking"], sender_phone)
-    return _format_success(result["data"])
+    trial = academy_repo.get_trial(result["data"]["object_id"])
+    # _sync_sheets(target["id"], result["data"]["new_booking"], sender_phone)
+    return _format_success(trial)
+
+
+def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) -> str:
+    trials = get_all_active_trials(sender_phone, bot_name)
+
+    trial_ids = [t["id"] for t in trials]
+    clear_history(chat_id)
+    postgres.delete_session(bot_name, chat_id)
+
+    if len(trial_ids) == 0:
+        return _format_cancel("NOT_FOUND")
+    cancel_all_trials(trial_ids)
+
+
+
+    logger.info("[CANCEL_TRIAL] successful",)
+    return _format_cancel("SUCCESS")
+
+
+
+

@@ -9,11 +9,12 @@ import threading
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
 from handlers.trial_session import handle_trial_turn, start_trial_flow
+from integrations.repo.postgres import cancel_booking_trial
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
-from handlers.edit_trial import handle_edit_request as handle_edit_trial_request
+from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation, sheets
 from handlers.edit_booking import handle_edit_request
 from integrations import booking_service, payment_validation, sheets
@@ -246,6 +247,11 @@ def handle_incoming_message(payload: dict) -> None:
             elif tool_call["name"] == "edit_trial":
                 logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])
                 handle_reply = handle_edit_trial_request(chat_id, sender_id, tool_call["args"], bot_config["name"])
+
+            elif tool_call["name"] == "cancel_trial":
+                logger.info("[CANCEL] LLM called cancel_trial tool")
+                handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
+
 
             reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 
