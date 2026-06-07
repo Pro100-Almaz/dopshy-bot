@@ -64,15 +64,15 @@ def _get_worksheet(curriculum: str, object_type: str):
     #object_type = 'groups' or 'trials'
     global _worksheet
     with _ws_lock:
-        if _worksheet is None:
-            ss = _get_spreadsheet()
-            object_ent = 'boxing' if curriculum == 'boxing' else 'football'
-            name = _WORKSHEETS[object_ent][object_type]
-            try:
-                _worksheet = ss.worksheet(name)
-            except Exception:
-                _worksheet = ss.add_worksheet(title=name, rows=1000, cols=_GROUP_COL_COUNT if object_type == 'groups' else _TRIAL_COL_COUNT)
-                _worksheet.update("A1", [_HEADERS])
+        ss = _get_spreadsheet()
+        object_ent = 'boxing' if curriculum == 'boxing' else 'football'
+        name = _WORKSHEETS[object_ent][object_type]
+        try:
+            _worksheet = ss.worksheet(name)
+        except Exception:
+            _worksheet = ss.add_worksheet(title=name, rows=1000, cols=_GROUP_COL_COUNT if object_type == 'groups' else _TRIAL_COL_COUNT)
+            _worksheet.update("A1", [_HEADERS])
+
         return _worksheet
 
 
@@ -142,7 +142,7 @@ def refresh_all_groups() -> None:
             ws = _get_worksheet(curriculum=group_type, object_type='groups')
             ws.clear()
             data = [_HEADERS['groups']] + [_group_to_row(b) for b in rows]
-            ws.update(f"A1:{_last_col_letter(7)}{len(data)}", data,
+            ws.update(f"A1:{_last_col_letter(_GROUP_COL_COUNT)}{len(data)}", data,
                       value_input_option="USER_ENTERED")
             logger.info("Refreshed GROUP sheets — %d rows.", len(rows))
     except Exception as exc:
@@ -179,10 +179,10 @@ def refresh_all_trials() -> None:
     try:
         for group_type in ['boxing', 'football']:
             rows = academy_repo.get_trials_by_type(group_type)
-            ws = _get_worksheet(curriculum=group_type, object_type='groups')
+            ws = _get_worksheet(curriculum=group_type, object_type='trials')
             ws.clear()
-            data = [_HEADERS['groups']] + [_trial_to_row(trial) for trial in rows]
-            ws.update(f"A1:{_last_col_letter(7)}{len(data)}", data,
+            data = [_HEADERS['trials']] + [_trial_to_row(trial) for trial in rows]
+            ws.update(f"A1:{_last_col_letter(_TRIAL_COL_COUNT)}{len(data)}", data,
                       value_input_option="USER_ENTERED")
             logger.info("Refreshed TRIAL sheets — %d rows.", len(rows))
     except Exception as exc:

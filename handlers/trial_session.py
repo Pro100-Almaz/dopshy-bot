@@ -29,6 +29,7 @@ from handlers.edit_trial import handle_cancel_trial_request
 from integrations import trial as trial_logic
 from integrations import booking_service, sheets
 from integrations.repo import postgres, academy_repo
+from integrations.sheets.trial_sheets import refresh_all_trials
 from utils import today_almaty
 
 from integrations.trial import get_trial_daytime
@@ -466,6 +467,7 @@ def _confirm_trial(chat_id: str, sender_phone: str, params: dict, bot_name: str)
 
     postgres.update_draft(bot_name, object_id=params["trial_id"], **trial_row)
     academy_repo.confirm_trial(params["trial_id"])
+    refresh_all_trials()
     postgres.delete_session(bot_name, chat_id)
     clear_history(chat_id)
 
