@@ -104,7 +104,7 @@ def get_trial(trial_id : int) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT * FROM academy_trials WHERE id = %s
-            """, (trial_id))
+            """, (trial_id,))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -149,6 +149,35 @@ def get_trials_by_type(group_type: str):
             )
             trials = cur.fetchall()
             return [dict(trial) for trial in trials]
+
+
+def confirm_trial(trial_id : int) -> bool:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """UPDATE academy_trials SET state = 'confirmed' WHERE id = %s""", (trial_id,)
+            )
+            return True
+
+
+def get_all_active_trials(sender_phone: str, bot_name: str) -> list[dict] | None:
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""SELECT * FROM academy_trials 
+                WHERE state IN ('confirmed', 'draft') AND phone = '{sender_phone}' 
+                AND group_id IN (SELECT id FROM academy_groups WHERE group_type = '{group_type}')"""
+            )
+            trials = cur.fetchall()
+            return [dict(t) for t in trials]
+
+def cancel_all_trials(trial_ids: list) -> None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""DELETE FROM academy_trials WHERE id = ANY(%s) and state IN ('draft', 'confirmed')""", (trial_ids,)
+            )
 
 
 
