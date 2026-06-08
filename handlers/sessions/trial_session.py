@@ -21,6 +21,7 @@ import logging
 import re
 import uuid
 from datetime import date, datetime
+from functools import lru_cache
 
 from chat.conversation import clear_history
 from handlers.edit_trial import handle_cancel_trial_request
@@ -30,19 +31,9 @@ from integrations.repo import postgres, academy_repo
 from integrations.repo.academy_repo import has_active_trial, check_trial_limits
 from integrations.sheets.trial_sheets import refresh_all_trials
 from integrations.trial import get_trial_daytime
-from utils import today_almaty, fmt_date, fmt_time, pad_time
-
+from utils import today_almaty
 
 logger = logging.getLogger(__name__)
-
-
-# Cyrillic letters that exist only in Kazakh — presence flips the session lang to kk.
-_KZ_CHARS = set("әғіңөұүһқ")
-
-
-def _detect_lang(text: str) -> str:
-    """Crude lang detection: any Kazakh-only Cyrillic letter → kk, else ru."""
-    return "kk" if any(c in _KZ_CHARS for c in text.lower()) else "ru"
 
 
 _T = {
@@ -87,20 +78,6 @@ _T = {
     },
 }
 
-
-def _t(lang: str, key: str, **fmt) -> str:
-    val = _T[key].get(lang) or _T[key]["ru"]
-    return val.format(**fmt) if fmt else val
-
-
-def _save(chat_id: str, state: str, params: dict, bot_name: str) -> None:
-    """Persist the session, keeping booking_sessions.booking_id in sync."""
-    postgres.upsert_session(bot_name, chat_id=chat_id, state=state, params=params, object_id=params.get("trial_id"))
-
-
-# Regex to pull two HH:MM times from a single message (e.g. "10:00 до 12:00", "14:30-16:00")
-_TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")
-
 # ---------------------------------------------------------------------------
 # Read-only intent keywords (keep for quick queries without starting a session)
 # ---------------------------------------------------------------------------
@@ -119,36 +96,6 @@ _NEW_TRIAL_KW = (
     "жазылу", "тегін", "қатыс", "келу", "көру",
 )
 
-_CANCEL_PHRASES = (
-    "отмен", "стоп", "передум", "не хочу", "не хотим", "не нужно",
-    "не надо", "забуд", "забыть", "отбой", "отказыв",
-    "тоқтат", "керек емес", "ұнамайды", "болмайды", "бас тарт",
-)
-
-
-def _is_cancel_intent(text: str) -> bool:
-    low = text.lower()
-    return any(p in low for p in _CANCEL_PHRASES)
-
-
-# Substrings (matched in lowercased message) that abort an in-flight booking
-# session at any step. Strong cancel intents only — short tokens like "нет" are
-# intentionally excluded because they're valid step_confirm inputs.
-
-
-def detect_intent(text: str) -> str | None:
-    """
-    Deterministic intent detection. my_booking is checked first so phrases like
-    "я забронировал" don't get routed to new_booking by the "забронир" substring.
-
-    availability: still handled by the LLM with injected slot data.
-    """
-    lower = text.lower()
-    for kw in _NEW_TRIAL_KW:
-        if kw in lower:
-            return "new_trial"
-    return None
-
 
 # ---------------------------------------------------------------------------
 # Public entry points
@@ -161,6 +108,7 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
     directly from handle_trial_turn on a deterministic trial-intent match.
     `lang` is stored in the session so every subsequent step reuses it.
     """
+    builder = get_trial_prompt_builder(bot_name)
     free = get_trial_daytime(bot_name, None)
     available_days = sorted({w["date"] for w in free})
     logger.info(
@@ -178,13 +126,13 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
 
     if not available_days:
         logger.warning("[TRIAL:start_flow] No available days — aborting flow")
-        return _t(lang, "no_availability")
+        return builder.data_localization(lang, "no_availability")
 
     client_token = str(uuid.uuid4())
     draft = postgres.create_draft(bot_name, chat_id=chat_id, phone=sender_phone, client_token=client_token)
     trial_id = draft["data"]["trial_id"]
 
-    _save(
+    builder.save_session(
         chat_id,
         "step_date",
         {
@@ -194,13 +142,12 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
             "client_token": client_token,
             "lang": lang,
         },
-        bot_name,
     )
     logger.info(
         "[TRIAL:start_flow] Draft trial_id=%d created — step_date. Showing %d days",
         trial_id, len(available_days),
     )
-    return _ask_date(available_days, lang)
+    return builder.ask_date(available_days, lang)
 
 
 def handle_trial_turn(
@@ -217,6 +164,7 @@ def handle_trial_turn(
     through to the regular RAG/LLM pipeline.
     """
     session = postgres.get_active_session(bot_name, chat_id)
+    builder = get_trial_prompt_builder(bot_name)
 
     # ── Active session — dispatch to step handler ────────────────────────
     if session:
@@ -227,7 +175,7 @@ def handle_trial_turn(
             chat_id, state, params, user_text,
         )
 
-        if _is_cancel_intent(user_text):
+        if builder.is_cancel_intent(user_text):
             tid = params.get("trial_id")
             if tid:
                 handle_cancel_trial_request(chat_id, sender_phone, bot_name)
@@ -243,7 +191,7 @@ def handle_trial_turn(
         if "trial_id" not in params:
             logger.warning("[TRIAL] Stale session without trial_id — restarting flow for %s", chat_id)
             postgres.delete_session(bot_name, chat_id)
-            return start_trial_flow(chat_id, sender_phone, bot_name, _detect_lang(user_text))
+            return start_trial_flow(chat_id, sender_phone, bot_name, builder.detect_lang(user_text))
 
         if state == "step_date":
             return _handle_step_date(chat_id, user_text, params, bot_name)
@@ -263,11 +211,11 @@ def handle_trial_turn(
     # Only intercept my_trial here — it requires injecting user-specific data
     # that the LLM cannot fetch on its own.
 
-    intent = detect_intent(user_text)
+    intent = builder.detect_intent(user_text)
     logger.info("[TRIAL] No active session. intent=%s | user_text=%.80s", intent, user_text)
 
     if intent == "new_trial":
-        lang = _detect_lang(user_text)
+        lang = builder.detect_lang(user_text)
         logger.info("[TRIAL] new_trial intent — starting deterministic flow (lang=%s)", lang)
         return start_trial_flow(chat_id, sender_phone, bot_name, lang)
 
@@ -282,6 +230,7 @@ def handle_trial_turn(
 # ---------------------------------------------------------------------------
 
 def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str) -> str:
+    builder = get_trial_prompt_builder(bot_name)
     lang = params.get("lang", "ru")
     # Always recompute available_days here so a session that crossed midnight
     # doesn't keep offering yesterday's date.
@@ -321,7 +270,7 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
             "[TRIAL:step_date] REJECTED — chosen=%s not in available_days=%s",
             chosen, available_days,
         )
-        return _ask_date(available_days, lang) + "\n\n" + _t(lang, "ask_date_invalid")
+        return builder.ask_date(available_days, lang) + "\n\n" + builder.data_localization(lang, "ask_date_invalid")
 
     free = trial_logic.get_trial_daytime(bot_name, [chosen.weekday()])
     day_windows = [w for w in free if w["date"] == chosen]
@@ -332,11 +281,12 @@ def _handle_step_date(chat_id: str, user_text: str, params: dict, bot_name: str)
 
     params["date"] = str(chosen)
     postgres.update_draft(bot_name, object_id=params["trial_id"], date=str(chosen))
-    _save(chat_id, "step_time", params, bot_name)
-    return _ask_time(chosen, day_windows, lang)
+    builder.save_session(chat_id, "step_time", params)
+    return builder.ask_time(chosen, day_windows, lang)
 
 
 def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> str:
+    builder = get_trial_prompt_builder(bot_name)
     lang = params.get("lang", "ru")
     chosen_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
     free = trial_logic.get_trial_daytime(bot_name, [chosen_date.weekday()])
@@ -350,33 +300,33 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> s
         user_text,
     )
 
-    m = _TIME_RANGE_RE.search(user_text)
+    m = builder.TIME_RANGE_RE.search(user_text)
     if not m:
         logger.info("[TRIAL:step_time] REJECTED — regex did not match user_text=%.80s", user_text)
-        return _ask_time(chosen_date, day_windows, lang) + "\n\n" + _t(lang, "time_not_recognized")
+        return builder.ask_time(chosen_date, day_windows, lang) + "\n\n" + builder.data_localization(lang, "time_not_recognized")
 
     time_start, time_end = m.group(1), m.group(2)
-    time_start = pad_time(time_start)
-    time_end = pad_time(time_end)
+    time_start = builder.pad_time(time_start)
+    time_end = builder.pad_time(time_end)
     logger.info("[TRIAL:step_time] parsed time_start=%s time_end=%s", time_start, time_end)
 
-    print(fmt_time(time_start), fmt_time(time_end))
+    print(builder.fmt_time(time_start), builder.fmt_time(time_end))
     for w in day_windows:
         print(w['time_start'], w['time_end'])
 
     group_ids = [
         w['group_id'] for w in day_windows
-        if w['time_start'] == fmt_time(time_start)
-           and w['time_end'] == fmt_time(time_end)
+        if w['time_start'] == builder.fmt_time(time_start)
+           and w['time_end'] == builder.fmt_time(time_end)
     ]
     if len(group_ids) == 0:
         logger.info("[TRIAL:step_time] REJECTED — time range not found: time_start=%s time_end=%s", time_start,
                     time_end)
-        return _t(lang, "time_not_recognized") + "\n\n" + _ask_time(chosen_date, day_windows, lang)
+        return builder.data_localization(lang, "time_not_recognized") + "\n\n" + builder.ask_time(chosen_date, day_windows, lang)
 
     if time_start >= time_end:
         logger.info("[TRIAL:step_time] REJECTED — inverted range %s >= %s", time_start, time_end)
-        return _t(lang, "time_inverted") + "\n\n" + _ask_time(chosen_date, day_windows, lang)
+        return builder.data_localization(lang, "time_inverted") + "\n\n" + builder.ask_time(chosen_date, day_windows, lang)
 
     params["time_start"] = time_start
     params["time_end"] = time_end
@@ -384,25 +334,27 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict, bot_name) -> s
     logger.info("[TRIAL:step_time] advancing to step_name")
     postgres.update_draft(bot_name, object_id=params["trial_id"], time_start=time_start, time_end=time_end,
                           group_id=group_ids[0])
-    _save(chat_id, "step_name", params, bot_name)
-    return _t(lang, "ask_name")
+    builder.save_session(chat_id, "step_name", params)
+    return builder.data_localization(lang, "ask_name")
 
 
 def _handle_step_name(chat_id: str, user_text: str, params: dict, bot_name) -> str:
+    builder = get_trial_prompt_builder(bot_name)
     lang = params.get("lang", "ru")
     params["child_name"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_name=%r — advancing to step_age", params["child_name"])
     postgres.update_draft(bot_name, object_id=params["trial_id"], child_name=params["child_name"])
-    _save(chat_id, "step_age", params, bot_name=bot_name)
-    return _t(lang, "ask_age")
+    builder.save_session(chat_id, "step_age", params)
+    return builder.data_localization(lang, "ask_age")
 
 
 def _handle_step_age(chat_id: str, user_text: str, params: dict, bot_name) -> str:
+    builder = get_trial_prompt_builder(bot_name)
     params["child_age"] = user_text.strip()
     logger.info("[TRIAL:step_name] child_age=%r — creating trial lesson for %r", params["child_age"], bot_name)
     postgres.update_draft(bot_name, object_id=params["trial_id"], child_age=params["child_age"])
-    _save(chat_id, "step_confirm", params, bot_name=bot_name)
-    return trial_prompt_builder.format_summary(params)
+    builder.save_session(chat_id, "step_confirm", params)
+    return builder.format_summary(params)
 
 
 def _handle_step_confirm(
@@ -413,6 +365,7 @@ def _handle_step_confirm(
         params: dict,
         bot_name: str,
 ) -> str:
+    builder = get_trial_prompt_builder(bot_name)
     lower = user_text.lower().strip()
 
     _YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын", "👍"}
@@ -422,7 +375,7 @@ def _handle_step_confirm(
 
     if any(w in lower for w in _YES):
         logger.info("[TRIAL:step_confirm] YES received — confirming trial. params=%s", params)
-        return _confirm_trial(chat_id, sender_phone, params, bot_name)
+        return builder.confirm_trial(chat_id, sender_phone, params, bot_name)
 
     if any(w in lower for w in _NO):
         logger.info("[TRIAL:step_confirm] NO received — cancelling draft + session")
@@ -432,10 +385,10 @@ def _handle_step_confirm(
             )
         postgres.delete_session(bot_name, chat_id)
         clear_history(chat_id)
-        return _t(lang, "declined")
+        return builder.data_localization(lang, "declined")
 
     logger.info("[TRIAL:step_confirm] unrecognised response=%.80s — re-showing summary", user_text)
-    return _format_summary(params) + "\n\n" + _t(lang, "confirm_reshow")
+    return builder.format_summary(params) + "\n\n" + builder.data_localization(lang, "confirm_reshow")
 
 
 # ---------------------------------------------------------------------------
@@ -443,9 +396,12 @@ def _handle_step_confirm(
 # ---------------------------------------------------------------------------
 
 class TrialPromptBuilder(BasePromptBuilder):
-    def __init__(self):
+    def __init__(self, bot_name):
         super().__init__(
             local_dict=_T,
+            bot_name=bot_name,
+            new_kw=_NEW_TRIAL_KW,
+            my_kw=()
         )
 
     def confirm_trial(self, chat_id: str, sender_phone: str, params: dict, bot_name: str) -> str:
@@ -475,7 +431,7 @@ class TrialPromptBuilder(BasePromptBuilder):
         return self.data_localization(
             lang,
             "confirmed_trial",
-            date=fmt_date(self.WEEKDAY, params["date"], lang),
+            date=self.fmt_date(params["date"], lang),
             start=time_start_str,
             end=time_end_str,
             child_name=params.get("child_name", ""),
@@ -495,8 +451,8 @@ class TrialPromptBuilder(BasePromptBuilder):
         )
         lines.append(f"{range_str}")
 
-        lines.append("\n" + _t(lang, "ask_time_prompt"))
-        lines.append(_t(lang, "ask_time_example"))
+        lines.append("\n" + self.data_localization(lang, "ask_time_prompt"))
+        lines.append(self.data_localization(lang, "ask_time_example"))
         return "\n".join(lines)
 
 
@@ -505,7 +461,7 @@ class TrialPromptBuilder(BasePromptBuilder):
         return self.data_localization(
             lang,
             "summary",
-            date=fmt_date(self.WEEKDAY, params.get("date", ""), lang),
+            date=self.fmt_date(params.get("date", ""), lang),
             start=params.get("time_start", "?"),
             end=params.get("time_end", "?"),
             child_name=params.get("child_name", "?"),
@@ -513,4 +469,5 @@ class TrialPromptBuilder(BasePromptBuilder):
         )
 
 
-trial_prompt_builder = TrialPromptBuilder()
+def get_trial_prompt_builder(bot_name: str) -> TrialPromptBuilder:
+    return TrialPromptBuilder(bot_name)

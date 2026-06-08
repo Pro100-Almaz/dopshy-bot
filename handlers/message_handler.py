@@ -12,7 +12,8 @@ from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.sheets.booking_sheets import upsert_booking_row
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
-from handlers.sessions.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
+from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
+from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation
@@ -65,6 +66,7 @@ _PAYMENT_REJECT_FOOTER_KK = (
     "Қажет болса — әкімшімен хабарласыңыз."
 )
 
+builder = BasePromptBuilder({}, "", (), ())
 
 def _format_payment_reject_message(
     code: str, parsed: dict, booking: dict
@@ -229,7 +231,7 @@ def handle_incoming_message(payload: dict) -> None:
         if tool_call:
             handle_reply = reply
             if tool_call["name"] in "start_booking":
-                lang = _detect_lang(user_text)
+                lang = builder.detect_lang(user_text)
                 logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
                 handle_reply = start_booking_flow(chat_id, sender_id, lang)
 
@@ -238,7 +240,7 @@ def handle_incoming_message(payload: dict) -> None:
                 handle_reply = handle_edit_booking_request(chat_id, sender_id, tool_call["args"])
 
             elif tool_call["name"] == "start_trial":
-                lang = _detect_lang(user_text)
+                lang = builder.detect_lang(user_text)
                 logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
                 handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
 

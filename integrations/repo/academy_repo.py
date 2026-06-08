@@ -241,5 +241,6 @@ def has_active_trial(bot_name: str, phone: str) -> bool:
                                          AND at.state = 'confirmed')
                         """, (phone, group_type))
 
-            has_confirmed_trial = cur.fetchone()[0]
-            return has_confirmed_trial
+            has_confirmed_trial = cur.fetchone()
+            return has_confirmed_trial['exists']
+
