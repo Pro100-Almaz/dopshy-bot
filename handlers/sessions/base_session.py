@@ -1,7 +1,13 @@
+import logging
 import re
 from datetime import date, datetime, time
 
+from chat.conversation import clear_history
+from integrations import trial as trial_logic
 from integrations.repo import postgres
+from utils import today_almaty
+
+logger = logging.getLogger(__name__)
 
 
 class BasePromptBuilder:
@@ -22,11 +28,11 @@ class BasePromptBuilder:
     TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–—до\s]+\s*(\d{1,2}:\d{2})")
 
     def __init__(
-        self,
-        local_dict: dict,
-        bot_name: str,
-        new_kw: tuple,
-        my_kw: tuple
+            self,
+            local_dict: dict,
+            bot_name: str,
+            new_kw: tuple,
+            my_kw: tuple
     ):
         self.T = local_dict
         self.bot_name = bot_name
@@ -42,10 +48,10 @@ class BasePromptBuilder:
         return "\n".join(lines)
 
     def ask_time(self, chosen_date: date, day_windows: list[dict], lang: str = "ru"):
-        return
+        return ""
 
-    def confirm_booking(self, chat_id: str, sender_phone: str, params: dict):
-        return
+    def confirm(self, chat_id: str, sender_phone: str, params: dict) -> str:
+        return ""
 
     def data_localization(self, lang: str, key: str, **fmt) -> str:
         val = self.T[key].get(lang) or self.T[key]["ru"]
@@ -89,6 +95,9 @@ class BasePromptBuilder:
                  self.data_localization(lang, "ask_time_header")]
         return lines
 
+    def format_summary(self, params: dict) -> str:
+        return ""
+
     def is_cancel_intent(self, text: str) -> bool:
         low = text.lower()
         return any(p in low for p in self.CANCEL_PHRASES)
@@ -99,14 +108,165 @@ class BasePromptBuilder:
         h, m = t.split(":")
         return f"{int(h):02d}:{m}"
 
+
+class BaseStepHandler:
+    YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын", "👍"}
+    NO = {"нет", "жоқ", "no", "отмена", "изменить", "өзгерт", "болмайды", "бастапқы"}
+
+    def __init__(
+            self, logger_messages: dict[str, str],
+            builder: BasePromptBuilder,
+    ):
+        self.LOGGER_MESSAGES = logger_messages
+        self.builder = builder
+
+    def check_confirm_message(self, user_text: str) -> str:
+        lower = user_text.lower().strip()
+        if any(w in lower for w in self.YES):
+            return "yes"
+        if any(w in lower for w in self.NO):
+            return "no"
+        return ""
+
+    def get_free_now(self, days: list | None = None):
+        return {}
+
+    def handle_step_confirm(
+            self,
+            chat_id: str,
+            phone_number_id: str,
+            sender_phone: str,
+            user_text: str,
+            params: dict,
+            id_type: str,  # trial_id or booking_id
+    ) -> str:
+        yes_no = self.check_confirm_message(user_text)
+        lang = params.get("lang", "ru")
+
+        if yes_no == "yes":
+            logger.info(self.LOGGER_MESSAGES["step_confirm_yes"], params)
+            return self.builder.confirm(chat_id, sender_phone, params)
+
+        if yes_no == "no":
+            logger.info(self.LOGGER_MESSAGES["step_confirm_no"])
+            if params.get(id_type):
+                postgres.cancel_booking_trial(
+                    self.builder.bot_name,
+                    object_id=params[id_type],
+                    actor_type="whatsapp",
+                    actor_id=chat_id,
+                    reason="user_declined"
+                )
+            postgres.delete_session(self.builder.bot_name, chat_id)
+            clear_history(chat_id)
+            return self.builder.data_localization(lang, "declined")
+
+        logger.info(self.LOGGER_MESSAGES["step_confirm_unrecognized"], user_text)
+        return self.builder.format_summary(params) + "\n\n" + self.builder.data_localization(lang, "confirm_reshow")
+
+    def handle_step_date(self, chat_id: str, user_text: str, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        # Always recompute available_days here so a session that crossed midnight
+        # doesn't keep offering yesterday's date.
+        free_now = self.get_free_now()
+        available_days = sorted({w["date"] for w in free_now})
+        params["available_days"] = [str(d) for d in available_days]
+        logger.info(self.LOGGER_MESSAGES["step_date_info"], available_days, user_text)
+
+        chosen: date | None = None
+        text = user_text.strip()
+
+        if text.isdigit():
+            idx = int(text) - 1
+            if 0 <= idx < len(available_days):
+                chosen = available_days[idx]
+            logger.info(self.LOGGER_MESSAGES['step_date_numeric'], text, idx, chosen)
+        else:
+            for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+                try:
+                    chosen = datetime.strptime(text, fmt).date()
+                    logger.info(self.LOGGER_MESSAGES["step_date_parse"], fmt, chosen)
+                    break
+                except ValueError:
+                    pass
+            # Also allow "dd.mm" without year
+            if not chosen:
+                m = re.match(r"^(\d{1,2})\.(\d{1,2})$", text)
+                if m:
+                    try:
+                        chosen = date(today_almaty().year, int(m.group(2)), int(m.group(1)))
+                        logger.info(self.LOGGER_MESSAGES["step_date_parse_2"], chosen)
+                    except ValueError:
+                        pass
+
+        if not chosen or chosen not in available_days:
+            logger.info(self.LOGGER_MESSAGES["step_date_rejected"], chosen, available_days)
+            return self.builder.ask_date(available_days, lang) + "\n\n" + self.builder.data_localization(lang, "ask_date_invalid")
+
+        free = self.get_free_now([chosen.weekday()])
+        day_windows = [w for w in free if w["date"] == chosen]
+        logger.info(self.LOGGER_MESSAGES["step_date_accepted"],chosen, len(day_windows))
+
+        params["date"] = str(chosen)
+        postgres.update_draft(self.builder.bot_name, object_id=params[f"{self.builder.booking_or_trial}_id"], date=str(chosen))
+        self.save_session(chat_id, "step_time", params)
+        return self.builder.ask_time(chosen, day_windows, lang)
+
+    def handle_step_name(self, chat_id: str, user_text: str, params: dict) -> str:
+        return ""
+
+    def handle_step_time(self, chat_id: str, user_text: str, params: dict) -> str:
+        return ""
+
     def save_session(self, chat_id: str, state: str, params: dict) -> None:
         """Persist the session, keeping booking_sessions.booking_id in sync."""
         postgres.upsert_session(
-            self.bot_name,
+            self.builder.bot_name,
             chat_id=chat_id,
             state=state,
             params=params,
-            object_id=params.get(f'{self.booking_or_trial}_id')
+            object_id=params.get(f'{self.builder.booking_or_trial}_id')
         )
 
+    def step_time_helper(self, user_text: str, params: dict) -> dict:
+        lang = params.get("lang", "ru")
+        chosen_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
+        free = trial_logic.get_trial_daytime(self.builder.bot_name, [chosen_date.weekday()])
+        day_windows = [w for w in free if w["date"] == chosen_date]
+        logger.info(
+            self.LOGGER_MESSAGES["step_time_info"],
+            chosen_date,
+            [(str(w["time_start"]), str(w["time_end"])) for w in day_windows],
+            user_text,
+        )
 
+        m = self.builder.TIME_RANGE_RE.search(user_text)
+        if not m:
+            logger.info(self.LOGGER_MESSAGES["step_time_reject_regex"], user_text)
+            return {
+                "ok": False,
+                "response": f"""{self.builder.ask_time(chosen_date, day_windows, lang)}\n
+                \n{self.builder.data_localization(lang,"time_not_recognized")}"""
+            }
+
+        time_start, time_end = m.group(1), m.group(2)
+        time_start = self.builder.pad_time(time_start)
+        time_end = self.builder.pad_time(time_end)
+        logger.info(self.LOGGER_MESSAGES["step_time_parse"], time_start, time_end)
+
+        if time_start >= time_end:
+            logger.info(self.LOGGER_MESSAGES["step_time_reject_inverted"], time_start, time_end)
+            return {
+                "ok": False,
+                "response": f"{self.builder.data_localization(lang, "time_inverted")}\n\n" +
+                                f"{self.builder.ask_time(chosen_date, day_windows, lang)}"
+            }
+        return {
+                "ok": True,
+                "data": {
+                    "time_start": time_start,
+                    "time_end": time_end,
+                    "day_windows": day_windows,
+                    "chosen_date": chosen_date,
+                }
+            }

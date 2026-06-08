@@ -21,15 +21,14 @@ import logging
 import re
 import threading
 import uuid
-from datetime import date, datetime
+from datetime import date
 
 import config
-from handlers.sessions.base_session import BasePromptBuilder
+from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
 from integrations import booking as booking_logic
-from integrations import booking_service, sheets
+from integrations import booking_service
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import upsert_booking_row
-from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +82,36 @@ _T = {
     "field_label":            {"ru": "Поле", "kk": "Алаң"},
 }
 
-# ---------------------------------------------------------------------------
-# Read-only intent keywords (keep for quick queries without starting a session)
-# ---------------------------------------------------------------------------
+
+_LOGGER_MESSAGES = {
+    "step_confirm_yes": "[BOOKING:step_confirm] YES received — confirming booking. params=%s",
+    "step_confirm_no": "[BOOKING:step_confirm] NO received — cancelling draft + session",
+    "step_confirm_unrecognized": "[BOOKING:step_confirm] unrecognised response=%.80s — re-showing summary",
+    "step_date_info": "[BOOKING:step_date] available_days=%s | user_text=%.80s",
+    "step_date_numeric": "[BOOKING:step_date] numeric input=%s idx=%d chosen=%s",
+    "step_date_parse": "[BOOKING:step_date] parsed date via fmt=%s → %s",
+    "step_date_parse_2": "[BOOKING:step_date] parsed dd.mm → %s",
+    "step_date_rejected": "[BOOKING:step_date] REJECTED — chosen=%s not in available_days=%s",
+    "step_date_accepted": "[BOOKING:step_date] ACCEPTED date=%s — %d free windows → advancing to step_time",
+    "step_name": "[BOOKING:step_name] customer_name=%r — advancing to step_confirm",
+    "step_time_info": "[BOOKING:step_time] date=%s free_windows=%s | user_text=%.80s",
+    "step_time_reject_regex": "[BOOKING:step_time] REJECTED — regex did not match user_text=%.80s",
+    "step_time_parse": "[BOOKING:step_time] parsed time_start=%s time_end=%s",
+    "step_time_reject_inverted": "[BOOKING:step_time] REJECTED — inverted range %s >= %s",
+    "step_time_booked": "[BOOKING:step_time] booked slots for week %s–%s: %d total",
+    "step_time_fields": "[BOOKING:step_time] free_fields for %s %s–%s: %s",
+    "step_time_fields_reject": "[BOOKING:step_time] REJECTED — no free fields for requested time",
+    "step_time_advance": "[BOOKING:step_time] multiple free fields=%s — advancing to step_field",
+    "step_players_reject": "[BOOKING:step_players] REJECTED — no digit found in user_text=%.80s",
+    "step_players_advance": "[BOOKING:step_players] players=%d — advancing to step_name"
+}
 
 # Substring stems for "show me my existing booking". Stems are intentionally
 # short so Russian declensions (моя/мою/моей/моих) and Kazakh possessives
 # (брондауым/брондауыма) are all caught with a single `in` check.
 # Checked BEFORE _NEW_BOOKING_KW so past-tense "я забронировал" doesn't get
 # misrouted by the "забронир" stem in new_booking.
+
 _MY_BOOKING_KW = (
     # Russian — possessive + key noun (covers multiple declensions)
     "моя брон", "мою брон", "моей брон", "моих брон", "мои брон", "мой брон",
@@ -112,6 +132,7 @@ _MY_BOOKING_KW = (
 
 # Substrings (lowercased) that mean "user wants to make a new booking right now".
 # Checked AFTER _MY_BOOKING_KW so phrases like "я забронировал" stay on my_booking.
+
 _NEW_BOOKING_KW = (
     "забронир", "хочу забронир", "хочу поле", "нужно поле", "снять поле",
     "арендова", "хочу играть",
@@ -119,9 +140,6 @@ _NEW_BOOKING_KW = (
     "алаң жалда",
 )
 
-# ---------------------------------------------------------------------------
-# Public entry points
-# ---------------------------------------------------------------------------
 
 def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru") -> str:
     """
@@ -131,6 +149,7 @@ def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru") -> str
     `lang` is stored in the session so every subsequent step reuses it.
     """
     builder = BookingPromptBuilder(_BOT_NAME)
+    handler = BookingStepHandler(_BOT_NAME)
     free = booking_logic.get_free_windows()
     available_days = sorted({w["date"] for w in free})
     logger.info(
@@ -146,7 +165,7 @@ def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru") -> str
     draft = postgres.create_draft(bot_name=_BOT_NAME, chat_id=chat_id, phone=sender_phone, client_token=client_token)
     booking_id = draft["data"]["booking_id"]
 
-    builder.save_session(
+    handler.save_session(
         chat_id,
         "step_date",
         {
@@ -178,6 +197,7 @@ def handle_booking_turn(
     """
     session = postgres.get_active_session(_BOT_NAME, chat_id)
     builder = BookingPromptBuilder(_BOT_NAME)
+    handler = BookingStepHandler(_BOT_NAME)
 
     # ── Active session — dispatch to step handler ────────────────────────
     if session:
@@ -209,17 +229,17 @@ def handle_booking_turn(
             return start_booking_flow(chat_id, sender_phone, builder.detect_lang(user_text))
 
         if state == "step_date":
-            return _handle_step_date(chat_id, user_text, params)
+            return handler.handle_step_date(chat_id, user_text, params)
         if state == "step_time":
-            return _handle_step_time(chat_id, user_text, params)
+            return handler.handle_step_time(chat_id, user_text, params)
         if state == "step_field":
-            return _handle_step_field(chat_id, user_text, params)
+            return handler.handle_step_field(chat_id, user_text, params)
         if state == "step_players":
-            return _handle_step_players(chat_id, user_text, params)
+            return handler.handle_step_players(chat_id, user_text, params)
         if state == "step_name":
-            return _handle_step_name(chat_id, user_text, params)
+            return handler.handle_step_name(chat_id, user_text, params)
         if state == "step_confirm":
-            return _handle_step_confirm(chat_id, phone_number_id, sender_phone, user_text, params)
+            return handler.handle_step_confirm(chat_id, phone_number_id, sender_phone, user_text, params, "booking_id")
         logger.warning("[BOOKING] Unknown session state=%s — falling through", state)
         return None
 
@@ -249,229 +269,120 @@ def handle_booking_turn(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Step handlers
-# ---------------------------------------------------------------------------
+class BookingStepHandler(BaseStepHandler):
+    def __init__(self, bot_name: str):
+        self.builder = BookingPromptBuilder(bot_name)
+        super().__init__(logger_messages=_LOGGER_MESSAGES, builder=self.builder)
 
-def _handle_step_date(chat_id: str, user_text: str, params: dict) -> str:
-    builder = BookingPromptBuilder(_BOT_NAME)
-    lang = params.get("lang", "ru")
-    # Always recompute available_days here so a session that crossed midnight
-    # doesn't keep offering yesterday's date.
-    free_now = booking_logic.get_free_windows()
-    available_days = sorted({w["date"] for w in free_now})
-    params["available_days"] = [str(d) for d in available_days]
-    logger.info("[BOOKING:step_date] available_days=%s | user_text=%.80s", available_days, user_text)
+    def get_free_now(self, days: list | None = None):
+        return booking_logic.get_free_windows()
 
-    chosen: date | None = None
-    text = user_text.strip()
+    def handle_step_name(self, chat_id: str, user_text: str, params: dict) -> str:
+        params["customer_name"] = user_text.strip()
+        logger.info(self.LOGGER_MESSAGES["step_name"], params["customer_name"])
+        postgres.update_draft(self.builder.bot_name, params["booking_id"], customer_name=params["customer_name"])
+        self.save_session(chat_id, "step_confirm", params)
+        return self.builder.format_summary(params)
 
-    if text.isdigit():
-        idx = int(text) - 1
-        if 0 <= idx < len(available_days):
-            chosen = available_days[idx]
-        logger.info("[BOOKING:step_date] numeric input=%s idx=%d chosen=%s", text, idx, chosen)
-    else:
-        for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
-            try:
-                chosen = datetime.strptime(text, fmt).date()
-                logger.info("[BOOKING:step_date] parsed date via fmt=%s → %s", fmt, chosen)
-                break
-            except ValueError:
-                pass
-        # Also allow "dd.mm" without year
-        if not chosen:
-            m = re.match(r"^(\d{1,2})\.(\d{1,2})$", text)
-            if m:
-                try:
-                    chosen = date(today_almaty().year, int(m.group(2)), int(m.group(1)))
-                    logger.info("[BOOKING:step_date] parsed dd.mm → %s", chosen)
-                except ValueError:
-                    pass
+    def handle_step_time(self, chat_id: str, user_text: str, params: dict) -> str:
+        helper_response = self.step_time_helper(user_text, params)
+        if not helper_response["ok"]:
+            return helper_response["response"]
 
-    if not chosen or chosen not in available_days:
+        time_start, time_end = helper_response["data"]["time_start"], helper_response["data"]["time_end"]
+        day_windows = helper_response["data"]["day_windows"]
+        chosen_date = helper_response["data"]["chosen_date"]
+        lang = params.get("lang", "ru")
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
         logger.info(
-            "[BOOKING:step_date] REJECTED — chosen=%s not in available_days=%s",
-            chosen, available_days,
-        )
-        return builder.ask_date(available_days, lang) + "\n\n" + builder.data_localization(lang, "ask_date_invalid")
-
-    free = booking_logic.get_free_windows()
-    day_windows = [w for w in free if w["date"] == chosen]
-    logger.info(
-        "[BOOKING:step_date] ACCEPTED date=%s — %d free windows → advancing to step_time",
-        chosen, len(day_windows),
-    )
-
-    params["date"] = str(chosen)
-    postgres.update_draft(_BOT_NAME, params["booking_id"], date=str(chosen))
-    builder.save_session(chat_id, "step_time", params)
-    return builder.ask_time(chosen, day_windows, lang)
-
-
-def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
-    builder = BookingPromptBuilder(_BOT_NAME)
-    lang = params.get("lang", "ru")
-    chosen_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
-    free        = booking_logic.get_free_windows()
-    day_windows = [w for w in free if w["date"] == chosen_date]
-    logger.info(
-        "[BOOKING:step_time] date=%s free_windows=%s | user_text=%.80s",
-        chosen_date,
-        [(w["field"], str(w["time_start"]), str(w["time_end"])) for w in day_windows],
-        user_text,
-    )
-
-    m = builder.TIME_RANGE_RE.search(user_text)
-    if not m:
-        logger.info("[BOOKING:step_time] REJECTED — regex did not match user_text=%.80s", user_text)
-        return builder.ask_time(chosen_date, day_windows, lang) + "\n\n" + builder.data_localization(lang, "time_not_recognized")
-
-    time_start, time_end = m.group(1), m.group(2)
-    time_start = builder.pad_time(time_start)
-    time_end   = builder.pad_time(time_end)
-    logger.info("[BOOKING:step_time] parsed time_start=%s time_end=%s", time_start, time_end)
-
-    if time_start >= time_end:
-        logger.info("[BOOKING:step_time] REJECTED — inverted range %s >= %s", time_start, time_end)
-        return builder.ask_time(chosen_date, day_windows, lang) + "\n\n" + builder.data_localization(lang, "time_inverted")
-
-    week_start, week_end = booking_logic.get_week_range()
-    booked = booking_logic.get_all_booked(week_start, week_end)
-    logger.info(
-        "[BOOKING:step_time] booked slots for week %s–%s: %d total",
-        week_start, week_end, len(booked),
-    )
-
-    free_fields = [
-        f for f in config.BOOKING_FIELDS
-        if booking_logic.is_range_free(booked, params["date"], time_start, time_end, f["id"])
-    ]
-    logger.info(
-        "[BOOKING:step_time] free_fields for %s %s–%s: %s",
-        params["date"], time_start, time_end,
-        [f["id"] for f in free_fields],
-    )
-
-    if not free_fields:
-        logger.info("[BOOKING:step_time] REJECTED — no free fields for requested time")
-        return (
-            builder.data_localization(lang, "no_free_fields", start=time_start, end=time_end)
-            + "\n\n"
-            + builder.ask_time(chosen_date, day_windows, lang)
+            self.LOGGER_MESSAGES["step_time_booked"],
+            week_start, week_end, len(booked),
         )
 
-    params["time_start"] = time_start
-    params["time_end"]   = time_end
-
-    if len(free_fields) == 1:
-        f = free_fields[0]
-        params["field"]  = f["id"]
-        params["format"] = f["format"]
-        logger.info("[BOOKING:step_time] single free field=%d — advancing to step_players", f["id"])
-        postgres.update_draft(
-            _BOT_NAME, params["booking_id"], time_start=time_start, time_end=time_end,
-            field=f["id"], format=f["format"],
-        )
-        builder.save_session(chat_id, "step_players", params)
-        return builder.data_localization(lang, "field_free_advance", id=f["id"], fmt=f["format"])
-
-    logger.info("[BOOKING:step_time] multiple free fields=%s — advancing to step_field", [f["id"] for f in free_fields])
-    postgres.update_draft(_BOT_NAME, params["booking_id"], time_start=time_start, time_end=time_end)
-    builder.save_session(chat_id, "step_field", params)
-    return builder.ask_field(free_fields, lang)
-
-
-def _handle_step_field(chat_id: str, user_text: str, params: dict) -> str:
-    builder = BookingPromptBuilder(_BOT_NAME)
-    lang = params.get("lang", "ru")
-    week_start, week_end = booking_logic.get_week_range()
-    booked      = booking_logic.get_all_booked(week_start, week_end)
-    free_fields = [
-        f for f in config.BOOKING_FIELDS
-        if booking_logic.is_range_free(booked, params["date"], params["time_start"], params["time_end"], f["id"])
-    ]
-
-    chosen_field = None
-    m = re.search(r"\b(\d+)\b", user_text)
-    if m:
-        num = int(m.group(1))
-        # Match by field id first, then by 1-based list position
-        chosen_field = (
-            next((f for f in free_fields if f["id"] == num), None)
-            or (free_fields[num - 1] if 1 <= num <= len(free_fields) else None)
+        free_fields = [
+            f for f in config.BOOKING_FIELDS
+            if booking_logic.is_range_free(booked, params["date"], time_start, time_end, f["id"])
+        ]
+        logger.info(
+            self.LOGGER_MESSAGES["step_time_fields"],
+            params["date"], time_start, time_end,
+            [f["id"] for f in free_fields],
         )
 
-    if not chosen_field:
-        return builder.ask_field(free_fields, lang) + "\n\n" + builder.data_localization(lang, "ask_field_invalid")
-
-    params["field"]  = chosen_field["id"]
-    params["format"] = chosen_field["format"]
-    postgres.update_draft(
-        _BOT_NAME, params["booking_id"], field=chosen_field["id"], format=chosen_field["format"]
-    )
-    builder.save_session(chat_id, "step_players", params)
-    return builder.data_localization(lang, "ask_players")
-
-
-def _handle_step_players(chat_id: str, user_text: str, params: dict) -> str:
-    builder = BookingPromptBuilder(_BOT_NAME)
-    lang = params.get("lang", "ru")
-    m = re.search(r"\b(\d+)\b", user_text)
-    if not m:
-        logger.info("[BOOKING:step_players] REJECTED — no digit found in user_text=%.80s", user_text)
-        return builder.data_localization(lang, "ask_players_invalid")
-
-    params["players"] = int(m.group(1))
-    logger.info("[BOOKING:step_players] players=%d — advancing to step_name", params["players"])
-    postgres.update_draft(_BOT_NAME, params["booking_id"], players=params["players"])
-    builder.save_session(chat_id, "step_name", params)
-    return builder.data_localization(lang, "ask_name")
-
-
-def _handle_step_name(chat_id: str, user_text: str, params: dict) -> str:
-    builder = BookingPromptBuilder(_BOT_NAME)
-    params["customer_name"] = user_text.strip()
-    logger.info("[BOOKING:step_name] customer_name=%r — advancing to step_confirm", params["customer_name"])
-    postgres.update_draft(_BOT_NAME, params["booking_id"], customer_name=params["customer_name"])
-    builder.save_session(chat_id, "step_confirm", params)
-    return builder.format_summary(params)
-
-
-def _handle_step_confirm(
-    chat_id: str,
-    phone_number_id: str,
-    sender_phone: str,
-    user_text: str,
-    params: dict,
-) -> str:
-    builder = BookingPromptBuilder(_BOT_NAME)
-    lower = user_text.lower().strip()
-
-    _YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын", "👍"}
-    _NO  = {"нет", "жоқ", "no", "отмена", "изменить", "өзгерт", "болмайды", "бастапқы"}
-
-    lang = params.get("lang", "ru")
-
-    if any(w in lower for w in _YES):
-        logger.info("[BOOKING:step_confirm] YES received — confirming booking. params=%s", params)
-        return builder.confirm_booking(chat_id, sender_phone, params)
-
-    if any(w in lower for w in _NO):
-        logger.info("[BOOKING:step_confirm] NO received — cancelling draft + session")
-        if params.get("booking_id"):
-            postgres.cancel_booking_trial(
-                _BOT_NAME, params["booking_id"], actor_type="whatsapp", actor_id=chat_id, reason="user_declined"
+        if not free_fields:
+            logger.info(self.LOGGER_MESSAGES["step_time_fields_reject"])
+            return (
+                    f"{self.builder.data_localization(lang, "no_free_fields", start=time_start, end=time_end)}"
+                    f"\n\n{self.builder.ask_time(chosen_date, day_windows, lang)}"
             )
-        postgres.delete_session(_BOT_NAME, chat_id)
-        return builder.data_localization(lang, "declined")
 
-    logger.info("[BOOKING:step_confirm] unrecognised response=%.80s — re-showing summary", user_text)
-    return builder.format_summary(params) + "\n\n" + builder.data_localization(lang, "confirm_reshow")
+        params["time_start"] = time_start
+        params["time_end"] = time_end
 
-# ---------------------------------------------------------------------------
-# Prompt builders
-# ---------------------------------------------------------------------------
+        if len(free_fields) == 1:
+            f = free_fields[0]
+            params["field"] = f["id"]
+            params["format"] = f["format"]
+            logger.info("[BOOKING:step_time] single free field=%d — advancing to step_players", f["id"])
+            postgres.update_draft(
+                _BOT_NAME, params["booking_id"], time_start=time_start, time_end=time_end,
+                field=f["id"], format=f["format"],
+            )
+            self.save_session(chat_id, "step_players", params)
+            return self.builder.data_localization(lang, "field_free_advance", id=f["id"], fmt=f["format"])
+
+        logger.info(self.LOGGER_MESSAGES["step_time_advance"],
+                    [f["id"] for f in free_fields])
+        postgres.update_draft(self.builder.bot_name, params["booking_id"], time_start=time_start, time_end=time_end)
+        self.save_session(chat_id, "step_field", params)
+        return self.builder.ask_field(free_fields, lang)
+
+    def handle_step_field(self, chat_id: str, user_text: str, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+        free_fields = [
+            f for f in config.BOOKING_FIELDS
+            if booking_logic.is_range_free(booked, params["date"], params["time_start"], params["time_end"], f["id"])
+        ]
+
+        chosen_field = None
+        m = re.search(r"\b(\d+)\b", user_text)
+        if m:
+            num = int(m.group(1))
+            # Match by field id first, then by 1-based list position
+            chosen_field = (
+                    next((f for f in free_fields if f["id"] == num), None)
+                    or (free_fields[num - 1] if 1 <= num <= len(free_fields) else None)
+            )
+
+        if not chosen_field:
+            return self.builder.ask_field(free_fields, lang) + "\n\n" + self.builder.data_localization(lang, "ask_field_invalid")
+
+        params["field"] = chosen_field["id"]
+        params["format"] = chosen_field["format"]
+        postgres.update_draft(
+            self.builder.bot_name, params["booking_id"], field=chosen_field["id"], format=chosen_field["format"]
+        )
+        self.save_session(chat_id, "step_players", params)
+        return self.builder.data_localization(lang, "ask_players")
+
+    def handle_step_players(self, chat_id: str, user_text: str, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        m = re.search(r"\b(\d+)\b", user_text)
+        if not m:
+            logger.info(self.LOGGER_MESSAGES["step_players_reject"], user_text)
+            return self.builder.data_localization(lang, "ask_players_invalid")
+
+        params["players"] = int(m.group(1))
+        logger.info(self.LOGGER_MESSAGES["step_players_advance"], params["players"])
+        postgres.update_draft(self.builder.bot_name, params["booking_id"], players=params["players"])
+        self.save_session(chat_id, "step_name", params)
+        return self.builder.data_localization(lang, "ask_name")
+
+
 class BookingPromptBuilder(BasePromptBuilder):
     def __init__(self, bot_name):
         super().__init__(
@@ -481,7 +392,7 @@ class BookingPromptBuilder(BasePromptBuilder):
             my_kw=_MY_BOOKING_KW
         )
 
-    def confirm_booking(self, chat_id: str, sender_phone: str, params: dict) -> str:
+    def confirm(self, chat_id: str, sender_phone: str, params: dict) -> str:
         lang = params.get("lang", "ru")
         time_start_str = params["time_start"]
         time_end_str = params["time_end"]
@@ -525,7 +436,7 @@ class BookingPromptBuilder(BasePromptBuilder):
                 logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 
         threading.Thread(target=_write_to_sheets, daemon=True).start()
-        postgres.delete_session(_BOT_NAME, chat_id)
+        postgres.delete_session(self.bot_name, chat_id)
 
         return self.data_localization(
             lang,
