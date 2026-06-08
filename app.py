@@ -15,6 +15,7 @@ from flask import Flask, request, jsonify, abort
 
 import config
 from handlers.message_handler import handle_incoming_message
+from integrations.repo import postgres
 from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
@@ -68,8 +69,8 @@ def _cancel_expired_bookings():
 
         # Cancel each through the service layer so every transition is audited.
         for b in expired:
-            booking_service.cancel_booking(
-                b["id"], actor_type="system", reason="ttl_expired"
+            postgres.cancel_booking_trial(
+                config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name'], b["id"], actor_type="system", reason="ttl_expired"
             )
 
         # Only awaiting_payment expiries are user-facing (drafts never reserved a slot).

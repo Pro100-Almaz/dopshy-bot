@@ -177,7 +177,7 @@ def handle_incoming_message(payload: dict) -> None:
                 return
             logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
 
-        elif bot_config["name"] == "dopsy_boxing":
+        else:
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
             trial_reply = handle_trial_turn(
                 chat_id, phone_number_id, sender_id, user_text, bot_config["name"]
@@ -207,7 +207,7 @@ def handle_incoming_message(payload: dict) -> None:
             logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
-        elif bot_config["name"] == "dopsy_boxing":
+        else:
             from integrations.trial import get_trial_daytime, format_availability_context
             free = get_trial_daytime(bot_config["name"], None)
             availability_ctx = format_availability_context(free)

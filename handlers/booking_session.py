@@ -28,7 +28,7 @@ from integrations import booking as booking_logic
 from integrations import booking_service, sheets
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import upsert_booking_row
-from utils import today_almaty
+from utils import today_almaty, fmt_date, pad_time
 
 logger = logging.getLogger(__name__)
 
@@ -378,8 +378,8 @@ def _handle_step_time(chat_id: str, user_text: str, params: dict) -> str:
         return _ask_time(chosen_date, day_windows, lang) + "\n\n" + _t(lang, "time_not_recognized")
 
     time_start, time_end = m.group(1), m.group(2)
-    time_start = _pad_time(time_start)
-    time_end   = _pad_time(time_end)
+    time_start = pad_time(time_start)
+    time_end   = pad_time(time_end)
     logger.info("[BOOKING:step_time] parsed time_start=%s time_end=%s", time_start, time_end)
 
     if time_start >= time_end:
@@ -569,7 +569,7 @@ def _confirm_booking(chat_id: str, sender_phone: str, params: dict) -> str:
     return _t(
         lang,
         "booking_pending",
-        date=_fmt_date(params["date"], lang),
+        date=fmt_date(_WEEKDAY, params["date"], lang),
         start=time_start_str,
         end=time_end_str,
         field=field,
@@ -626,7 +626,7 @@ def _format_summary(params: dict) -> str:
     return _t(
         lang,
         "summary",
-        date=_fmt_date(params.get("date", ""), lang),
+        date=fmt_date(_WEEKDAY, params.get("date", ""), lang),
         start=params.get("time_start", "?"),
         end=params.get("time_end", "?"),
         field=params.get("field", "?"),
@@ -634,22 +634,3 @@ def _format_summary(params: dict) -> str:
         players=params.get("players", "?"),
         name=params.get("customer_name", "?"),
     )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _fmt_date(date_str: str, lang: str = "ru") -> str:
-    try:
-        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        return f"{_WEEKDAY[lang][d.weekday()]} {d.strftime('%d.%m.%Y')}"
-    except (ValueError, TypeError):
-        return date_str or "?"
-
-
-def _pad_time(t: str) -> str:
-    """Ensure HH:MM format (zero-pad single-digit hours)."""
-    h, m = t.split(":")
-    return f"{int(h):02d}:{m}"
-

@@ -27,11 +27,11 @@ _ARENA_DRAFT_FIELDS = {
     "phone", "state", "client_token", "source",
 }
 
-draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "football": _ARENA_DRAFT_FIELDS}
+draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "arena": _ARENA_DRAFT_FIELDS}
 
 
 _DRAFTS_BY_BOTS = {
-    "dopsy_bot": "football",
+    "dopsy_bot": "arena",
     "chatbot_2": "academy",
     "dopsy_boxing": "academy",
 }

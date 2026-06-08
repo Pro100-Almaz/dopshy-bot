@@ -32,7 +32,6 @@ def get_ai_response(
         The handler dispatches on `name` to launch the corresponding flow.
     """
     is_dopsy = config.BOT_CONFIGS[phone_number_id]["name"] == "dopsy_bot"
-    is_boxing = config.BOT_CONFIGS[phone_number_id]["name"] == "dopsy_boxing"
     system_content = config.BOT_CONFIGS[phone_number_id]["system_prompt"]
 
     # Inject factual field list for Bot 1 so the LLM never hallucinates field formats
@@ -59,7 +58,7 @@ def get_ai_response(
     if is_dopsy:
         kwargs["tools"] = [START_BOOKING_TOOL, EDIT_BOOKING_TOOL]
         kwargs["tool_choice"] = "auto"
-    elif is_boxing:
+    else:
         kwargs["tools"] = [START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL]
         kwargs["tool_choice"] = "auto"
 
