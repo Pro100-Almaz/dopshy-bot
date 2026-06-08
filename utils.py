@@ -1,7 +1,8 @@
 """Shared utility helpers for the Dopshy bot."""
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
+
 
 import config
 
