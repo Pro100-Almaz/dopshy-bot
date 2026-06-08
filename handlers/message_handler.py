@@ -8,18 +8,15 @@ import threading
 
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
-from handlers.trial_session import handle_trial_turn, start_trial_flow
+from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.sheets.booking_sheets import upsert_booking_row
-from integrations.repo.postgres import cancel_booking_trial
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
-from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
+from handlers.sessions.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
-from integrations import booking_service, payment_validation, sheets
-from handlers.edit_booking import handle_edit_request
-from integrations import booking_service, payment_validation, sheets
-from integrations.repo import booking_repo, postgres
+from integrations import booking_service, payment_validation
+from integrations.repo import booking_repo
 import config
 
 logger = logging.getLogger(__name__)

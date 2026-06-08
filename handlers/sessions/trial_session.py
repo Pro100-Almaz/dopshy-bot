@@ -24,6 +24,7 @@ from datetime import date, datetime
 
 from chat.conversation import clear_history
 from handlers.edit_trial import handle_cancel_trial_request
+from handlers.sessions.base_session import BasePromptBuilder
 from integrations import trial as trial_logic
 from integrations.repo import postgres, academy_repo
 from integrations.repo.academy_repo import has_active_trial, check_trial_limits
@@ -34,10 +35,7 @@ from utils import today_almaty, fmt_date, fmt_time, pad_time
 
 logger = logging.getLogger(__name__)
 
-_WEEKDAY = {
-    "ru": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
-    "kk": ["Дс", "Сс", "Ср", "Бс", "Жм", "Сб", "Жс"],
-}
+
 # Cyrillic letters that exist only in Kazakh — presence flips the session lang to kk.
 _KZ_CHARS = set("әғіңөұүһқ")
 
@@ -404,7 +402,7 @@ def _handle_step_age(chat_id: str, user_text: str, params: dict, bot_name) -> st
     logger.info("[TRIAL:step_name] child_age=%r — creating trial lesson for %r", params["child_age"], bot_name)
     postgres.update_draft(bot_name, object_id=params["trial_id"], child_age=params["child_age"])
     _save(chat_id, "step_confirm", params, bot_name=bot_name)
-    return _format_summary(params)
+    return trial_prompt_builder.format_summary(params)
 
 
 def _handle_step_confirm(
@@ -444,74 +442,75 @@ def _handle_step_confirm(
 # Prompt builders
 # ---------------------------------------------------------------------------
 
-def _confirm_trial(chat_id: str, sender_phone: str, params: dict, bot_name: str) -> str:
-    lang = params.get("lang", "ru")
-    time_start_str = params["time_start"]
-    time_end_str = params["time_end"]
-    trial_date = params.get("date")
-    trial_id = params["trial_id"]
+class TrialPromptBuilder(BasePromptBuilder):
+    def __init__(self):
+        super().__init__(
+            local_dict=_T,
+        )
 
-    logger.info("[TRIAL:confirm] trial_id=%d → writing to sheets", trial_id)
+    def confirm_trial(self, chat_id: str, sender_phone: str, params: dict, bot_name: str) -> str:
+        lang = params.get("lang", "ru")
+        time_start_str = params["time_start"]
+        time_end_str = params["time_end"]
+        trial_date = params.get("date")
+        trial_id = params["trial_id"]
 
-    trial_row = {
-        "trial_day": datetime.strptime(trial_date, '%Y-%m-%d') if trial_date else None,
-        "start_time": time_start_str,
-        "end_time": time_end_str,
-        "child_name": params.get("child_name", ""),
-        "phone": sender_phone,
-        "child_age": params.get("child_age", ""),
-    }
+        logger.info("[TRIAL:confirm] trial_id=%d → writing to sheets", trial_id)
 
-    postgres.update_draft(bot_name, object_id=params["trial_id"], **trial_row)
-    academy_repo.confirm_trial(params["trial_id"])
-    refresh_all_trials()
-    postgres.delete_session(bot_name, chat_id)
-    clear_history(chat_id)
+        trial_row = {
+            "trial_day": datetime.strptime(trial_date, '%Y-%m-%d') if trial_date else None,
+            "start_time": time_start_str,
+            "end_time": time_end_str,
+            "child_name": params.get("child_name", ""),
+            "phone": sender_phone,
+            "child_age": params.get("child_age", ""),
+        }
 
-    return _t(
-        lang,
-        "confirmed_trial",
-        date=fmt_date(_WEEKDAY, params["date"], lang),
-        start=time_start_str,
-        end=time_end_str,
-        child_name=params.get("child_name", ""),
-        child_age=params["child_age"],
-    )
+        postgres.update_draft(bot_name, object_id=params["trial_id"], **trial_row)
+        academy_repo.confirm_trial(params["trial_id"])
+        refresh_all_trials()
+        postgres.delete_session(bot_name, chat_id)
+        clear_history(chat_id)
 
-
-def _ask_date(available_days: list[date], lang: str = "ru") -> str:
-    lines = [_t(lang, "ask_date_header")]
-    for i, d in enumerate(available_days, 1):
-        lines.append(f"  {i}. {_WEEKDAY[lang][d.weekday()]} {d.strftime('%d.%m.%Y')}")
-    return "\n".join(lines)
-
-
-def _ask_time(chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
-    lines = [f"📅 {_WEEKDAY[lang][chosen_date.weekday()]} {chosen_date.strftime('%d.%m.%Y')}\n"]
-    lines.append(_t(lang, "ask_time_header"))
-
-    windows = list({(w["time_start"], w["time_end"]) for w in day_windows})
-    windows.sort()
-
-    range_str = "\n".join(
-        f"——\t\t\t{w[0].strftime('%H:%M')}–{w[1].strftime('%H:%M')}\t\t\t——"
-        for w in windows
-    )
-    lines.append(f"{range_str}")
-
-    lines.append("\n" + _t(lang, "ask_time_prompt"))
-    lines.append(_t(lang, "ask_time_example"))
-    return "\n".join(lines)
+        return self.data_localization(
+            lang,
+            "confirmed_trial",
+            date=fmt_date(self.WEEKDAY, params["date"], lang),
+            start=time_start_str,
+            end=time_end_str,
+            child_name=params.get("child_name", ""),
+            child_age=params["child_age"],
+        )
 
 
-def _format_summary(params: dict) -> str:
-    lang = params.get("lang", "ru")
-    return _t(
-        lang,
-        "summary",
-        date=fmt_date(_WEEKDAY, params.get("date", ""), lang),
-        start=params.get("time_start", "?"),
-        end=params.get("time_end", "?"),
-        child_name=params.get("child_name", "?"),
-        child_age=params.get("child_age", "?"),
-    )
+    def ask_time(self, chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
+        lines = self.format_ask_time(chosen_date, lang)
+
+        windows = list({(w["time_start"], w["time_end"]) for w in day_windows})
+        windows.sort()
+
+        range_str = "\n".join(
+            f"——\t\t\t{w[0].strftime('%H:%M')}–{w[1].strftime('%H:%M')}\t\t\t——"
+            for w in windows
+        )
+        lines.append(f"{range_str}")
+
+        lines.append("\n" + _t(lang, "ask_time_prompt"))
+        lines.append(_t(lang, "ask_time_example"))
+        return "\n".join(lines)
+
+
+    def format_summary(self, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        return self.data_localization(
+            lang,
+            "summary",
+            date=fmt_date(self.WEEKDAY, params.get("date", ""), lang),
+            start=params.get("time_start", "?"),
+            end=params.get("time_end", "?"),
+            child_name=params.get("child_name", "?"),
+            child_age=params.get("child_age", "?"),
+        )
+
+
+trial_prompt_builder = TrialPromptBuilder()

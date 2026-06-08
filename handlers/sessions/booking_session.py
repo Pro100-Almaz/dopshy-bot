@@ -32,10 +32,7 @@ from utils import today_almaty, fmt_date, pad_time
 
 logger = logging.getLogger(__name__)
 
-_WEEKDAY = {
-    "ru": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
-    "kk": ["Дс", "Сс", "Ср", "Бс", "Жм", "Сб", "Жс"],
-}
+
 # Cyrillic letters that exist only in Kazakh — presence flips the session lang to kk.
 _KZ_CHARS = set("әғіңөұүһқ")
 
@@ -591,10 +588,9 @@ def _ask_date(available_days: list[date], lang: str = "ru") -> str:
     return "\n".join(lines)
 
 
-def _ask_time(chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
+def ask_time(chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
     field_label = _t(lang, "field_label")
-    lines = [f"📅 {_WEEKDAY[lang][chosen_date.weekday()]} {chosen_date.strftime('%d.%m.%Y')}\n"]
-    lines.append(_t(lang, "ask_time_header"))
+
 
     by_field: dict = {}
     for w in day_windows:
