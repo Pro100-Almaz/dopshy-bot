@@ -9,12 +9,8 @@ this module is glue: target selection + message formatting + Sheets sync.
 """
 
 import logging
-import threading
-from datetime import datetime, timedelta, timezone
 
 from chat.conversation import clear_history
-from integrations import booking_service, sheets
-from integrations.sheets.booking_sheets import upsert_booking_row
 from integrations.repo import postgres, academy_repo
 from integrations.repo.academy_repo import get_all_active_trials, cancel_all_trials
 from integrations.sheets.trial_sheets import refresh_all_trials
@@ -32,17 +28,9 @@ _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
         "У вас нет активной записи на пробный урок, которую можно изменить.",
         "Сізде өзгертуге болатын белсенді сынақ сабағы жоқ.",
     ),
-    "ALREADY_EDITED": (
-        "❌ Эту бронь уже один раз меняли. Следующее изменение — через администратора.",
-        "❌ Бұл бронь бір рет өзгертілген. Келесі өзгерісті әкімші арқылы жасаңыз.",
-    ),
     "NO_CHANGE": (
         "Я не понял, что именно изменить. Напишите новое время, дату, ",
         "Нақты не өзгерту керек екенін түсінбедім. Жаңа уақытты, күнді, "
-    ),
-    "INVALID_STATE": (
-        "❌ Эту бронь уже нельзя изменить.",
-        "❌ Бұл бронды енді өзгертуге болмайды.",
     ),
     "NOT_FOUND": (
         "❌ Пробное занятие не найдено.",
@@ -83,7 +71,6 @@ def _format_cancel(code: str) -> str:
 
 def _format_success(result_data: dict) -> str:
     """Render the diff so the user sees exactly what changed."""
-    print("result_data:", result_data)
     # Build a per-field "old → new" line only for fields that actually changed.
 
     # Current booking card (resulting state)
@@ -106,72 +93,6 @@ def _format_success(result_data: dict) -> str:
     )
     return _bilingual(summary_ru, summary_kk)
 
-
-# ---------------------------------------------------------------------------
-# Target selection
-# ---------------------------------------------------------------------------
-
-def _pick_target(trials: list[dict]) -> dict | None:
-    """Pick the most likely booking the user wants to edit.
-
-    Strategy: soonest booking that's still in the edit window and hasn't been
-    edited before. Falls back to the soonest overall so the service layer
-    surfaces a specific error (EDIT_WINDOW_CLOSED / ALREADY_EDITED) instead
-    of a generic NO_BOOKING.
-    """
-    if not trials:
-        return None
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=48)
-    eligible = [
-        t for t in trials
-        if t.get("start_at") and t["start_at"] > cutoff
-        and t.get("predecessor_booking_id") is None
-    ]
-    return eligible[0] if eligible else trials[0]
-
-
-# ---------------------------------------------------------------------------
-# Sheets sync (background)
-# ---------------------------------------------------------------------------
-
-def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
-    """Push both the cancelled old row and the new row to Google Sheets."""
-    old_row = postgres.get_booking(old_booking_id) or {}
-    rows = [
-        {
-            "id":            old_booking_id,
-            "field":         old_row.get("field"),
-            "date":          str(old_row.get("date") or ""),
-            "time_start":    str(old_row.get("time_start") or "")[:5],
-            "time_end":      str(old_row.get("time_end") or "")[:5],
-            "customer_name": old_row.get("customer_name", ""),
-            "phone":         phone,
-            "players":       None,
-            "state":         "cancelled",
-            "notes":         old_row.get("notes", ""),
-        },
-        {
-            "id":            new_booking["id"],
-            "field":         new_booking["field"],
-            "date":          str(new_booking["date"]),
-            "time_start":    str(new_booking["time_start"])[:5],
-            "time_end":      str(new_booking["time_end"])[:5],
-            "customer_name": new_booking.get("customer_name", ""),
-            "phone":         phone,
-            "players":       new_booking.get("players"),
-            "state":         new_booking["state"],
-            "notes":         "",
-        },
-    ]
-
-    def _run():
-        for r in rows:
-            try:
-                upsert_booking_row(r)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[EDIT] Sheets sync failed for booking %s: %s", r["id"], exc)
-
-    threading.Thread(target=_run, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +149,3 @@ def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) 
     refresh_all_trials()
     logger.info("[CANCEL_TRIAL] successful",)
     return _format_cancel("SUCCESS")
-
-
-
-

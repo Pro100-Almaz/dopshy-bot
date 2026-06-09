@@ -12,8 +12,9 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from integrations import booking_service, sheets
+from integrations import booking_service
 from integrations.repo import booking_repo
+from integrations.sheets import booking_sheets as sheets
 
 logger = logging.getLogger(__name__)
 
