@@ -2,8 +2,6 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
-import json
-import config
 from integrations.repo.postgres import _conn
 
 '''

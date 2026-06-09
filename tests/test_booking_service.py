@@ -30,7 +30,7 @@ def _events(booking_id: int) -> list[str]:
 
 def _ready_draft(token, date="2026-07-01", ts="18:00", te="19:00", field=1):
     """Create a fully-populated DRAFT ready for request_payment."""
-    res = svc.create_draft("dopsy_bot",
+    res = svc.create_draft("dopsy_bot", chat_id="chat_test",
                            date=date, time_start=ts, time_end=te,
                            field=field, format="5x5", players=8,
                            customer_name="Test")
@@ -41,8 +41,8 @@ def _ready_draft(token, date="2026-07-01", ts="18:00", te="19:00", field=1):
 
 def test_create_draft_is_idempotent():
     token = _token()
-    a = svc.create_draft("dopsy_bot", phone="7700", client_token=token)
-    b = svc.create_draft("dopsy_bot", phone="7700", client_token=token)
+    a = svc.create_draft("dopsy_bot", phone="7700", chat_id="chat_test", client_token=token)
+    b = svc.create_draft("dopsy_bot", phone="7700", chat_id="chat_test", client_token=token)
     assert a["ok"] and b["ok"]
     assert a["data"]["booking_id"] == b["data"]["booking_id"]
     # Only one draft_created event despite two calls.
@@ -51,7 +51,7 @@ def test_create_draft_is_idempotent():
 
 def test_update_draft_sets_fields():
     token = _token()
-    bid = svc.create_draft("dopsy_bot", phone="7700", client_token=token)["data"]["booking_id"]
+    bid = svc.create_draft("dopsy_bot", phone="7700", chat_id="chat_test", client_token=token)["data"]["booking_id"]
     res = svc.update_draft(bot_name='dopsy_bot', object_id=bid, date="2026-07-01", time_start="10:00", time_end="11:00", field=2)
     assert res["ok"]
     assert _state(bid) == "draft"
@@ -78,7 +78,7 @@ def test_request_payment_success():
 
 def test_request_payment_missing_fields():
     token = _token()
-    bid = svc.create_draft("dopsy_bot", phone="7700", client_token=token)["data"]["booking_id"]
+    bid = svc.create_draft("dopsy_bot", phone="7700", chat_id="chat_test", client_token=token)["data"]["booking_id"]
     res = booking_service.request_payment(bid, token)
     assert not res["ok"]
     assert res["code"] == "INVALID_TIME"
@@ -121,7 +121,7 @@ def test_submit_payment_proof_confirms():
 
 def test_submit_payment_proof_wrong_state():
     token = _token()
-    bid = svc.create_draft("dopsy_bot", phone="7700", client_token=token)["data"]["booking_id"]
+    bid = svc.create_draft("dopsy_bot", phone="7700", chat_id="chat_test", client_token=token)["data"]["booking_id"]
     res = booking_service.submit_payment_proof(bid)
     assert not res["ok"]
     assert res["code"] == "BOOKING_WRONG_STATE"
