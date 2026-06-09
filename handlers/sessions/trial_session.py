@@ -16,7 +16,6 @@ After confirming "да":
   - Kaspi payment link sent
   - Session deleted
 """
-
 import logging
 import uuid
 from datetime import date, datetime
@@ -339,7 +338,6 @@ class TrialPromptBuilder(BasePromptBuilder):
             child_age=params["child_age"],
         )
 
-
     def ask_time(self, chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
         lines = self.format_ask_time(chosen_date, lang)
 
@@ -356,10 +354,10 @@ class TrialPromptBuilder(BasePromptBuilder):
         lines.append(self.data_localization(lang, "ask_time_example"))
         return "\n".join(lines)
 
-
-    def format_summary(self, params: dict) -> str:
+    def format_summary(self, params: dict, append_message: str | None = None) -> str:
+        append_message = append_message or ""
         lang = params.get("lang", "ru")
-        return self.data_localization(
+        formatted_response = self.data_localization(
             lang,
             "summary",
             date=self.fmt_date(params.get("date", ""), lang),
@@ -367,4 +365,8 @@ class TrialPromptBuilder(BasePromptBuilder):
             end=params.get("time_end", "?"),
             child_name=params.get("child_name", "?"),
             child_age=params.get("child_age", "?"),
+        )
+        return self.get_buttons(
+            formatted_response + append_message,
+            ["Растаймын✅", "Бас тартамын❌"] if lang == "kk" else ["Подтверждаю✅", "Отмена❌"]
         )

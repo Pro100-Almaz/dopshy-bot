@@ -16,7 +16,6 @@ After confirming "да":
   - Kaspi payment link sent
   - Session deleted
 """
-
 import logging
 import re
 import threading
@@ -359,7 +358,7 @@ class BookingStepHandler(BaseStepHandler):
             )
 
         if not chosen_field:
-            return self.builder.ask_field(free_fields, lang) + "\n\n" + self.builder.data_localization(lang, "ask_field_invalid")
+            return self.builder.ask_field(free_fields, lang, "\n\n" + self.builder.data_localization(lang, "ask_field_invalid"))
 
         params["field"] = chosen_field["id"]
         params["format"] = chosen_field["format"]
@@ -451,12 +450,12 @@ class BookingPromptBuilder(BasePromptBuilder):
             pay_url=config.KASPI_PAYMENT_URL,
         )
 
-    def ask_field(self, free_fields: list[dict], lang: str = "ru") -> str:
+    def ask_field(self, free_fields: list[dict], lang: str = "ru", append_messages: str | None = None) -> str:
+        append_messages = append_messages or ""
         field_label = self.data_localization(lang, "field_label")
-        lines = [self.data_localization(lang, "ask_field_header")]
-        for f in free_fields:
-            lines.append(f"  {f['id']}. {field_label} {f['id']} ({f['format']})")
-        return "\n".join(lines)
+        buttons = [f"{f['id']}. {field_label} {f['id']} ({f['format']})" for f in free_fields]
+        return self.get_buttons(self.data_localization(lang, "ask_field_header") + append_messages, buttons)
+
 
     def ask_time(self, chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
         field_label = self.data_localization(lang, "field_label")
@@ -479,9 +478,10 @@ class BookingPromptBuilder(BasePromptBuilder):
         lines.append(self.data_localization(lang, "ask_time_example"))
         return "\n".join(lines)
 
-    def format_summary(self, params: dict) -> str:
+    def format_summary(self, params: dict, append_message : str | None = None) -> str:
+        append_message = append_message or ""
         lang = params.get("lang", "ru")
-        return self.data_localization(
+        formatted_response = self.data_localization(
             lang,
             "summary",
             date=self.fmt_date(params.get("date", ""), lang),
@@ -491,4 +491,8 @@ class BookingPromptBuilder(BasePromptBuilder):
             fmt=params.get("format", "?"),
             players=params.get("players", "?"),
             name=params.get("customer_name", "?"),
+        )
+        return self.get_buttons(
+            formatted_response + append_message,
+            ["Растаймын✅", "Бас тартамын❌"] if lang == "kk" else ["Подтверждаю✅", "Отмена❌"]
         )

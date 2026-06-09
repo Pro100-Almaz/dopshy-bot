@@ -2,7 +2,6 @@
 Core message processing pipeline:
   incoming text → RAG retrieval → GPT-4o-mini → WhatsApp reply
 """
-
 import logging
 import threading
 
@@ -124,7 +123,7 @@ def handle_incoming_message(payload: dict) -> None:
             return
 
         # Only handle text messages
-        if msg_type != "text":
+        if msg_type not in ["text", "interactive"]:
             send_text_message(
                 phone_number_id,
                 sender_id,
@@ -132,7 +131,13 @@ def handle_incoming_message(payload: dict) -> None:
             )
             return
 
-        user_text = message["text"]["body"].strip()
+        user_text = ""
+        if msg_type == "interactive" and message["interactive"]["type"] == 'button_reply':
+            button_reply = message["interactive"]["button_reply"]
+            user_text = button_reply.get("title")
+
+        if msg_type == "text":
+            user_text = message["text"]["body"].strip()
 
         # Determine chat context key.
         # For group messages Meta Cloud API includes a "context" object; we use
@@ -251,7 +256,6 @@ def handle_incoming_message(payload: dict) -> None:
             elif tool_call["name"] == "cancel_trial":
                 logger.info("[CANCEL] LLM called cancel_trial tool")
                 handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
-
 
             reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 

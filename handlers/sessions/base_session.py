@@ -1,9 +1,9 @@
+import json
 import logging
 import re
 from datetime import date, datetime, time
 
 from chat.conversation import clear_history
-from integrations import trial as trial_logic
 from integrations.repo import postgres
 from utils import today_almaty
 
@@ -95,8 +95,27 @@ class BasePromptBuilder:
                  self.data_localization(lang, "ask_time_header")]
         return lines
 
-    def format_summary(self, params: dict) -> str:
+    def format_summary(self, params: dict, append_message: str | None = None) -> str:
         return ""
+
+    @staticmethod
+    def get_buttons(formatted_response, buttons_list: list) -> str:
+        buttons = {
+            "type": "button",
+            "body": {"text": formatted_response},
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": f"id_{index}",
+                            "title": button
+                        }
+                    } for index, button in enumerate(buttons_list, start=1)
+                ]
+            }
+        }
+        return json.dumps(buttons)
 
     def is_cancel_intent(self, text: str) -> bool:
         low = text.lower()
@@ -111,7 +130,17 @@ class BasePromptBuilder:
 
 class BaseStepHandler:
     YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын", "👍"}
-    NO = {"нет", "жоқ", "no", "отмена", "изменить", "өзгерт", "болмайды", "бастапқы"}
+    NO = {"нет", "жоқ", "no", "отмена", "изменить", "өзгерт", "болмайды", "бастапқы", "бас тартамын"}
+
+    WEEKDAY_ALIASES = [
+        ["понедельник", "пн", "дүйсенбі", "дс", "дүйсенбіге"],
+        ["вторник", "вт", "сейсенбі", "сс", "сейсенбіге"],
+        ["среда", "ср", "сәрсенбі", "сәрсенбіге", "среду"],
+        ["четверг", "чт", "бейсенбі", "бс", "бейсенбіге"],
+        ["пятница", "пятницу", "пят", "пт", "жұма", "жм", "жұмаға"],
+        ["суббота", "субботу", "суб", "сб", "сенбі", "сенбіге"],
+        ["воскресенье", "воскр", "вс", "жексенбі", "жс", "жексенбіге"],
+    ]
 
     def __init__(
             self, logger_messages: dict[str, str],
@@ -162,7 +191,9 @@ class BaseStepHandler:
             return self.builder.data_localization(lang, "declined")
 
         logger.info(self.LOGGER_MESSAGES["step_confirm_unrecognized"], user_text)
-        return self.builder.format_summary(params) + "\n\n" + self.builder.data_localization(lang, "confirm_reshow")
+
+        reshow_message = "\n\n" + self.builder.data_localization(lang, "confirm_reshow")
+        return self.builder.format_summary(params, reshow_message)
 
     def handle_step_date(self, chat_id: str, user_text: str, params: dict) -> str:
         lang = params.get("lang", "ru")
@@ -198,6 +229,16 @@ class BaseStepHandler:
                         logger.info(self.LOGGER_MESSAGES["step_date_parse_2"], chosen)
                     except ValueError:
                         pass
+                # check if date is given as weekday
+                else:
+                    available_days_by_weekday = {i.weekday(): i for i in available_days[:7]}
+                    text_words = text.split(" ")
+                    for day, alias in enumerate(self.WEEKDAY_ALIASES, 0):
+                        for word in text_words:
+                            if word in alias:
+                                chosen = available_days_by_weekday.get(day, None)
+                                break
+
 
         if not chosen or chosen not in available_days:
             logger.info(self.LOGGER_MESSAGES["step_date_rejected"], chosen, available_days)
@@ -231,7 +272,7 @@ class BaseStepHandler:
     def step_time_helper(self, user_text: str, params: dict) -> dict:
         lang = params.get("lang", "ru")
         chosen_date = datetime.strptime(params["date"], "%Y-%m-%d").date()
-        free = trial_logic.get_trial_daytime(self.builder.bot_name, [chosen_date.weekday()])
+        free = self.get_free_now([chosen_date.weekday()])
         day_windows = [w for w in free if w["date"] == chosen_date]
         logger.info(
             self.LOGGER_MESSAGES["step_time_info"],
