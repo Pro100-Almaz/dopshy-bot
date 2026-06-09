@@ -1,5 +1,5 @@
 """Meta WhatsApp Cloud API client — send messages."""
-
+import json
 import logging
 
 import requests
@@ -56,6 +56,15 @@ def send_text_message(phone_number_id: str, to: str, text: str) -> dict:
         "type": "text",
         "text": {"preview_url": False, "body": text},
     }
+
+    try:
+        json_text = json.loads(text)
+        payload["type"] = "interactive"
+        payload["interactive"] = json_text
+        payload.pop("text")
+    except Exception as e:
+        pass
+
     response = requests.post(
         config.get_whatsapp_api_url(phone_number_id),
         json=payload,
