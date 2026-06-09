@@ -21,7 +21,8 @@ from flask import Blueprint, jsonify, request
 
 import config
 from integrations import booking_service
-from integrations.repo.academy_repo import deactivate_group_repo
+from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
+    create_or_update_group, on_manual_group_edit
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
     upsert_booking_row
 from integrations.repo import booking_repo as repo, postgres
@@ -189,33 +190,97 @@ def daily_refresh():
     refresh_week_sheet()
     return jsonify({"ok": True}), 200
 
+# --------------GROUPS
 
 @manager_api.post("/api/manager/academy_groups/refresh_all")
 def refresh_academy_groups():
     refresh_all_groups()
     return jsonify({"ok": True}), 200
 
-@manager_api.get("/api/manager/academy_groups/refresh_all_trials")
-def refresh_academy_trials():
-    refresh_all_trials()
-    return jsonify({"ok": True}), 200
-
 
 @manager_api.post("/api/manager/academy_groups")
-def create_academy_group():
-    pass
+def create_academy_group_with_time():
+    # make current capacity 0 by default
+    # this function should receive the payload --> create a grouping and schedule row. Schedule should reveive
+    # this group's id as a Foreign Key
+
+    body = request.get_json(silent=True) or {}
+    required = ("group_type", "group_name",  "time_start", "time_end", "training_day", "max_cap")
+
+    if not all(body.get(k) for k in required):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "group_type, group_name, max_cap, training_day, time_start, time_end are required."}), 400
+
+    training_day = int(body["training_day"])
+    time_start = body["time_start"]
+    time_end = body["time_end"]
+
+    group_id = create_or_update_group(
+        group_name = body['group_name'],
+        group_type = body['group_type'],
+        max_cap = body['max_cap'],
+        is_active = body.get('is_active', True)
+    )
+
+    if not group_id:
+        return jsonify({
+            "ok" : False,
+            'code': 'CREATE_FAILED',
+            'message': "Could not create group."
+        }), 409
+
+    scheduled_time_id = setting_training_time(group_id, training_day, time_start, time_end)
+
+    group_row = get_group_by_id(group_id)
+    if group_row:
+        group_row['training_day'] = training_day
+        group_row['time_start'] = time_start
+        group_row['time_end'] = time_end
+
+    refresh_all_groups()
+
+    return jsonify({
+        'ok' : True,
+        'data' : {
+            'group_id' : group_id,
+            "schedule_id": scheduled_time_id
+        }
+    }), 201
 
 
-@manager_api.patch("/api/manager/academy_groups/<int:trial_id>")
-def edit_academy_group():
-    pass
+@manager_api.patch("/api/manager/academy_groups/<int:group_id>")
+def edit_academy_group(group_id: int):
+    body = request.get_json(silent=True) or {}
+
+    max_cap = body.get("max_cap")
+    group_name = body.get("group_name")
+
+    if max_cap is not None:
+        max_cap = int(max_cap)
+
+    res = on_manual_group_edit(
+        group_id=group_id,
+        group_name=str(group_name),
+        max_cap=max_cap
+    )
+
+    if res["ok"]:
+        refresh_all_groups()
+    return jsonify(res), 200 if res["ok"] else 404
 
 
-@manager_api.delete("/api/manager/academy_groups/<int:trial_id>")
-def delete_academy_group(trial_id: int):
-    res = deactivate_group_repo(trial_id)
+@manager_api.post("/api/manager/academy_groups/<int:group_id>")
+def delete_academy_group(group_id: int):
+    res = deactivate_group_repo(group_id)
     if res["ok"]:
         refresh_all_groups()
 
     return jsonify(res), (200 if res["ok"] else 404)
+
+# ------------TRIALS
+
+@manager_api.get("/api/manager/academy_trials/refresh_all_trials")
+def refresh_academy_trials():
+    refresh_all_trials()
+    return jsonify({"ok": True}), 200
 
