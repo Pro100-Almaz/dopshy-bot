@@ -4,7 +4,6 @@ import psycopg2.pool
 
 from integrations.repo.postgres import _conn
 
-
 '''
 groups --> users --> trials
 '''
@@ -103,6 +102,7 @@ def setting_training_time(group_id: int, training_day: int, time_start: str, tim
                 """, (group_id, training_day, time_start, time_end,)
             )
 
+
 def get_groups_info(bot_name: str):
     group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
     with _conn() as conn:
@@ -115,7 +115,8 @@ def get_groups_info(bot_name: str):
             )
             return [dict(row) for row in cur.fetchall()]
 
-def get_groups_for_refresh(group_type:str) -> list[dict]:
+
+def get_groups_for_refresh(group_type: str) -> list[dict]:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -156,18 +157,18 @@ def deactivate_group_repo(group_id: int) -> dict:
                 WHERE id = {group_id}
                 """,
             )
-            return {'ok' : '200'}
+            return {'ok': '200'}
 
 
-
-
-def get_trial(trial_id : int) -> dict | None:
+def get_trial(trial_id: int) -> dict | None:
     """Return a single trial with full detail, or None."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT * FROM academy_trials WHERE id = %s
-            """, (trial_id,))
+                        SELECT *
+                        FROM academy_trials
+                        WHERE id = %s
+                        """, (trial_id,))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -177,7 +178,9 @@ def get_trials_by_curriculum(curriculum: str) -> list[dict] | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT * FROM academy_trials WHERE curriculum = %s
+                SELECT *
+                FROM academy_trials
+                WHERE curriculum = %s
                 """, (curriculum)
             )
             trials = cur.fetchall()
@@ -189,7 +192,9 @@ def get_all_user_trials(user_id: int) -> list[dict] | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT * FROM academy_trials WHERE user_id = %s
+                SELECT *
+                FROM academy_trials
+                WHERE user_id = %s
                 """, (user_id)
             )
             trials = cur.fetchall()
@@ -201,24 +206,37 @@ def get_trials_by_type(group_type: str):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT 
-                    t.id, t.child_name, t.child_age, t.language, t.phone, t.group_id,
-                    t.trial_day, t.start_time, t.end_time, t.state, t.notes, t.attended, t.subscribed
-                FROM academy_trials t 
-                JOIN academy_groups g ON t.group_id = g.id 
-                WHERE g.group_type = %s AND t.state = 'confirmed'
-                    
+                SELECT t.id,
+                       t.child_name,
+                       t.child_age,
+                       t.language,
+                       t.phone,
+                       t.group_id,
+                       t.trial_day,
+                       t.start_time,
+                       t.end_time,
+                       t.state,
+                       t.notes,
+                       t.attended,
+                       t.subscribed
+                FROM academy_trials t
+                         JOIN academy_groups g ON t.group_id = g.id
+                WHERE g.group_type = %s
+                  AND t.state = 'confirmed'
+
                 """, (group_type,)
             )
             trials = cur.fetchall()
             return [dict(trial) for trial in trials]
 
 
-def confirm_trial(trial_id : int) -> bool:
+def confirm_trial(trial_id: int) -> bool:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """UPDATE academy_trials SET state = 'confirmed' WHERE id = %s""", (trial_id,)
+                """UPDATE academy_trials
+                   SET state = 'confirmed'
+                   WHERE id = %s""", (trial_id,)
             )
             return True
 
@@ -235,9 +253,47 @@ def get_all_active_trials(sender_phone: str, bot_name: str) -> list[dict] | None
             trials = cur.fetchall()
             return [dict(t) for t in trials]
 
+
 def cancel_all_trials(trial_ids: list) -> None:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"""DELETE FROM academy_trials WHERE id = ANY(%s) and state IN ('draft', 'confirmed')""", (trial_ids,)
             )
+
+
+def check_trial_limits(bot_name: str, phone: str) -> bool:
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                        SELECT COUNT(*) < (SELECT quantity
+                                           FROM trial_limits
+                                           WHERE group_type = %s)
+                                   AS can_take_trial
+                        FROM academy_trials at
+                                 JOIN academy_groups ag ON ag.id = at.group_id
+                        WHERE at.phone = %s
+                          AND ag.group_type = %s
+                        """, (group_type, phone, group_type))
+
+            can_take_trial = cur.fetchone()["can_take_trial"]
+            return can_take_trial
+
+
+def has_active_trial(bot_name: str, phone: str) -> bool:
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                        SELECT EXISTS (SELECT 1
+                                       FROM academy_trials at
+                                                JOIN academy_groups ag ON ag.id = at.group_id
+                                       WHERE at.phone = %s
+                                         AND ag.group_type = %s
+                                         AND at.state = 'confirmed')
+                        """, (phone, group_type))
+
+            has_confirmed_trial = cur.fetchone()
+            return has_confirmed_trial['exists']
+
