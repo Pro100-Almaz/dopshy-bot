@@ -2,46 +2,106 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
-import json
-import config
 from integrations.repo.postgres import _conn
-
 
 '''
 groups --> users --> trials
 '''
 
-
 # ----------------------------GROUPS
 
-
-def create_group(group_name: str, group_type: str, max_cap: int | None = None, ):
+def create_or_update_group(
+    group_name: str,
+    group_type: str,
+    max_cap: int | None = None,
+    is_active: bool = True,
+) -> int:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO academy_groups (group_name, group_type, max_cap)
-                VALUES (%s, %s, %s)
+                INSERT INTO academy_groups (group_name, group_type, max_cap, is_active)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (group_name, group_type)
+                DO UPDATE SET
+                    max_cap = EXCLUDED.max_cap,
+                    is_active = EXCLUDED.is_active
                 RETURNING id
-                """, (group_name, group_type, max_cap)
+                """,
+                (group_name, group_type, max_cap, is_active),
             )
 
+            row = cur.fetchone()
+            return row["id"]
 
-def setting_training_time(group_id: int, date: str, time_start: str, time_end: str):
+def on_manual_group_edit(
+        group_id: int,
+        group_name: str | None = None,
+        max_cap : str | None = None
+) -> dict:
+    fields = []
+    values = []
+
+    if group_name is not None:
+        fields.append("group_name = %s")
+        values.append(group_name)
+    if max_cap is not None:
+        fields.append("max_cap = %s")
+        values.append(max_cap)
+
+    if not fields:
+        return {
+            'ok': False,
+            "code": "NO_FIELDS",
+            "message": "No fields to update"
+        }
+
+    values.append(group_id)
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                UPDATE academy_groups 
+                SET {", ".join(fields)},
+                updated_at = NOW() 
+                WHERE id = %s
+                RETURNING id
+                """, values,
+            )
+
+            row = cur.fetchone()
+
+            if not row:
+                return {
+                    'ok': False,
+                    'code': 'NOT FOUND',
+                    'message': 'Group not found'
+                }
+
+            return {
+                'ok': True,
+                'group_id': row['id']
+            }
+
+
+def setting_training_time(group_id: int, training_day: int, time_start: str, time_end: str):
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO academy_group_schedules (group_id, training_date, start_time, end_time)
+                INSERT INTO academy_group_schedules (group_id, training_day, time_start, time_end)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (group_id, training_day, time_start, time_end) DO UPDATE SET group_id     = EXCLUDED.group_id,
-                                                                                         training_day = EXCLUDED.training_date,
+                                                                                         training_day = EXCLUDED.training_day,
                                                                                          time_start   = EXCLUDED.time_start,
                                                                                          time_end     = EXCLUDED.time_end,
                                                                                          updated_at   = NOW()
+                    RETURNING id
 
-                """, (group_id, date, time_start, time_end,)
+                """, (group_id, training_day, time_start, time_end,)
             )
+
 
 def get_groups_info(bot_name: str):
     group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
@@ -55,19 +115,20 @@ def get_groups_info(bot_name: str):
             )
             return [dict(row) for row in cur.fetchall()]
 
-def get_groups_for_refresh(group_type:str) -> list[dict]:
+
+def get_groups_for_refresh(group_type: str) -> list[dict]:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.max_cap, g.curr_cap,
-                       t.training_day, t.time_start AS start_time, t.time_end AS end_time
+                       s.training_day, s.time_start AS time_start, s.time_end AS time_end
                 FROM academy_groups g
-                JOIN academy_trials t
-                ON t.group_id = g.id
+                LEFT JOIN academy_group_schedules s
+                ON s.group_id = g.id
                 WHERE g.group_type = %s
                   AND g.is_active = TRUE
-                ORDER BY g.id, t.training_day, t.time_start
+                ORDER BY g.id, s.training_day, s.time_start
                 """,
                 (group_type,)
             )
@@ -79,8 +140,8 @@ def get_group_by_id(group_id: int) -> dict:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """
-                SELECT * FROM academy_groups WHERE id = group_id
+                f"""
+                SELECT * FROM academy_groups WHERE id = {group_id}
                 """,
             )
             return dict(cur.fetchone())
@@ -90,22 +151,24 @@ def deactivate_group_repo(group_id: int) -> dict:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE academy_groups
                 SET is_active = false
-                WHERE id = %s
-                """, group_id
+                WHERE id = {group_id}
+                """,
             )
-            return {'ok' : '200'}
+            return {'ok': '200'}
 
 
-def get_trial(trial_id : int) -> dict | None:
+def get_trial(trial_id: int) -> dict | None:
     """Return a single trial with full detail, or None."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT * FROM academy_trials WHERE id = %s
-            """, (trial_id,))
+                        SELECT *
+                        FROM academy_trials
+                        WHERE id = %s
+                        """, (trial_id,))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -115,7 +178,9 @@ def get_trials_by_curriculum(curriculum: str) -> list[dict] | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT * FROM academy_trials WHERE curriculum = %s
+                SELECT *
+                FROM academy_trials
+                WHERE curriculum = %s
                 """, (curriculum)
             )
             trials = cur.fetchall()
@@ -127,7 +192,9 @@ def get_all_user_trials(user_id: int) -> list[dict] | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT * FROM academy_trials WHERE user_id = %s
+                SELECT *
+                FROM academy_trials
+                WHERE user_id = %s
                 """, (user_id)
             )
             trials = cur.fetchall()
@@ -139,24 +206,37 @@ def get_trials_by_type(group_type: str):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT 
-                    t.id, t.child_name, t.child_age, t.language, t.phone, t.group_id,
-                    t.trial_day, t.start_time, t.end_time, t.state, t.notes, t.attended, t.subscribed
-                FROM academy_trials t 
-                JOIN academy_groups g ON t.group_id = g.id 
-                WHERE g.group_type = %s AND t.state = 'confirmed'
-                    
+                SELECT t.id,
+                       t.child_name,
+                       t.child_age,
+                       t.language,
+                       t.phone,
+                       t.group_id,
+                       t.trial_day,
+                       t.start_time,
+                       t.end_time,
+                       t.state,
+                       t.notes,
+                       t.attended,
+                       t.subscribed
+                FROM academy_trials t
+                         JOIN academy_groups g ON t.group_id = g.id
+                WHERE g.group_type = %s
+                  AND t.state = 'confirmed'
+
                 """, (group_type,)
             )
             trials = cur.fetchall()
             return [dict(trial) for trial in trials]
 
 
-def confirm_trial(trial_id : int) -> bool:
+def confirm_trial(trial_id: int) -> bool:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """UPDATE academy_trials SET state = 'confirmed' WHERE id = %s""", (trial_id,)
+                """UPDATE academy_trials
+                   SET state = 'confirmed'
+                   WHERE id = %s""", (trial_id,)
             )
             return True
 
@@ -173,6 +253,7 @@ def get_all_active_trials(sender_phone: str, bot_name: str) -> list[dict] | None
             trials = cur.fetchall()
             return [dict(t) for t in trials]
 
+
 def cancel_all_trials(trial_ids: list) -> None:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -181,12 +262,38 @@ def cancel_all_trials(trial_ids: list) -> None:
             )
 
 
-
-def edit_trial():
+def check_trial_limits(bot_name: str, phone: str) -> bool:
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                    
-                """
-            )
+            cur.execute("""
+                        SELECT COUNT(*) < (SELECT quantity
+                                           FROM trial_limits
+                                           WHERE group_type = %s)
+                                   AS can_take_trial
+                        FROM academy_trials at
+                                 JOIN academy_groups ag ON ag.id = at.group_id
+                        WHERE at.phone = %s
+                          AND ag.group_type = %s
+                        """, (group_type, phone, group_type))
+
+            can_take_trial = cur.fetchone()["can_take_trial"]
+            return can_take_trial
+
+
+def has_active_trial(bot_name: str, phone: str) -> bool:
+    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                        SELECT EXISTS (SELECT 1
+                                       FROM academy_trials at
+                                                JOIN academy_groups ag ON ag.id = at.group_id
+                                       WHERE at.phone = %s
+                                         AND ag.group_type = %s
+                                         AND at.state = 'confirmed')
+                        """, (phone, group_type))
+
+            has_confirmed_trial = cur.fetchone()
+            return has_confirmed_trial['exists']
+

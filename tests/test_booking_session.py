@@ -14,12 +14,10 @@ from unittest.mock import patch
 
 
 import config
-from handlers.session.booking_session import (
-    _TIME_RANGE_RE,
-    _is_cancel_intent,
-    _pad_time,
+from handlers.sessions.booking_session import (
     handle_booking_turn,
     start_booking_flow,
+    BookingPromptBuilder
 )
 
 from integrations import booking_service
@@ -131,91 +129,100 @@ def _fake_windows_for_date(target_date: date):
 # ---------------------------------------------------------------------------
 
 class TestTimeRangeRegex:
+    def __init__(self):
+        self.builder = BookingPromptBuilder('dopsy_bot')
+
     def test_standard_до(self):
-        m = _TIME_RANGE_RE.search("10:00 до 12:00")
+        m = self.builder.TIME_RANGE_RE.search("10:00 до 12:00")
         assert m is not None
         assert m.group(1) == "10:00"
         assert m.group(2) == "12:00"
 
     def test_hyphen_separator(self):
-        m = _TIME_RANGE_RE.search("14:30-16:00")
+        m = self.builder.TIME_RANGE_RE.search("14:30-16:00")
         assert m is not None
         assert m.group(1) == "14:30"
         assert m.group(2) == "16:00"
 
     def test_en_dash_separator(self):
-        m = _TIME_RANGE_RE.search("09:00–11:00")
+        m = self.builder.TIME_RANGE_RE.search("09:00–11:00")
         assert m is not None
         assert m.group(1) == "09:00"
         assert m.group(2) == "11:00"
 
     def test_em_dash_separator(self):
-        m = _TIME_RANGE_RE.search("18:00—20:00")
+        m = self.builder.TIME_RANGE_RE.search("18:00—20:00")
         assert m is not None
         assert m.group(1) == "18:00"
         assert m.group(2) == "20:00"
 
     def test_single_digit_hour(self):
-        m = _TIME_RANGE_RE.search("9:00 до 11:00")
+        m = self.builder.TIME_RANGE_RE.search("9:00 до 11:00")
         assert m is not None
         assert m.group(1) == "9:00"
         assert m.group(2) == "11:00"
 
     def test_extra_whitespace(self):
-        m = _TIME_RANGE_RE.search("10:00  до  12:00")
+        m = self.builder.TIME_RANGE_RE.search("10:00  до  12:00")
         assert m is not None
 
     def test_embedded_in_sentence(self):
-        m = _TIME_RANGE_RE.search("Хочу забронировать с 10:00 до 12:00 завтра")
+        m = self.builder.TIME_RANGE_RE.search("Хочу забронировать с 10:00 до 12:00 завтра")
         assert m is not None
         assert m.group(1) == "10:00"
         assert m.group(2) == "12:00"
 
     def test_no_match_plain_text(self):
-        assert _TIME_RANGE_RE.search("abc") is None
+        assert self.builder.TIME_RANGE_RE.search("abc") is None
 
     def test_no_match_single_time(self):
-        assert _TIME_RANGE_RE.search("10:00") is None
+        assert self.builder.TIME_RANGE_RE.search("10:00") is None
 
     def test_no_match_invalid_format(self):
-        assert _TIME_RANGE_RE.search("1000 до 1200") is None
+        assert self.builder.TIME_RANGE_RE.search("1000 до 1200") is None
 
 
 class TestPadTime:
+    def __init__(self):
+        self.builder = BookingPromptBuilder('dopsy_bot')
+
     def test_already_padded(self):
-        assert _pad_time("10:00") == "10:00"
+        assert self.builder.pad_time("10:00") == "10:00"
 
     def test_single_digit_hour(self):
-        assert _pad_time("9:30") == "09:30"
+        assert self.builder.pad_time("9:30") == "09:30"
 
     def test_midnight(self):
-        assert _pad_time("0:00") == "00:00"
+        assert self.builder.pad_time("0:00") == "00:00"
 
 
 class TestIsCancelIntent:
+    def __init__(self):
+        self.builder = BookingPromptBuilder('dopsy_bot')
+
     def test_отмена(self):
-        assert _is_cancel_intent("отмена")
+        assert self.builder.is_cancel_intent("отмена")
 
     def test_передумал(self):
-        assert _is_cancel_intent("передумал")
+        assert self.builder.is_cancel_intent("передумал")
 
     def test_не_хочу(self):
-        assert _is_cancel_intent("не хочу")
+        assert self.builder.is_cancel_intent("не хочу")
 
     def test_стоп(self):
-        assert _is_cancel_intent("стоп")
+        assert self.builder.is_cancel_intent("стоп")
 
     def test_тоқтат(self):
-        assert _is_cancel_intent("тоқтат")
+        assert self.builder.is_cancel_intent("тоқтат")
 
     def test_normal_да_not_cancel(self):
-        assert not _is_cancel_intent("да")
+        assert not self.builder.is_cancel_intent("да")
 
     def test_normal_нет_not_cancel(self):
-        assert not _is_cancel_intent("нет")
+        assert not self.builder.is_cancel_intent("нет")
 
     def test_empty_string(self):
-        assert not _is_cancel_intent("")
+        assert not self.builder.is_cancel_intent("")
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +606,7 @@ class TestMidFlowCancel:
         session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
-        svc.update_draft(booking_id, date=date_str, time_start="10:00", time_end="11:00",
+        svc.update_draft('dopsy_bot', booking_id, date=date_str, time_start="10:00", time_end="11:00",
                          field=field_id, format="5x5", players=8, customer_name="Тест")
         from integrations.repo.postgres import upsert_session
         params = session["params"].copy()

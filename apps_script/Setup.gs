@@ -14,6 +14,8 @@ function showSetupDialog() {
     API_KEY: key.getResponseText().trim(),
     BOOKINGS_SHEET_NAME: 'Bookings',
     WEEK_SHEET_NAMES: ["This Week 1", "This Week 2", "This Week 3"],
+    ACADEM_GROUP_SHEETS: ["Boxing_Groups", "Football_Groups"],
+    ACADEM_TRIAL_SHETS: ["Boxing_Trials", "Football_Trials"],
     TZ_OFFSET: '+05:00'
   });
   ui.alert('Сохранено.');

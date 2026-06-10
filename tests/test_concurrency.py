@@ -5,14 +5,15 @@ import threading
 import uuid
 
 from integrations import booking_service as svc
+from integrations.repo import postgres
 
 N = 50
 
 
 def _make_draft_for_same_slot() -> tuple[int, str]:
     token = str(uuid.uuid4())
-    bid = svc.create_draft(
-        "chat", "7700", token,
+    bid = postgres.create_draft(
+        "chat", "7700", client_token=token,
         date="2026-08-01", time_start="18:00", time_end="19:00",
         field=1, format="5x5", players=8, customer_name="Race",
     )["data"]["booking_id"]

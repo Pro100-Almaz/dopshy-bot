@@ -58,6 +58,16 @@ _WORKSHEETS = {
     }
 }
 
+WEEKDAY_RU = {
+    0: "Понедельник",
+    1: "Вторник",
+    2: "Среда",
+    3: "Четверг",
+    4: "Пятница",
+    5: "Суббота",
+    6: "Воскресенье",
+}
+
 
 def _get_worksheet(curriculum: str, object_type: str):
     #curriculum = 'boxing' or 'football'
@@ -81,10 +91,10 @@ def _group_to_row(g: dict) -> list:
         str(g["id"]),
         str(g["group_name"]),
         g["max_cap"],
-        g["curr_cap"],
-        str(g["training_day"]),
-        str(g["start_time"]),
-        str(g["end_time"]),
+        g.get("curr_cap", 0),
+        WEEKDAY_RU[g["training_day"]],
+        str(g["time_start"]),
+        str(g["time_end"]),
     ]
 
 
@@ -111,12 +121,15 @@ def _last_col_letter(col_count: int) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+# ---------Groups
+
 def upsert_group_row(group: dict) -> None:
-    """Insert or update the row for a single grouping (matched by booking_id in col A)."""
+    """Insert or update the row for a single grouping (matched by group_id in col A)."""
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
         ws = _get_worksheet(group['group_type'], 'groups')
+        print(ws.title)
         row_values = _group_to_row(group)
         col_a = ws.col_values(1)  # includes header in row 1
         target = str(group["id"])
@@ -139,9 +152,12 @@ def refresh_all_groups() -> None:
     try:
         for group_type in ['boxing', 'football']:
             rows = academy_repo.get_groups_for_refresh(group_type)
+            print(rows)
             ws = _get_worksheet(curriculum=group_type, object_type='groups')
+            print(ws.title)
             ws.clear()
             data = [_HEADERS['groups']] + [_group_to_row(b) for b in rows]
+            print(data)
             ws.update(f"A1:{_last_col_letter(_GROUP_COL_COUNT)}{len(data)}", data,
                       value_input_option="USER_ENTERED")
             logger.info("Refreshed GROUP sheets — %d rows.", len(rows))
@@ -149,6 +165,7 @@ def refresh_all_groups() -> None:
         logger.error("Sheets refresh_all_groups failed: %s", exc)
 
 
+# ------------ Trials
 
 def upsert_trial_row(trial: dict) -> None:
     """Insert or update the row for a single grouping (matched by booking_id in col A)."""

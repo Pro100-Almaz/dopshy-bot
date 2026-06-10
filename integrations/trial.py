@@ -3,10 +3,8 @@
 import logging
 from datetime import date, datetime, time, timedelta
 
-
-import config
-from integrations.repo import postgres, academy_repo
-from utils import now_almaty, today_almaty
+from integrations.repo import academy_repo
+from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 

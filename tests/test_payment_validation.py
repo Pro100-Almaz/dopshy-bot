@@ -7,7 +7,8 @@ import pytest
 
 import config
 from integrations import booking_service as svc
-from integrations import payment_validation, repo
+from integrations import payment_validation
+from integrations.repo import postgres, booking_repo
 
 _RECEIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "receipts")
 
@@ -20,10 +21,10 @@ def _pdf(name):
 def _awaiting(field=1, ts="18:00", te="19:00", phone="7700"):
     """Create an awaiting_payment booking (field 1 = 5x5 = 35000/h → price_total=35000 for 1h)."""
     token = str(uuid.uuid4())
-    bid = svc.create_draft("c", phone, token, date="2026-07-01", time_start=ts, time_end=te,
+    bid = postgres.create_draft("c", phone, client_token=token, date="2026-07-01", time_start=ts, time_end=te,
                            field=field, format="5x5", players=8, customer_name="T")["data"]["booking_id"]
     svc.request_payment(bid, token)
-    return repo.get_booking(bid)
+    return booking_repo.get_booking(bid)
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def test_reject_wrong_recipient(no_date_limit, monkeypatch):
     # Pin recipients to only the legacy DOPSHY BIN so the fixture receipt
     # (bin 250740003149) is treated as unknown.
     monkeypatch.setattr(
-        integrations.postgres.postgres,
+        postgres,
         "get_payment_recipients",
         lambda: [{"bank": "kaspi", "bin": "870203301478", "name": "DOPSHY", "phone": None}],
     )

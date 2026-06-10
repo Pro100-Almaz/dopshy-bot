@@ -11,6 +11,7 @@ import uuid
 import psycopg2.extras
 
 from integrations import booking_service as svc
+from integrations.repo import postgres
 from integrations.repo.postgres import _conn
 
 
@@ -55,7 +56,7 @@ def _confirmed_booking(phone: str = "7700",
     """Create a fully-confirmed booking days_ahead days into the future."""
     d = (date.today() + timedelta(days=days_ahead)).isoformat()
     token = _token()
-    res = svc.create_draft("chatX", phone, token,
+    res = postgres.create_draft("chatX", phone, client_token=token,
                            date=d, time_start=time_start, time_end=time_end,
                            field=field, format="5x5", players=8,
                            customer_name="Test")
@@ -103,7 +104,7 @@ def test_client_edit_preserves_awaiting_payment_state():
     """Editing an unpaid booking should keep it awaiting_payment, not jump to confirmed."""
     d = (date.today() + timedelta(days=7)).isoformat()
     token = _token()
-    bid = svc.create_draft("chatX", "7700", token,
+    bid = postgres.create_draft("chatX", "7700", client_token=token,
                             date=d, time_start="18:00", time_end="19:00",
                             field=1, format="5x5", players=8,
                             customer_name="Test")["data"]["booking_id"]
@@ -199,7 +200,7 @@ def test_client_edit_same_values_returns_no_change():
 
 def test_client_edit_rejects_cancelled_booking():
     bid = _confirmed_booking(days_ahead=7)
-    svc.cancel_booking(bid)
+    postgres.cancel_booking_trial('dopsy_bot', bid)
     res = svc.client_edit_booking(bid, time_start="20:00", time_end="21:00")
     assert not res["ok"]
     assert res["code"] == "INVALID_STATE"
@@ -207,7 +208,7 @@ def test_client_edit_rejects_cancelled_booking():
 
 def test_client_edit_rejects_draft_booking():
     d = (date.today() + timedelta(days=7)).isoformat()
-    bid = svc.create_draft("chatX", "7700", _token(),
+    bid = postgres.create_draft("chatX", "7700", client_token=_token(),
                             date=d, time_start="18:00", time_end="19:00",
                             field=1, format="5x5", players=8,
                             customer_name="Test")["data"]["booking_id"]

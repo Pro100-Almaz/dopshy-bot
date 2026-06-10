@@ -2,24 +2,21 @@
 Core message processing pipeline:
   incoming text → RAG retrieval → GPT-4o-mini → WhatsApp reply
 """
-
 import logging
 import threading
 
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response
-from handlers.trial_session import handle_trial_turn, start_trial_flow
+from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.sheets.booking_sheets import upsert_booking_row
-from integrations.repo.postgres import cancel_booking_trial
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
-from handlers.booking_session import _detect_lang, handle_booking_turn, start_booking_flow
+from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
+from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
-from integrations import booking_service, payment_validation, sheets
-from handlers.edit_booking import handle_edit_request
-from integrations import booking_service, payment_validation, sheets
-from integrations.repo import booking_repo, postgres
+from integrations import booking_service, payment_validation
+from integrations.repo import booking_repo
 import config
 
 logger = logging.getLogger(__name__)
@@ -68,6 +65,7 @@ _PAYMENT_REJECT_FOOTER_KK = (
     "Қажет болса — әкімшімен хабарласыңыз."
 )
 
+builder = BasePromptBuilder({}, "", (), ())
 
 def _format_payment_reject_message(
     code: str, parsed: dict, booking: dict
@@ -125,7 +123,7 @@ def handle_incoming_message(payload: dict) -> None:
             return
 
         # Only handle text messages
-        if msg_type != "text":
+        if msg_type not in ["text", "interactive"]:
             send_text_message(
                 phone_number_id,
                 sender_id,
@@ -133,7 +131,13 @@ def handle_incoming_message(payload: dict) -> None:
             )
             return
 
-        user_text = message["text"]["body"].strip()
+        user_text = ""
+        if msg_type == "interactive" and message["interactive"]["type"] == 'button_reply':
+            button_reply = message["interactive"]["button_reply"]
+            user_text = button_reply.get("title")
+
+        if msg_type == "text":
+            user_text = message["text"]["body"].strip()
 
         # Determine chat context key.
         # For group messages Meta Cloud API includes a "context" object; we use
@@ -177,7 +181,7 @@ def handle_incoming_message(payload: dict) -> None:
                 return
             logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
 
-        elif bot_config["name"] == "dopsy_boxing":
+        else:
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
             trial_reply = handle_trial_turn(
                 chat_id, phone_number_id, sender_id, user_text, bot_config["name"]
@@ -207,7 +211,7 @@ def handle_incoming_message(payload: dict) -> None:
             logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
-        elif bot_config["name"] == "dopsy_boxing":
+        else:
             from integrations.trial import get_trial_daytime, format_availability_context
             free = get_trial_daytime(bot_config["name"], None)
             availability_ctx = format_availability_context(free)
@@ -232,7 +236,7 @@ def handle_incoming_message(payload: dict) -> None:
         if tool_call:
             handle_reply = reply
             if tool_call["name"] in "start_booking":
-                lang = _detect_lang(user_text)
+                lang = builder.detect_lang(user_text)
                 logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
                 handle_reply = start_booking_flow(chat_id, sender_id, lang)
 
@@ -241,7 +245,7 @@ def handle_incoming_message(payload: dict) -> None:
                 handle_reply = handle_edit_booking_request(chat_id, sender_id, tool_call["args"])
 
             elif tool_call["name"] == "start_trial":
-                lang = _detect_lang(user_text)
+                lang = builder.detect_lang(user_text)
                 logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
                 handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
 
@@ -252,7 +256,6 @@ def handle_incoming_message(payload: dict) -> None:
             elif tool_call["name"] == "cancel_trial":
                 logger.info("[CANCEL] LLM called cancel_trial tool")
                 handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
-
 
             reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 

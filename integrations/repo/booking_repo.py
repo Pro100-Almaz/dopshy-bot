@@ -3,9 +3,6 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
-import json
-import config
-
 from integrations.repo.postgres import _conn
 
 
@@ -138,6 +135,3 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
                    OR (state = 'draft' AND created_at < NOW() - make_interval(secs => %s))
             """, (session_ttl_seconds,))
             return [dict(r) for r in cur.fetchall()]
-
-
-

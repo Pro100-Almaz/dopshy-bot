@@ -2,7 +2,7 @@
 
 import pytest
 
-from handlers.booking_session import _is_cancel_intent
+from handlers.sessions.booking_session import BookingPromptBuilder
 
 
 @pytest.mark.parametrize("text", [
@@ -17,7 +17,8 @@ from handlers.booking_session import _is_cancel_intent
     "керек емес",
 ])
 def test_cancel_detected(text):
-    assert _is_cancel_intent(text)
+    builder = BookingPromptBuilder('dopsy_bot')
+    assert builder.is_cancel_intent(text)
 
 
 @pytest.mark.parametrize("text", [
@@ -29,4 +30,5 @@ def test_cancel_detected(text):
     "нет",                    # step_confirm no — not "strong cancel"
 ])
 def test_normal_inputs_pass_through(text):
-    assert not _is_cancel_intent(text)
+    builder = BookingPromptBuilder('dopsy_bot')
+    assert not builder.is_cancel_intent(text)
