@@ -1,592 +1,1138 @@
-# Non-deterministic booking flow — processes partially-filled booking data from the LLM.
-#
-# The standard deterministic flow (booking_session.py) walks users through steps
-# one at a time: intent → date → time → field → players → name → confirm.
-#
-# But users often provide several details at once in a single message:
-#   "хочу забронировать на четверг с 18:00 до 20:00 на поле 2"
-#
-# This module accepts whatever fields the LLM managed to extract, validates them,
-# checks real-time availability against the database, creates a DRAFT booking,
-# and sets up a session so the deterministic flow continues collecting any remaining info.
-#
-# Booking requires: date, time_start, time_end, field, players, customer_name
-# (see migrations/ for the full bookings table schema).
+"""
+Non-deterministic LLM-driven booking flow.
+
+Unlike the step-by-step BookingStepHandler (booking_session.py), this flow:
+- Accepts booking data in any order (no fixed step sequence)
+- Uses LLM to extract intent + booking params from natural language
+- Creates or continues a draft booking based on whatever data is available
+- Checks availability depending on which combination of fields is present
+- Returns bilingual (RU/KK) responses with availability info + what's still needed
+
+Continuing a booking is identified by phone + state='draft' in the bookings table —
+no booking_sessions row is needed, avoiding the step-ordering bugs that a sequential
+state machine would cause when data arrives out of order.
+
+Seven checking rules (see _evaluate_and_respond):
+  1. date only            → free fields and time ranges for that date
+  2. time_start+time_end  → available dates and fields for that interval
+  3. field only           → dates and time ranges for that field
+  4. date+time+field      → is this specific slot free?
+  5. date+time            → which fields are available?
+  6. one of start/end     → ask user to provide both
+  7. name / players       → basic validation
+"""
 
 import json
 import logging
 import uuid
-from datetime import datetime, date, timedelta
+
+import psycopg2.extras
+from openai import OpenAI
 
 import config
 from integrations import booking as booking_logic
+from integrations import booking_service
 from integrations.repo import postgres
+from integrations.repo.utils import _conn
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 
+# ── Weekday labels for formatted dates ──
 _WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-_BOT_NAME = "dopsy_bot"
+
+# ── Confirmation / cancellation vocabulary (mirrors base_session.py) ──
+_YES_WORDS = {
+    "да", "иә", "ok", "ок", "подтверждаю", "yes",
+    "жарайды", "дұрыс", "растаймын", "👍",
+}
+_NO_WORDS = {
+    "нет", "жоқ", "no", "отмена", "изменить",
+    "өзгерт", "болмайды", "бастапқы", "бас тартамын",
+}
+_CANCEL_PHRASES = (
+    "отмен", "стоп", "передум", "не хочу", "не нужно", "не надо",
+    "тоқтат", "керек емес", "бас тарт",
+)
 
 
 class LlmBookingFlowHandler:
     """
-    Handles booking creation from partially-filled LLM-parsed data.
+    LLM-driven booking handler.
 
-    The LLM extracts structured booking params as a JSON string:
-        {"date": "2026-06-12", "time_start": "18:00", "time_end": "20:00",
-         "field": 2, "players": 10, "name": "Алмаз"}
-
-    All keys are optional. Based on which keys are present, the handler:
-      1. Checks real-time availability and builds a user-facing response string
-      2. Creates (or updates) a DRAFT booking with the known fields
-      3. Saves a session so the step-by-step flow continues from the right point
-
-    Checking logic (6 cases):
-      Case 1 — date only              → free fields and time ranges for that date
-      Case 2 — time_start + time_end  → available dates and fields for that interval
-      Case 3 — field only             → dates and time ranges for that field
-      Case 4 — date+time+field        → is this specific slot free?
-      Case 5 — date+time (no field)   → which fields are available?
-      Case 6 — only start OR only end → ask user for both
+    Main entry point: handle_message().
+    Called from message_handler when a booking-related message is detected or
+    when an existing draft (phone + state='draft') needs continuation.
     """
 
-    def handle(self, json_str: str, chat_id: str, sender_phone: str, lang: str = "ru") -> str:
-        """
-        Main entry point. Parses LLM output, validates, checks availability,
-        creates/updates draft, and returns a response string for WhatsApp.
+    BOT_NAME = "dopsy_bot"
 
-        Args:
-            json_str:      JSON string (or dict) with booking params from the LLM.
-            chat_id:       WhatsApp chat identifier (used for session + draft).
-            sender_phone:  User's phone number (stored on the draft).
-            lang:          Language code ("ru" or "kk").
+    def __init__(self):
+        self._llm = OpenAI(api_key=config.OPENAI_API_KEY)
 
-        Returns:
-            Human-readable response string to send to the client via WhatsApp.
-        """
-        # --- Parse LLM output (accept both raw string and pre-parsed dict) ---
-        try:
-            data = json.loads(json_str) if isinstance(json_str, str) else json_str
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("[LLM_BOOKING] Failed to parse JSON: %.200s", json_str)
-            return "Не удалось разобрать данные. Пожалуйста, уточните детали бронирования."
+    # ══════════════════════════════════════════════════════════════════════
+    #  LLM Integration
+    #  Combines the roles of router.py (intent) and extractor.py (params)
+    #  into callable methods instead of FastAPI endpoints.
+    # ══════════════════════════════════════════════════════════════════════
 
-        # --- Validate each field individually ---
-        date_str   = self._validate_date(data.get("date"))
-        time_start = self._validate_time(data.get("time_start"))
-        time_end   = self._validate_time(data.get("time_end"))
-        field_id   = self._validate_field(data.get("field"))
-        players    = self._validate_players(data.get("players"))
-        name       = (data.get("name") or data.get("customer_name") or "").strip() or None
-
-        logger.info(
-            "[LLM_BOOKING] Parsed: date=%s time=%s-%s field=%s players=%s name=%s",
-            date_str, time_start, time_end, field_id, players, name,
-        )
-
-        # --- Convenience flags ---
-        has_date  = date_str is not None
-        has_start = time_start is not None
-        has_end   = time_end is not None
-        has_both  = has_start and has_end
-        has_field = field_id is not None
-
-        # ── Case 6: only one of start/end → incomplete, ask for both ──────
-        if has_start != has_end:
-            return (
-                "Пожалуйста, укажите и время начала, и время окончания.\n"
-                "Например: *18:00 до 20:00*"
-            )
-
-        # ── Route to the matching availability check ──────────────────────
-        if has_date and has_both and has_field:
-            # Case 4: full slot — check this exact field at this exact time
-            response, slot_ok = self._check_full_slot(date_str, time_start, time_end, field_id)
-            if not slot_ok:
-                # Slot is taken — don't persist the unavailable field in the draft
-                field_id = None
-
-        elif has_date and has_both:
-            # Case 5: date + time range → which fields are free?
-            response = self._check_date_and_time(date_str, time_start, time_end)
-            # Auto-select field when only one is available (mirrors deterministic flow)
-            free = _get_free_fields_for_slot(date_str, time_start, time_end)
-            if len(free) == 1:
-                field_id = free[0]["id"]
-
-        elif has_date and not has_both and not has_field:
-            # Case 1: date only → show all free windows for that day
-            response = self._check_date_only(date_str)
-
-        elif has_both and not has_date:
-            # Case 2: time range only → show which dates have this slot free
-            response = self._check_time_range_only(time_start, time_end)
-
-        elif has_field and not has_date and not has_both:
-            # Case 3: field only → show when this field is available
-            response = self._check_field_only(field_id)
-
-        elif has_date and has_field:
-            # Bonus: date + field, no time → show free windows for that combo
-            response = self._check_date_and_field(date_str, field_id)
-
-        else:
-            # Nothing usable extracted → show full 7-day availability
-            response = self._show_general_availability()
-
-        # ── Build draft fields from validated data ────────────────────────
-        draft_fields = {}
-        if date_str:
-            draft_fields["date"] = date_str
-        if time_start:
-            draft_fields["time_start"] = time_start
-        if time_end:
-            draft_fields["time_end"] = time_end
-        if field_id:
-            draft_fields["field"] = field_id
-            # Look up the format (5x5, 6x6) for this field from config
-            fmt = next((f["format"] for f in config.BOOKING_FIELDS if f["id"] == field_id), None)
-            if fmt:
-                draft_fields["format"] = fmt
-        if players:
-            draft_fields["players"] = players
-        if name:
-            draft_fields["customer_name"] = name
-
-        # ── Persist draft + session ───────────────────────────────────────
-        self._create_or_update_draft(chat_id, sender_phone, lang, draft_fields)
-
-        return response
-
-    # ──────────────────────────────────────────────────────────────────────
-    #  Availability checks (cases 1–6)
-    #  Each method queries real-time booking data and returns a formatted
-    #  string describing what's available.
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _check_date_only(self, date_str: str) -> str:
-        """
-        Case 1: only date provided.
-        Fetches free time windows for that day and groups them by field.
-        Asks the user to specify a time range.
-        """
-        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        free = booking_logic.get_free_windows()
-        day_windows = [w for w in free if w["date"] == d]
-
-        if not day_windows:
-            return (
-                f"К сожалению, на {_fmt_date(d)} нет свободных слотов.\n"
-                "Попробуйте выбрать другую дату."
-            )
-
-        # Group windows by (field_id, format) for a clean per-field listing
-        by_field: dict[tuple, list] = {}
-        for w in day_windows:
-            by_field.setdefault((w["field"], w["format"]), []).append(w)
-
-        lines = [f"📅 {_fmt_date(d)} — свободные окна:\n"]
-        for (fid, fmt) in sorted(by_field):
-            ranges = ", ".join(
-                f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
-                for w in sorted(by_field[(fid, fmt)], key=lambda w: w["time_start"])
-            )
-            lines.append(f"  Поле {fid} ({fmt}): {ranges}")
-
-        lines.append("\nУкажите время начала и окончания (например: *18:00 до 20:00*).")
-        return "\n".join(lines)
-
-    def _check_time_range_only(self, time_start: str, time_end: str) -> str:
-        """
-        Case 2: only time_start and time_end provided.
-        First validates the range isn't inverted, then checks every day in the
-        7-day booking window for fields free during that interval.
-        Asks the user to pick a date.
-        """
-        # Guard: time_end must be after time_start
-        if time_start >= time_end:
-            return (
-                "Время окончания должно быть позже времени начала.\n"
-                "Например: *18:00 до 20:00*"
-            )
-
-        week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
-
-        # Walk each day and collect fields where the requested range is free
-        available: list[dict] = []
-        current = week_start
-        while current <= week_end:
-            free_fields = [
-                f for f in config.BOOKING_FIELDS
-                if booking_logic.is_range_free(booked, str(current), time_start, time_end, f["id"])
-            ]
-            if free_fields:
-                available.append({"date": current, "fields": free_fields})
-            current += timedelta(days=1)
-
-        if not available:
-            return (
-                f"К сожалению, на время {time_start}–{time_end} "
-                f"нет свободных полей в ближайшие 7 дней.\n"
-                "Попробуйте другое время."
-            )
-
-        lines = [f"⏰ {time_start}–{time_end} — доступные даты:\n"]
-        for item in available:
-            fields_str = ", ".join(
-                f"Поле {f['id']} ({f['format']})" for f in item["fields"]
-            )
-            lines.append(f"  {_fmt_date(item['date'])}: {fields_str}")
-        lines.append("\nКакую дату выбираете?")
-        return "\n".join(lines)
-
-    def _check_field_only(self, field_id: int) -> str:
-        """
-        Case 3: only field provided.
-        Shows all dates and free time windows for this field in the next 7 days.
-        Asks the user to specify a date and time.
-        """
-        field_conf = next((f for f in config.BOOKING_FIELDS if f["id"] == field_id), None)
-        if not field_conf:
-            return f"Поле {field_id} не найдено. Доступные поля: {_list_fields()}."
-
-        free = booking_logic.get_free_windows()
-        field_windows = [w for w in free if w["field"] == field_id]
-
-        if not field_windows:
-            return (
-                f"Поле {field_id} ({field_conf['format']}) полностью занято "
-                "на ближайшие 7 дней."
-            )
-
-        # Group by date for readability
-        by_date: dict[date, list] = {}
-        for w in field_windows:
-            by_date.setdefault(w["date"], []).append(w)
-
-        lines = [f"⚽ Поле {field_id} ({field_conf['format']}) — свободные окна:\n"]
-        for d in sorted(by_date):
-            ranges = ", ".join(
-                f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
-                for w in sorted(by_date[d], key=lambda w: w["time_start"])
-            )
-            lines.append(f"  {_fmt_date(d)}: {ranges}")
-        lines.append("\nУкажите дату и время.")
-        return "\n".join(lines)
-
-    def _check_full_slot(
-        self, date_str: str, time_start: str, time_end: str, field_id: int
-    ) -> tuple[str, bool]:
-        """
-        Case 4: date + time_start + time_end + field — all slot params provided.
-        Checks whether this exact slot is free. If not, suggests alternative fields.
-
-        Returns:
-            (response_string, is_slot_available)
-            The bool tells the caller whether the requested field can be saved to the draft.
-        """
-        # Guard: inverted time range
-        if time_start >= time_end:
-            return (
-                "Время окончания должно быть позже времени начала.\n"
-                "Например: *18:00 до 20:00*"
-            ), False
-
-        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        field_conf = next((f for f in config.BOOKING_FIELDS if f["id"] == field_id), None)
-        if not field_conf:
-            return f"Поле {field_id} не найдено. Доступные поля: {_list_fields()}.", False
-
-        week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
-
-        # ── Requested slot is free ──
-        if booking_logic.is_range_free(booked, date_str, time_start, time_end, field_id):
-            return (
-                f"✅ Поле {field_id} ({field_conf['format']}) свободно!\n"
-                f"📅 {_fmt_date(d)}, ⏰ {time_start}–{time_end}\n\n"
-                "Сколько игроков будет?"
-            ), True
-
-        # ── Slot is taken — check if other fields are free at this time ──
-        alt_fields = [
-            f for f in config.BOOKING_FIELDS
-            if f["id"] != field_id
-            and booking_logic.is_range_free(booked, date_str, time_start, time_end, f["id"])
-        ]
-        header = (
-            f"❌ Поле {field_id} ({field_conf['format']}) занято "
-            f"на {_fmt_date(d)} {time_start}–{time_end}."
-        )
-        if alt_fields:
-            alts = ", ".join(f"Поле {f['id']} ({f['format']})" for f in alt_fields)
-            return f"{header}\n\nСвободные поля на это время:\n  {alts}", False
-
-        return f"{header}\nВсе поля заняты в это время. Попробуйте другую дату или время.", False
-
-    def _check_date_and_time(self, date_str: str, time_start: str, time_end: str) -> str:
-        """
-        Case 5: date + time_start + time_end, but no field.
-        Shows which fields are available for this date/time slot.
-        If exactly one field is free, auto-selects it and asks for player count.
-        """
-        # Guard: inverted time range
-        if time_start >= time_end:
-            return (
-                "Время окончания должно быть позже времени начала.\n"
-                "Например: *18:00 до 20:00*"
-            )
-
-        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        free_fields = _get_free_fields_for_slot(date_str, time_start, time_end)
-
-        if not free_fields:
-            return (
-                f"К сожалению, на {_fmt_date(d)} {time_start}–{time_end} "
-                "нет свободных полей.\nПопробуйте другое время."
-            )
-
-        # Single free field — auto-select and skip field choice step
-        if len(free_fields) == 1:
-            f = free_fields[0]
-            return (
-                f"📅 {_fmt_date(d)}, ⏰ {time_start}–{time_end}\n"
-                f"Поле {f['id']} ({f['format']}) — свободно ✅\n\n"
-                "Сколько игроков будет?"
-            )
-
-        # Multiple free fields — ask user to pick one
-        lines = [f"📅 {_fmt_date(d)}, ⏰ {time_start}–{time_end}\n", "Свободные поля:"]
-        for f in free_fields:
-            lines.append(f"  Поле {f['id']} ({f['format']}) ✅")
-        lines.append("\nКакое поле выбираете?")
-        return "\n".join(lines)
-
-    def _check_date_and_field(self, date_str: str, field_id: int) -> str:
-        """
-        Bonus case: date + field provided, no time.
-        Shows free time windows for this field on this date.
-        Asks the user to specify a time range.
-        """
-        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        field_conf = next((f for f in config.BOOKING_FIELDS if f["id"] == field_id), None)
-        if not field_conf:
-            return f"Поле {field_id} не найдено. Доступные поля: {_list_fields()}."
-
-        free = booking_logic.get_free_windows()
-        windows = sorted(
-            [w for w in free if w["date"] == d and w["field"] == field_id],
-            key=lambda w: w["time_start"],
-        )
-
-        if not windows:
-            return (
-                f"Поле {field_id} ({field_conf['format']}) полностью занято "
-                f"на {_fmt_date(d)}."
-            )
-
-        ranges = ", ".join(
-            f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
-            for w in windows
-        )
-        return (
-            f"📅 {_fmt_date(d)}, Поле {field_id} ({field_conf['format']})\n"
-            f"Свободные окна: {ranges}\n\n"
-            "Укажите время начала и окончания (например: *18:00 до 20:00*)."
-        )
-
-    @staticmethod
-    def _show_general_availability() -> str:
-        """Fallback: no recognized params — show full 7-day availability."""
-        free = booking_logic.get_free_windows()
-        if not free:
-            return "К сожалению, свободных слотов на ближайшие 7 дней нет."
-        return booking_logic.format_availability_context(free)
-
-    # ──────────────────────────────────────────────────────────────────────
-    #  Draft & session management
-    #
-    #  After checking availability we persist a DRAFT booking row and a
-    #  booking_session row.  The session's `state` is set to the earliest
-    #  step whose required data is still missing, so the deterministic
-    #  flow (booking_session.py) picks up seamlessly from there.
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _create_or_update_draft(
+    def route_and_extract(
         self,
-        chat_id: str,
-        sender_phone: str,
-        lang: str,
-        fields: dict,
-    ) -> int:
+        user_message: str,
+        chat_history: list | str,
+        rag_context: str = "",
+    ) -> tuple[str, dict]:
         """
-        Create a new DRAFT booking or update the existing one for this chat.
-        Also saves a session at the correct step so the deterministic flow
-        can continue collecting missing info.
+        Single LLM call that determines the user's intent AND extracts any
+        booking parameters from the latest message.
 
-        Returns the booking_id.
+        Returns:
+            (intent, extracted_data)
+            intent: 'booking_new' | 'booking_continue' | 'question' | 'other'
+            extracted_data: dict with keys date, time_start, time_end,
+                            field, players, customer_name  (any may be None)
         """
-        session = postgres.get_active_session(_BOT_NAME, chat_id)
-
-        if session and session.get("booking_id"):
-            # ── Existing session — update draft with new fields ──
-            booking_id = session["booking_id"]
-            params = session.get("params") or {}
-            if isinstance(params, str):
-                params = json.loads(params)
-            if fields:
-                postgres.update_draft(_BOT_NAME, booking_id, **fields)
-            params.update(fields)
-        else:
-            # ── No session — create a fresh draft ──
-            client_token = str(uuid.uuid4())
-            draft_data = {"phone": sender_phone, "client_token": client_token}
-            draft_data.update(fields)
-            result = postgres.create_draft(_BOT_NAME, chat_id, **draft_data)
-            booking_id = result["data"]["booking_id"]
-            params = {
-                "sender_phone": sender_phone,
-                "booking_id": booking_id,
-                "client_token": client_token,
-                "lang": lang,
-            }
-            params.update(fields)
-
-        # Determine the correct step based on what data is still missing
-        next_step = _determine_next_step(params)
-
-        # step_date needs available_days pre-computed in params
-        if next_step == "step_date":
-            free = booking_logic.get_free_windows()
-            params["available_days"] = [str(d) for d in sorted({w["date"] for w in free})]
-
-        postgres.upsert_session(
-            _BOT_NAME,
-            chat_id=chat_id,
-            state=next_step,
-            params=params,
-            object_id=booking_id,
-        )
-        logger.info(
-            "[LLM_BOOKING] Draft booking_id=%d → session=%s (chat=%s)",
-            booking_id, next_step, chat_id,
-        )
-        return booking_id
-
-    # ──────────────────────────────────────────────────────────────────────
-    #  Input validation helpers
-    #
-    #  Each returns a normalized value if valid, or None if the input
-    #  is missing / malformed / out of bounds.  The LLM may produce
-    #  unexpected formats, so these are intentionally defensive.
-    # ──────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _validate_date(value) -> str | None:
-        """
-        Parse and validate a date string (expected YYYY-MM-DD).
-        Must fall within the 7-day booking window: [today, today + 6 days].
-        """
-        if not value:
-            return None
-        try:
-            d = datetime.strptime(str(value), "%Y-%m-%d").date()
-        except ValueError:
-            return None
         today = today_almaty()
-        if d < today or d > today + timedelta(days=6):
-            return None
-        return str(d)
+        fields_info = "\n".join(
+            f"  - Поле {f['id']}: формат {f['format']}"
+            for f in config.BOOKING_FIELDS
+        )
+
+        system_prompt = (
+            f"You are an intent classifier and data extractor for 'Допши', "
+            f"a WhatsApp football field rental bot.\n"
+            f"Today is {today}.\n"
+            f"Available fields:\n{fields_info}\n\n"
+            f"Analyze the user's LATEST message in the context of the chat history.\n\n"
+            f"1. Classify intent:\n"
+            f"   - 'booking_new'      — user wants to make a NEW booking\n"
+            f"   - 'booking_continue' — user is providing/changing details "
+            f"for an ongoing booking\n"
+            f"   - 'question'         — user asks a question (price, availability, etc.)\n"
+            f"   - 'other'            — greetings, thanks, unrelated\n\n"
+            f"2. Extract booking details from the LATEST message ONLY.\n"
+            f"   For any parameter the user did NOT clearly state, return null.\n"
+            f"   Never guess or infer unstated values.\n"
+            f"   - Dates → YYYY-MM-DD  (convert relative: 'завтра', 'четверг' …)\n"
+            f"   - Times → HH:MM  (24-hour)\n"
+            f"   - Field → integer field ID (1, 2, or 3)\n"
+            f"   - If user says a format like '5x5' without a specific number, "
+            f"pick the first matching field ID.\n"
+        )
+        if rag_context:
+            system_prompt += f"\n--- Context ---\n{rag_context}\n---"
+
+        # Build the message array: system + prior history + current user message
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        if isinstance(chat_history, list):
+            messages.extend(chat_history)
+        elif chat_history:
+            messages.append({"role": "user", "content": str(chat_history)})
+        messages.append({"role": "user", "content": user_message})
+
+        empty = self._empty_extracted()
+
+        try:
+            response = self._llm.chat.completions.create(
+                model=config.MODEL_NAME,
+                temperature=0,
+                messages=messages,
+                tools=[{
+                    "type": "function",
+                    "function": {
+                        "name": "classify_and_extract",
+                        "description": (
+                            "Classify the user's intent and extract "
+                            "booking parameters from the latest message."
+                        ),
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "intent": {
+                                    "type": "string",
+                                    "enum": [
+                                        "booking_new",
+                                        "booking_continue",
+                                        "question",
+                                        "other",
+                                    ],
+                                },
+                                "date": {
+                                    "type": ["string", "null"],
+                                    "description": "YYYY-MM-DD",
+                                },
+                                "time_start": {
+                                    "type": ["string", "null"],
+                                    "description": "HH:MM (24h)",
+                                },
+                                "time_end": {
+                                    "type": ["string", "null"],
+                                    "description": "HH:MM (24h)",
+                                },
+                                "field": {
+                                    "type": ["integer", "null"],
+                                    "description": "Field ID (1, 2, or 3)",
+                                },
+                                "players": {
+                                    "type": ["integer", "null"],
+                                    "description": "Total number of players",
+                                },
+                                "name": {
+                                    "type": ["string", "null"],
+                                    "description": "Customer name",
+                                },
+                            },
+                            "required": [
+                                "intent", "date", "time_start",
+                                "time_end", "field", "players", "name",
+                            ],
+                        },
+                    },
+                }],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "classify_and_extract"},
+                },
+            )
+
+            tc = response.choices[0].message.tool_calls
+            if not tc:
+                return "other", empty
+
+            parsed = json.loads(tc[0].function.arguments or "{}")
+            intent = parsed.get("intent", "other")
+
+            extracted = {
+                "date": parsed.get("date"),
+                "time_start": parsed.get("time_start"),
+                "time_end": parsed.get("time_end"),
+                "field": parsed.get("field"),
+                "players": parsed.get("players"),
+                "customer_name": parsed.get("name"),
+            }
+
+            # Sanitize: reject non-positive player counts
+            if extracted["players"] is not None and extracted["players"] <= 0:
+                extracted["players"] = None
+
+            return intent, extracted
+
+        except Exception as exc:
+            logger.error("[LLM_FLOW] route_and_extract failed: %s", exc)
+            return "other", empty
+
+    def extract_booking_data(
+        self, user_message: str, chat_history: list | str
+    ) -> dict:
+        """
+        Extract-only variant for draft continuation (intent already known).
+        Returns the same dict shape as route_and_extract's second element.
+        """
+        _, extracted = self.route_and_extract(user_message, chat_history)
+        return extracted
 
     @staticmethod
-    def _validate_time(value) -> str | None:
+    def _empty_extracted() -> dict:
+        """All booking fields set to None."""
+        return {
+            "date": None,
+            "time_start": None,
+            "time_end": None,
+            "field": None,
+            "players": None,
+            "customer_name": None,
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Main Entry Point
+    # ══════════════════════════════════════════════════════════════════════
+
+    def handle(
+        self,
+        data: dict,
+        chat_id: str,
+        user_message: str,
+        phone: str,
+
+    ) -> str | None:
         """
-        Parse and validate a time string (expected HH:MM).
-        Must be within the venue's operating hours (config.BOOKING_OPEN/CLOSE_TIME).
+        Process one user message through the LLM booking flow.
+
+        Flow:
+          1. Look for an existing draft (phone + state='draft').
+          2. If draft exists and is fully filled → check for yes/no confirmation.
+          3. If draft exists but incomplete → extract new data, merge, re-evaluate.
+          4. If no draft → classify intent via LLM; create draft if booking.
+          5. Return a bilingual availability / prompt response.
+
+        Returns:
+            str  — message to send back to the user
+            None — not a booking intent; caller should fall through to RAG/LLM
         """
-        if not value:
+        # data["field"] from the extractor is a format string ("5x5", "6x6"),
+        # not a field ID.  Separate it: "format" keeps the string,
+        # "field" will hold the resolved integer field ID.
+        format_str = data.get("field")
+        data["format"] = format_str
+        data["field"] = None
+
+        if format_str:
+            data["field"] = self._resolve_field_id(format_str, data)
+
+        # ── 1. Check for an existing draft ────────────────────────────────
+        draft = self._get_existing_draft(phone)
+
+        if draft:
+            logger.info(
+                "[LLM_FLOW] Existing draft id=%d for phone=%s",
+                draft["id"], phone,
+            )
+
+            # 2. If all 6 fields present, the user should be confirming
+            if self._is_ready_for_confirm(draft):
+                confirm = self._check_confirm_response(user_message)
+                if confirm == "yes":
+                    logger.info("[LLM_FLOW] YES → finalize id=%d", draft["id"])
+                    return self._finalize_booking(draft, chat_id, phone)
+                if confirm == "no":
+                    logger.info("[LLM_FLOW] NO → cancel id=%d", draft["id"])
+                    return self._cancel_draft(draft)
+                # Not yes/no — user is changing data; fall through to extraction
+
+            # 3. Extract new data, merge into draft, evaluate
+            logger.info("[LLM_FLOW] Extracted for continuation: %s", data)
+
+            current_data = self._draft_to_data(draft)
+            merged = self._merge_data(current_data, data)
+
+            # Re-resolve field ID when format is known but field isn't yet
+            if merged.get("format") and not merged.get("field"):
+                merged["field"] = self._resolve_field_id(
+                    merged["format"], merged,
+                )
+
+            self._update_draft_in_db(draft["id"], merged)
+
+            return self._evaluate_and_respond(merged)
+
+        # Create a new draft with whatever data was extracted
+        client_token = str(uuid.uuid4())
+
+        create_kwargs: dict = {"phone": phone, "client_token": client_token}
+        for key in ("date", "time_start", "time_end", "field",
+                     "players", "customer_name", "format"):
+            if data.get(key) is not None:
+                create_kwargs[key] = data[key]
+
+        result = postgres.create_draft(
+            bot_name=self.BOT_NAME, chat_id=chat_id, **create_kwargs,
+        )
+        booking_id = result["data"]["booking_id"]
+        logger.info(
+            "[LLM_FLOW] Created draft id=%d fields=%s", booking_id, create_kwargs,
+        )
+
+        data = {
+            "date": data.get("date"),
+            "time_start": data.get("time_start"),
+            "time_end": data.get("time_end"),
+            "field": data.get("field"),
+            "format": data.get("format"),
+            "players": data.get("players"),
+            "customer_name": data.get("customer_name"),
+            "booking_id": booking_id,
+            "client_token": client_token,
+        }
+
+        return self._evaluate_and_respond(data)
+
+    def _resolve_field_id(
+        self, format_str: str, data: dict,
+    ) -> int | None:
+        """
+        Resolve a format string (e.g. '5x5') to a concrete field ID.
+        When multiple fields share the format, pick the first one that
+        is free for the requested date/time slot.
+        """
+        matching = [
+            f for f in config.BOOKING_FIELDS if f["format"] == format_str
+        ]
+        if not matching:
             return None
-        try:
-            t = datetime.strptime(str(value).strip(), "%H:%M").time()
-        except ValueError:
-            return None
-        open_t  = datetime.strptime(config.BOOKING_OPEN_TIME, "%H:%M").time()
-        close_t = datetime.strptime(config.BOOKING_CLOSE_TIME, "%H:%M").time()
-        if t < open_t or t > close_t:
-            return None
-        return t.strftime("%H:%M")
+        if len(matching) == 1:
+            return matching[0]["id"]
+
+        date_str = data.get("date")
+        ts = data.get("time_start")
+        te = data.get("time_end")
+
+        if date_str and ts and te:
+            week_start, week_end = booking_logic.get_week_range()
+            booked = booking_logic.get_all_booked(week_start, week_end)
+            for f in matching:
+                if booking_logic.is_range_free(
+                    booked, date_str, ts, te, f["id"],
+                ):
+                    return f["id"]
+
+        return None
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Draft Management
+    # ══════════════════════════════════════════════════════════════════════
 
     @staticmethod
-    def _validate_field(value) -> int | None:
-        """Validate that the field ID matches one of the configured fields in config.BOOKING_FIELDS."""
-        if value is None:
-            return None
-        try:
-            fid = int(value)
-        except (ValueError, TypeError):
-            return None
-        if any(f["id"] == fid for f in config.BOOKING_FIELDS):
-            return fid
+    def _get_existing_draft(phone: str) -> dict | None:
+        """
+        Find the most recent draft booking for this phone.
+        This replaces the booking_sessions lookup — drafts are identified
+        solely by phone + state='draft'.
+        """
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, date, time_start, time_end, field, format, "
+                    "       players, customer_name, phone, state, client_token "
+                    "FROM bookings "
+                    "WHERE phone = %s AND state = 'draft' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (phone,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    @staticmethod
+    def _draft_to_data(draft: dict) -> dict:
+        """Convert a DB draft row into the standardized data dict used everywhere."""
+        return {
+            "date": str(draft["date"]) if draft.get("date") else None,
+            "time_start": (
+                str(draft["time_start"])[:5] if draft.get("time_start") else None
+            ),
+            "time_end": (
+                str(draft["time_end"])[:5] if draft.get("time_end") else None
+            ),
+            "field": int(draft["field"]) if draft.get("field") else None,
+            "format": draft.get("format"),
+            "players": int(draft["players"]) if draft.get("players") else None,
+            "customer_name": draft.get("customer_name"),
+            "booking_id": draft["id"],
+            "client_token": str(draft.get("client_token", "")),
+        }
+
+    @staticmethod
+    def _merge_data(current: dict, extracted: dict) -> dict:
+        """
+        Merge newly extracted values into the current draft data.
+        Only non-null extracted values overwrite existing ones,
+        so previously collected data is preserved.
+        """
+        merged = dict(current)
+
+        field_map = {
+            "date": "date",
+            "time_start": "time_start",
+            "time_end": "time_end",
+            "field": "field",
+            "format": "format",
+            "players": "players",
+            "customer_name": "customer_name",
+            "name": "customer_name",
+        }
+        for ext_key, data_key in field_map.items():
+            val = extracted.get(ext_key)
+            if val is not None:
+                merged[data_key] = val
+
+        return merged
+
+    def _update_draft_in_db(self, booking_id: int | None, data: dict) -> None:
+        """Persist the merged data back to the draft row in PostgreSQL."""
+        if booking_id is None:
+            return
+
+        update_fields: dict = {}
+        for key in ("date", "time_start", "time_end", "field",
+                     "players", "customer_name", "format"):
+            if data.get(key) is not None:
+                update_fields[key] = data[key]
+
+        if update_fields:
+            postgres.update_draft(self.BOT_NAME, booking_id, **update_fields)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Confirmation & Cancellation
+    # ══════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _is_ready_for_confirm(draft: dict) -> bool:
+        """True when all 6 booking fields are filled in the draft."""
+        return all([
+            draft.get("date"),
+            draft.get("time_start"),
+            draft.get("time_end"),
+            draft.get("field"),
+            draft.get("players"),
+            draft.get("customer_name"),
+        ])
+
+    @staticmethod
+    def _check_confirm_response(text: str) -> str | None:
+        """Return 'yes', 'no', or None from the user's text."""
+        lower = text.lower().strip()
+        if any(w in lower for w in _YES_WORDS):
+            return "yes"
+        if any(w in lower for w in _NO_WORDS):
+            return "no"
         return None
 
     @staticmethod
-    def _validate_players(value) -> int | None:
-        """Validate player count — must be a positive integer."""
-        if value is None:
-            return None
+    def _is_cancel_intent(text: str) -> bool:
+        lower = text.lower()
+        return any(p in lower for p in _CANCEL_PHRASES)
+
+    def _finalize_booking(
+        self, draft: dict, chat_id: str, phone: str,
+    ) -> str:
+        """
+        Transition draft → awaiting_payment via booking_service.request_payment.
+        The DB EXCLUDE constraint catches slot clashes atomically.
+        Returns payment instructions or an error message.
+        """
+        booking_id = draft["id"]
+        client_token = str(draft.get("client_token", ""))
+
+        result = booking_service.request_payment(booking_id, client_token)
+
+        if not result["ok"]:
+            if result["code"] == "SLOT_TAKEN":
+                logger.warning(
+                    "[LLM_FLOW] Slot taken at finalization, id=%d", booking_id,
+                )
+                return (
+                    "К сожалению, этот слот только что заняли. "
+                    "Попробуйте выбрать другое время.\n\n"
+                    "— — —\n\n"
+                    "Өкінішке орай, бұл слотты жаңа ғана алып қойды. "
+                    "Басқа уақыт таңдаңыз.\n\n"
+                    + self._show_general_availability()
+                )
+            logger.error("[LLM_FLOW] request_payment failed: %s", result)
+            return (
+                "Произошла ошибка при создании брони. Попробуйте ещё раз.\n\n"
+                "— — —\n\n"
+                "Брондау жасау кезінде қате шықты. Қайталап көріңіз."
+            )
+
+        d = str(draft["date"])
+        ts = str(draft["time_start"])[:5]
+        te = str(draft["time_end"])[:5]
+        field_id = int(draft["field"])
+        fmt = draft.get("format") or "?"
+        players = draft.get("players", "?")
+        name = draft.get("customer_name", "")
+
+        logger.info("[LLM_FLOW] Booking id=%d → awaiting_payment", booking_id)
+
+        return (
+            f"📋 Бронь зарегистрирована, ожидает оплаты!\n\n"
+            f"📅 {self._fmt_date(d)}\n⏰ {ts}–{te}\n"
+            f"⚽ Поле {field_id} ({fmt})\n"
+            f"👥 Игроков: {players}\n👤 Имя: {name}\n\n"
+            f"Для подтверждения оплатите по ссылке:\n{config.KASPI_PAYMENT_URL}\n"
+            f"(⚠️ Возврат не производится в случае неявки)\n\n"
+            f"После оплаты отправьте PDF-чек из Kaspi сюда — "
+            f"мы подтвердим бронь. 🙏\n"
+            f"⚠️ Без оплаты бронь отменится через 1 час.\n\n"
+            f"— — —\n\n"
+            f"📋 Брондау тіркелді, төлем күтілуде!\n\n"
+            f"📅 {self._fmt_date(d)}\n⏰ {ts}–{te}\n"
+            f"⚽ Алаң {field_id} ({fmt})\n"
+            f"👥 Ойыншылар: {players}\n👤 Аты: {name}\n\n"
+            f"Растау үшін төлем жасаңыз:\n{config.KASPI_PAYMENT_URL}\n"
+            f"(⚠️ Ойынға келмей қалған жағдайда төлем қайтарылмайды)\n\n"
+            f"PDF-чекті осы чатқа жіберіңіз — брондауды растаймыз. 🙏\n"
+            f"⚠️ 1 сағат ішінде төлем болмаса — бронь жойылады."
+        )
+
+    def _cancel_draft(self, draft: dict) -> str:
+        """Cancel the draft and return user-facing confirmation."""
+        postgres.cancel_booking_trial(
+            self.BOT_NAME, draft["id"],
+            actor_type="whatsapp", reason="user_cancel_llm_flow",
+        )
+        logger.info("[LLM_FLOW] Draft id=%d cancelled", draft["id"])
+        return (
+            "Бронирование отменено. Если захотите — просто напишите! 🙂\n\n"
+            "— — —\n\n"
+            "Брондау тоқтатылды. Қайта қаласаңыз — жазыңыз! 🙂"
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Core Evaluation
+    #  Looks at which fields are present and dispatches to the matching
+    #  availability-check method.  No step ordering assumed.
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _evaluate_and_respond(self, data: dict) -> str:
+        """
+        Central dispatcher — examines which booking fields are filled
+        and delegates to the right check method.
+        """
+        has_date = data.get("date") is not None
+        has_ts = data.get("time_start") is not None
+        has_te = data.get("time_end") is not None
+        has_field = data.get("field") is not None
+        has_players = data.get("players") is not None
+        has_name = data.get("customer_name") is not None
+
+        # ── Rule 6: only one of start/end provided → ask for both ──
+        if has_ts != has_te:
+            return (
+                "Пожалуйста, укажите и время начала, и время окончания.\n"
+                "Например: *18:00 - 20:00*\n\n"
+                "— — —\n\n"
+                "Басталу және аяқталу уақытын жазыңыз.\n"
+                "Мысалы: *18:00 - 20:00*"
+            )
+
+        has_time = has_ts and has_te
+
+        # ── Validate time order ──
+        if has_time and data["time_start"] >= data["time_end"]:
+            return (
+                "Время окончания должно быть позже начала.\n"
+                "Пример: *18:00 - 20:00*\n\n"
+                "— — —\n\n"
+                "Аяқталу уақыты басталудан кейін болуы керек.\n"
+                "Мысалы: *18:00 - 20:00*"
+            )
+
+        # ── Validate format string ──
+        if data.get("format"):
+            format_exists = any(
+                f["format"] == data["format"] for f in config.BOOKING_FIELDS
+            )
+            if not format_exists:
+                formats = ", ".join(
+                    sorted({f["format"] for f in config.BOOKING_FIELDS})
+                )
+                return (
+                    f"Формат \"{data['format']}\" не найден. "
+                    f"Доступные форматы: {formats}\n\n"
+                    f"— — —\n\n"
+                    f"\"{data['format']}\" форматы табылмады. "
+                    f"Қолжетімді форматтар: {formats}"
+                )
+
+        # ── Validate field ID ──
+        if has_field:
+            field_exists = any(
+                f["id"] == int(data["field"]) for f in config.BOOKING_FIELDS
+            )
+            if not field_exists:
+                fl = "\n".join(
+                    f"  {f['id']}. Поле {f['id']} ({f['format']})"
+                    for f in config.BOOKING_FIELDS
+                )
+                return (
+                    f"Такого поля нет. Доступные поля:\n{fl}\n\n"
+                    f"— — —\n\n"
+                    f"Мұндай алаң жоқ. Қолжетімді алаңдар:\n{fl}"
+                )
+
+        # ── Rule 7: validate players ──
+        if has_players and int(data["players"]) <= 0:
+            return (
+                "Количество игроков должно быть больше 0.\n\n"
+                "— — —\n\n"
+                "Ойыншылар саны 0-ден көп болуы керек."
+            )
+
+        # ── All 6 fields → confirm ──
+        if has_date and has_time and has_field and has_players and has_name:
+            return self._check_and_confirm(data)
+
+        # ── Rule 4: date + time + field → check slot, ask remaining ──
+        if has_date and has_time and has_field:
+            return self._check_full_slot(data)
+
+        # ── Rule 5: date + time → show free fields ──
+        if has_date and has_time:
+            return self._check_date_and_time(data)
+
+        # ── date + field (no time) → show time ranges ──
+        if has_date and has_field:
+            return self._check_date_and_field(data)
+
+        # ── Rule 1: date only → free fields & times for that date ──
+        if has_date and not has_time and not has_field:
+            return self._check_date_only(data)
+
+        # ── Rule 2: time range only → available dates & fields ──
+        if has_time and not has_date:
+            return self._check_time_range_only(data)
+
+        # ── Rule 3: field only → dates & times for that field ──
+        if has_field and not has_date and not has_time:
+            return self._check_field_only(data)
+
+        # ── Nothing specific → general availability overview ──
+        return self._show_general_availability()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Availability Checks  (Rules 1–5 + combinations)
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _check_date_only(self, data: dict) -> str:
+        """Rule 1: show all free fields and their time ranges for the given date."""
+        date_str = data["date"]
+        free = booking_logic.get_free_windows()
+        day_windows = [w for w in free if str(w["date"]) == date_str]
+
+        if not day_windows:
+            return (
+                f"К сожалению, на {self._fmt_date(date_str)} "
+                f"нет свободных слотов.\nВыберите другую дату.\n\n"
+                + self._format_available_dates(free)
+                + "\n\n— — —\n\n"
+                + f"Өкінішке орай, {self._fmt_date(date_str)} "
+                  f"күні бос слот жоқ.\nБасқа күнді таңдаңыз."
+            )
+
+        windows_text = self._format_windows_by_field(day_windows)
+        return (
+            f"📅 {self._fmt_date(date_str)} — свободные слоты:\n\n"
+            f"{windows_text}\n\n"
+            f"Укажите время (напр. *18:00 - 20:00*) и/или номер поля.\n\n"
+            f"— — —\n\n"
+            f"📅 {self._fmt_date(date_str)} — бос слоттар:\n\n"
+            f"{windows_text}\n\n"
+            f"Уақытты (мыс. *18:00 - 20:00*) және/немесе алаң нөмірін жазыңыз."
+        )
+
+    def _check_time_range_only(self, data: dict) -> str:
+        """Rule 2: show available dates and fields for the given time interval."""
+        ts, te = data["time_start"], data["time_end"]
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+        free = booking_logic.get_free_windows()
+        dates = sorted({str(w["date"]) for w in free})
+
+        # For each date, find fields where the requested range is free
+        available: list[dict] = []
+        for d in dates:
+            free_fields = [
+                f for f in config.BOOKING_FIELDS
+                if booking_logic.is_range_free(booked, d, ts, te, f["id"])
+            ]
+            if free_fields:
+                available.append({"date": d, "fields": free_fields})
+
+        if not available:
+            return (
+                f"К сожалению, нет свободных полей на {ts}–{te} "
+                f"в ближайшие дни.\nПопробуйте другое время.\n\n"
+                f"— — —\n\n"
+                f"Өкінішке орай, {ts}–{te} аралығында "
+                f"жақын күндерде бос алаң жоқ.\nБасқа уақыт көріңіз."
+            )
+
+        lines_ru = [f"⏰ {ts}–{te} — доступные дни и поля:\n"]
+        lines_kk = [f"⏰ {ts}–{te} — қолжетімді күндер мен алаңдар:\n"]
+
+        for item in available:
+            d_label = self._fmt_date(item["date"])
+            fields_ru = ", ".join(
+                f"Поле {f['id']} ({f['format']})" for f in item["fields"]
+            )
+            fields_kk = ", ".join(
+                f"Алаң {f['id']} ({f['format']})" for f in item["fields"]
+            )
+            lines_ru.append(f"  📅 {d_label}: {fields_ru}")
+            lines_kk.append(f"  📅 {d_label}: {fields_kk}")
+
+        lines_ru.append("\nУкажите дату и поле для бронирования.")
+        lines_kk.append("\nКүн мен алаңды жазыңыз.")
+
+        return "\n".join(lines_ru) + "\n\n— — —\n\n" + "\n".join(lines_kk)
+
+    def _check_field_only(self, data: dict) -> str:
+        """Rule 3: show available dates and time ranges for the given field."""
+        field_id = int(data["field"])
+        free = booking_logic.get_free_windows()
+        field_windows = [w for w in free if w["field"] == field_id]
+
+        field_conf = next(
+            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
+        )
+        fmt = field_conf.get("format", "?")
+
+        if not field_windows:
+            return (
+                f"К сожалению, Поле {field_id} ({fmt}) полностью занято "
+                f"в ближайшие 7 дней.\n\n"
+                f"— — —\n\n"
+                f"Өкінішке орай, Алаң {field_id} ({fmt}) жақын "
+                f"7 күнде толығымен бос емес."
+            )
+
+        windows_text = self._format_windows_by_date(field_windows)
+        return (
+            f"⚽ Поле {field_id} ({fmt}) — свободные слоты:\n\n"
+            f"{windows_text}\n\n"
+            f"Укажите дату и время.\n\n"
+            f"— — —\n\n"
+            f"⚽ Алаң {field_id} ({fmt}) — бос слоттар:\n\n"
+            f"{windows_text}\n\n"
+            f"Күн мен уақытты жазыңыз."
+        )
+
+    def _check_full_slot(self, data: dict) -> str:
+        """
+        Rule 4: date + time + field are all known.
+        Check if this exact slot is free; ask for remaining fields if so.
+        """
+        date_str = data["date"]
+        ts, te = data["time_start"], data["time_end"]
+        field_id = int(data["field"])
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+
+        field_conf = next(
+            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
+        )
+        fmt = data.get("format") or field_conf.get("format", "?")
+
+        if booking_logic.is_range_free(booked, date_str, ts, te, field_id):
+            # Slot is free — ask for what's still missing
+            missing_ru, missing_kk = self._format_missing_fields(data)
+
+            if not missing_ru:
+                # All fields present but routed here anyway — confirm
+                return self._check_and_confirm(data)
+
+            return (
+                f"✅ Поле {field_id} ({fmt}) свободно "
+                f"{self._fmt_date(date_str)} с {ts} до {te}!\n\n"
+                f"Осталось указать:\n{missing_ru}\n\n"
+                f"— — —\n\n"
+                f"✅ Алаң {field_id} ({fmt}) бос "
+                f"{self._fmt_date(date_str)} {ts}–{te}!\n\n"
+                f"Қалған деректер:\n{missing_kk}"
+            )
+
+        # Slot taken — show what IS available on that date
+        free = booking_logic.get_free_windows()
+        day_windows = [w for w in free if str(w["date"]) == date_str]
+        alt_text = self._format_windows_by_field(day_windows)
+
+        return (
+            f"❌ Поле {field_id} ({fmt}) занято "
+            f"{self._fmt_date(date_str)} с {ts} до {te}.\n\n"
+            f"Доступные варианты на эту дату:\n{alt_text}\n\n"
+            f"— — —\n\n"
+            f"❌ Алаң {field_id} ({fmt}) бос емес "
+            f"{self._fmt_date(date_str)} {ts}–{te}.\n\n"
+            f"Бұл күнге қолжетімді нұсқалар:\n{alt_text}"
+        )
+
+    def _check_date_and_time(self, data: dict) -> str:
+        """Rule 5: date + time are known but field is not. Show available fields."""
+        date_str = data["date"]
+        ts, te = data["time_start"], data["time_end"]
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+
+        candidates = config.BOOKING_FIELDS
+        if data.get("format"):
+            candidates = [
+                f for f in candidates if f["format"] == data["format"]
+            ]
+
+        free_fields = [
+            f for f in candidates
+            if booking_logic.is_range_free(booked, date_str, ts, te, f["id"])
+        ]
+
+        if not free_fields:
+            # No fields free for this slot — show what else is available that day
+            free = booking_logic.get_free_windows()
+            day_windows = [w for w in free if str(w["date"]) == date_str]
+            alt_text = self._format_windows_by_field(day_windows)
+            return (
+                f"К сожалению, нет свободных полей "
+                f"{self._fmt_date(date_str)} с {ts} до {te}.\n\n"
+                f"Доступное время на эту дату:\n{alt_text}\n\n"
+                f"— — —\n\n"
+                f"Өкінішке орай, {self._fmt_date(date_str)} {ts}–{te} "
+                f"аралығында бос алаң жоқ.\n\n"
+                f"Бұл күндегі бос уақыт:\n{alt_text}"
+            )
+
+        # Single field available — auto-select it and continue
+        if len(free_fields) == 1:
+            f = free_fields[0]
+            data["field"] = f["id"]
+            data["format"] = f["format"]
+            self._update_draft_in_db(data.get("booking_id"), data)
+
+            # If players+name are also present now, jump to confirmation
+            if data.get("players") and data.get("customer_name"):
+                return self._check_and_confirm(data)
+
+            missing_ru, missing_kk = self._format_missing_fields(data)
+            return (
+                f"✅ Поле {f['id']} ({f['format']}) свободно "
+                f"{self._fmt_date(date_str)} с {ts} до {te}!\n\n"
+                + (f"Осталось указать:\n{missing_ru}\n\n" if missing_ru else "")
+                + f"— — —\n\n"
+                  f"✅ Алаң {f['id']} ({f['format']}) бос "
+                  f"{self._fmt_date(date_str)} {ts}–{te}!\n\n"
+                + (f"Қалған деректер:\n{missing_kk}" if missing_kk else "")
+            )
+
+        # Multiple fields — let user pick
+        fl_ru = "\n".join(
+            f"  {f['id']}. Поле {f['id']} ({f['format']})"
+            for f in free_fields
+        )
+        fl_kk = "\n".join(
+            f"  {f['id']}. Алаң {f['id']} ({f['format']})"
+            for f in free_fields
+        )
+        return (
+            f"📅 {self._fmt_date(date_str)}, {ts}–{te}\n\n"
+            f"Свободные поля:\n{fl_ru}\n\n"
+            f"Укажите номер поля.\n\n"
+            f"— — —\n\n"
+            f"📅 {self._fmt_date(date_str)}, {ts}–{te}\n\n"
+            f"Бос алаңдар:\n{fl_kk}\n\n"
+            f"Алаң нөмірін жазыңыз."
+        )
+
+    def _check_date_and_field(self, data: dict) -> str:
+        """Date + field known, time unknown. Show free time ranges."""
+        date_str = data["date"]
+        field_id = int(data["field"])
+        free = booking_logic.get_free_windows()
+
+        windows = [
+            w for w in free
+            if str(w["date"]) == date_str and w["field"] == field_id
+        ]
+
+        field_conf = next(
+            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
+        )
+        fmt = field_conf.get("format", "?")
+
+        if not windows:
+            # Field fully booked on this date — show other fields
+            day_windows = [w for w in free if str(w["date"]) == date_str]
+            alt_text = self._format_windows_by_field(day_windows)
+            return (
+                f"Поле {field_id} ({fmt}) полностью занято "
+                f"{self._fmt_date(date_str)}.\n\n"
+                f"Другие варианты:\n{alt_text}\n\n"
+                f"— — —\n\n"
+                f"Алаң {field_id} ({fmt}) {self._fmt_date(date_str)} "
+                f"толығымен бос емес.\n\n"
+                f"Басқа нұсқалар:\n{alt_text}"
+            )
+
+        times_str = ", ".join(
+            f"{self._fmt_time(w['time_start'])}–{self._fmt_time(w['time_end'])}"
+            for w in sorted(windows, key=lambda w: w["time_start"])
+        )
+        return (
+            f"⚽ Поле {field_id} ({fmt}), "
+            f"{self._fmt_date(date_str)}\n"
+            f"Свободное время: {times_str}\n\n"
+            f"Укажите время (напр. *18:00 - 20:00*).\n\n"
+            f"— — —\n\n"
+            f"⚽ Алаң {field_id} ({fmt}), "
+            f"{self._fmt_date(date_str)}\n"
+            f"Бос уақыт: {times_str}\n\n"
+            f"Уақытты жазыңыз (мыс. *18:00 - 20:00*)."
+        )
+
+    def _check_and_confirm(self, data: dict) -> str:
+        """
+        All 6 fields present. Verify the slot is still free,
+        then show the confirmation prompt.
+        """
+        date_str = data["date"]
+        ts, te = data["time_start"], data["time_end"]
+        field_id = int(data["field"])
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+
+        field_conf = next(
+            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
+        )
+        fmt = data.get("format") or field_conf.get("format", "?")
+
+        if not booking_logic.is_range_free(booked, date_str, ts, te, field_id):
+            # Slot taken between data collection and confirmation
+            free = booking_logic.get_free_windows()
+            day_windows = [w for w in free if str(w["date"]) == date_str]
+            alt_text = self._format_windows_by_field(day_windows)
+            return (
+                f"❌ К сожалению, Поле {field_id} ({fmt}) на "
+                f"{self._fmt_date(date_str)} {ts}–{te} уже занято.\n\n"
+                f"Доступные варианты:\n{alt_text}\n\n"
+                f"— — —\n\n"
+                f"❌ Өкінішке орай, Алаң {field_id} ({fmt}) "
+                f"{self._fmt_date(date_str)} {ts}–{te} бос емес.\n\n"
+                f"Қолжетімді нұсқалар:\n{alt_text}"
+            )
+
+        return (
+            f"📋 Детали брони:\n"
+            f"📅 {self._fmt_date(date_str)}\n"
+            f"⏰ {ts}–{te}\n"
+            f"⚽ Поле {field_id} ({fmt})\n"
+            f"👥 Игроков: {data['players']}\n"
+            f"👤 Имя: {data['customer_name']}\n\n"
+            f"Подтвердить? Ответьте *да* или *нет*.\n\n"
+            f"— — —\n\n"
+            f"📋 Брондау деректері:\n"
+            f"📅 {self._fmt_date(date_str)}\n"
+            f"⏰ {ts}–{te}\n"
+            f"⚽ Алаң {field_id} ({fmt})\n"
+            f"👥 Ойыншылар: {data['players']}\n"
+            f"👤 Аты: {data['customer_name']}\n\n"
+            f"Растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Formatting Helpers
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _show_general_availability(self) -> str:
+        """Full 7-day availability overview when no specific fields are given."""
+        free = booking_logic.get_free_windows()
+        if not free:
+            return (
+                "К сожалению, свободных слотов на ближайшие 7 дней нет.\n\n"
+                "— — —\n\n"
+                "Өкінішке орай, жақын 7 күнде бос слот жоқ."
+            )
+
+        ctx = booking_logic.format_availability_context(free)
+        return (
+            f"Давайте забронируем! Вот доступные слоты:\n\n{ctx}\n\n"
+            f"Укажите дату, время, или номер поля.\n\n"
+            f"— — —\n\n"
+            f"Брондайық! Бос слоттар:\n\n{ctx}\n\n"
+            f"Күнді, уақытты немесе алаң нөмірін жазыңыз."
+        )
+
+    @staticmethod
+    def _format_windows_by_field(windows: list[dict]) -> str:
+        """Group free windows by field, format as multiline text."""
+        if not windows:
+            return "  (нет свободных слотов / бос слот жоқ)"
+
+        by_field: dict[tuple, list] = {}
+        for w in windows:
+            key = (w["field"], w.get("format", "?"))
+            by_field.setdefault(key, []).append(w)
+
+        lines = []
+        for (fid, fmt) in sorted(by_field):
+            sorted_w = sorted(by_field[(fid, fmt)], key=lambda x: x["time_start"])
+            times = ", ".join(
+                f"{LlmBookingFlowHandler._fmt_time(w['time_start'])}"
+                f"–{LlmBookingFlowHandler._fmt_time(w['time_end'])}"
+                for w in sorted_w
+            )
+            lines.append(f"  ⚽ Поле/Алаң {fid} ({fmt}): {times}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_windows_by_date(windows: list[dict]) -> str:
+        """Group free windows by date, format as multiline text."""
+        if not windows:
+            return "  (нет свободных слотов / бос слот жоқ)"
+
+        by_date: dict[str, list] = {}
+        for w in windows:
+            by_date.setdefault(str(w["date"]), []).append(w)
+
+        lines = []
+        for d in sorted(by_date):
+            sorted_w = sorted(by_date[d], key=lambda x: x["time_start"])
+            d_label = LlmBookingFlowHandler._fmt_date(d)
+            times = ", ".join(
+                f"{LlmBookingFlowHandler._fmt_time(w['time_start'])}"
+                f"–{LlmBookingFlowHandler._fmt_time(w['time_end'])}"
+                for w in sorted_w
+            )
+            lines.append(f"  📅 {d_label}: {times}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_available_dates(free_windows: list[dict]) -> str:
+        """List all dates that have at least one free window."""
+        dates = sorted({str(w["date"]) for w in free_windows})
+        if not dates:
+            return ""
+
+        lines = ["Доступные даты / Қолжетімді күндер:"]
+        for d_str in dates:
+            lines.append(f"  📅 {LlmBookingFlowHandler._fmt_date(d_str)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_missing_fields(data: dict) -> tuple[str, str]:
+        """
+        Return bilingual lists of fields that are still None.
+        Returns (russian_text, kazakh_text) — empty strings if nothing is missing.
+        """
+        missing_ru: list[str] = []
+        missing_kk: list[str] = []
+
+        if data.get("date") is None:
+            missing_ru.append("  • Дата")
+            missing_kk.append("  • Күн")
+        if data.get("time_start") is None or data.get("time_end") is None:
+            missing_ru.append("  • Время начала и окончания")
+            missing_kk.append("  • Басталу және аяқталу уақыты")
+        if data.get("field") is None:
+            missing_ru.append("  • Номер поля")
+            missing_kk.append("  • Алаң нөмірі")
+        if data.get("players") is None:
+            missing_ru.append("  • Количество игроков")
+            missing_kk.append("  • Ойыншылар саны")
+        if data.get("customer_name") is None:
+            missing_ru.append("  • Ваше имя")
+            missing_kk.append("  • Атыңыз")
+
+        return "\n".join(missing_ru), "\n".join(missing_kk)
+
+    @staticmethod
+    def _fmt_date(date_str: str) -> str:
+        """'2026-06-15' → 'Пн 15.06.2026'"""
         try:
-            p = int(value)
-            return p if p > 0 else None
+            from datetime import datetime
+            dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+            return f"{_WEEKDAY_RU[dt.weekday()]} {dt.strftime('%d.%m.%Y')}"
         except (ValueError, TypeError):
-            return None
+            return date_str or "?"
 
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Module-level helpers
-# ─────────────────────────────────────────────────────────────────────────
-
-def _fmt_date(d: date) -> str:
-    """Format a date as 'Чт 12.06.2026' for user-facing messages."""
-    return f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m.%Y')}"
-
-
-def _list_fields() -> str:
-    """Comma-separated list of all configured fields, e.g. 'Поле 1 (5x5), Поле 2 (6x6)'."""
-    return ", ".join(f"Поле {f['id']} ({f['format']})" for f in config.BOOKING_FIELDS)
-
-
-def _get_free_fields_for_slot(date_str: str, time_start: str, time_end: str) -> list[dict]:
-    """
-    Return the subset of config.BOOKING_FIELDS that are free for the given
-    date and time range.  Used by both _check_date_and_time and the auto-select
-    logic in handle().
-    """
-    week_start, week_end = booking_logic.get_week_range()
-    booked = booking_logic.get_all_booked(week_start, week_end)
-    return [
-        f for f in config.BOOKING_FIELDS
-        if booking_logic.is_range_free(booked, date_str, time_start, time_end, f["id"])
-    ]
-
-
-def _determine_next_step(params: dict) -> str:
-    """
-    Given collected booking params, determine which step the deterministic
-    flow should resume from.
-
-    Step order: date → time → field → players → name → confirm
-    We return the earliest step whose required data is still missing.
-    """
-    if not params.get("date"):
-        return "step_date"
-    if not params.get("time_start") or not params.get("time_end"):
-        return "step_time"
-    if not params.get("field"):
-        return "step_field"
-    if not params.get("players"):
-        return "step_players"
-    if not params.get("customer_name"):
-        return "step_name"
-    return "step_confirm"
+    @staticmethod
+    def _fmt_time(value) -> str:
+        """Accept time objects or 'HH:MM:SS' strings → 'HH:MM'"""
+        if hasattr(value, "strftime"):
+            return value.strftime("%H:%M")
+        return str(value)[:5]

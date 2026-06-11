@@ -71,3 +71,58 @@ EDIT_BOOKING_TOOL = {
         },
     },
 }
+
+EXTRACT_DATA_LLM = {
+    "type": "function",
+    "function": {
+        "name": "extract_booking_data",
+        "description": "Extract the 6 required variables for a field booking.",
+        # strict mode requires `additionalProperties: false` AND every property
+        # key present in `required` (even nullable ones).
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "date": {"type": ["string", "null"], "description": "Format YYYY-MM-DD"},
+                "time_start": {"type": ["string", "null"], "description": "Format HH:MM"},
+                "time_end": {"type": ["string", "null"], "description": "Format HH:MM"},
+                "field": {"type": ["string", "null"], "enum": ["5x5", "6x6", None]},
+                "players": {"type": ["number", "null"],
+                            "description": "The total number of players expected"},
+                "name": {"type": ["string", "null"], "description": "The name of the booker"}
+            },
+            "required": ["date", "time_start", "time_end", "field", "players", "name"]
+        }
+    }
+}
+
+SELECT_INTENT_LLM = {
+    "type": "function",
+    "function": {
+        "name": "route_message",
+        "description": "Return the single categorized intent of the latest user message.",
+        # strict mode requires `additionalProperties: False` and every property
+        # listed in `required` — otherwise the API rejects the request.
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "question_price",
+                        # "question_slots",
+                        # "question_field_size",
+                        "booking_new",
+                        "booking_continue",
+                        "other"
+                    ],
+                    "description": "The categorized intent of the message."
+                }
+            },
+            "required": ["type"]
+        }
+    }
+}
