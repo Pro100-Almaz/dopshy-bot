@@ -35,9 +35,9 @@ def extract_booking_details(chat_history: Union[str, List[Dict[str, str]]]) -> D
     # Returned when extraction can't run — keeps the null contract intact for callers.
     empty_result = {
         "date": None,
-        "start_time": None,
-        "end_time": None,
-        "field_size": None,
+        "time_start": None,
+        "time_end": None,
+        "field": None,
         "players": None,
         "name": None
     }
@@ -60,9 +60,9 @@ def extract_booking_details(chat_history: Union[str, List[Dict[str, str]]]) -> D
                         "additionalProperties": False,
                         "properties": {
                             "date": {"type": ["string", "null"], "description": "Format YYYY-MM-DD"},
-                            "start_time": {"type": ["string", "null"], "description": "Format HH:MM"},
-                            "end_time": {"type": ["string", "null"], "description": "Format HH:MM"},
-                            "field_size": {"type": ["string", "null"], "enum": ["5x5", "6x6", None]},
+                            "time_start": {"type": ["string", "null"], "description": "Format HH:MM"},
+                            "time_end": {"type": ["string", "null"], "description": "Format HH:MM"},
+                            "field": {"type": ["string", "null"], "enum": ["5x5", "6x6", None]},
                             "players": {"type": ["number", "null"],
                                         "description": "The total number of players expected"},
                             "name": {"type": ["string", "null"], "description": "The name of the booker"}
@@ -89,3 +89,4 @@ def extract_booking_details(chat_history: Union[str, List[Dict[str, str]]]) -> D
     except Exception as err:
         logging.error(f"extract_booking_details failed: {err}")
         return empty_result
+

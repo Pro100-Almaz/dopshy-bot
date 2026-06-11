@@ -164,22 +164,58 @@ def handle_incoming_message(payload: dict) -> None:
             user_text[:80],
         )
 
-        # 1. Booking session handler (Bot 1 — Dopshy field rental only)
+        # 1. Booking handler (Bot 1 — Dopshy field rental)
+        #
+        # Two-LLM architecture:
+        #   a) Active session → existing deterministic step handler
+        #      (handles step_date, step_time, … step_confirm)
+        #   b) No active session → LLM1 (intent + extraction) → LLM2 (process)
+        #   c) If LLM2 returns None → fall through to legacy RAG/LLM pipeline
         if bot_config["name"] == "dopsy_bot":
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
-            booking_reply = handle_booking_turn(
-                chat_id, phone_number_id, sender_id, user_text
-            )
-            if booking_reply is not None:
-                logger.info(
-                    "[BOOKING] Booking branch handled message — skipping RAG/LLM. "
-                    "Reply preview: %.120s", booking_reply
+
+            from integrations.repo import postgres as _pg
+            _session = _pg.get_active_session("dopsy_bot", chat_id)
+
+            if _session:
+                # (a) Active booking session → deterministic step handler
+                booking_reply = handle_booking_turn(
+                    chat_id, phone_number_id, sender_id, user_text
                 )
-                append_message(chat_id, "user", user_text)
-                append_message(chat_id, "assistant", booking_reply)
-                send_text_message(phone_number_id, sender_id, booking_reply)
-                return
-            logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
+                if booking_reply is not None:
+                    logger.info(
+                        "[BOOKING] Session handler replied: %.120s", booking_reply,
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", booking_reply)
+                    send_text_message(phone_number_id, sender_id, booking_reply)
+                    return
+            else:
+                # (b) No active session → Two-LLM flow
+                from handlers import llm1_router, llm2_processor
+
+                _rag = retrieve_context(user_text)
+                _history = get_history(chat_id)
+
+                llm1_result = llm1_router.route(
+                    user_text, _history, rag_context=_rag,
+                )
+                llm2_reply = llm2_processor.process(
+                    llm1_result, chat_id, sender_id,
+                    phone_number_id, user_text,
+                )
+                if llm2_reply is not None:
+                    logger.info(
+                        "[LLM1→LLM2] type=%s | reply: %.120s",
+                        llm1_result.get("type"), llm2_reply,
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", llm2_reply)
+                    send_text_message(phone_number_id, sender_id, llm2_reply)
+                    return
+
+            # (c) Neither handled the message → fall through to RAG/LLM
+            logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
 
         else:
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)

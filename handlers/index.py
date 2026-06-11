@@ -16,7 +16,6 @@ FAQ_TYPES = ["question_price", "question_slots", "question_field_size"]
 class WebhookPayload(BaseModel):
     ChatHistory: Union[str, List[Dict[str, Any]]] = ""
 
-@app.post("/api/whatsapp-handler")
 def handle_whatsapp_message(payload: WebhookPayload):
     chat_history = payload.ChatHistory
 
