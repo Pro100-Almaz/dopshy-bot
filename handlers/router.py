@@ -4,6 +4,8 @@ import logging
 from typing import Union, List, Dict
 from openai import OpenAI
 
+from chat.tools.arena_tools import SELECT_INTENT_LLM
+
 # Initialize the OpenAI client. It automatically picks up the OPENAI_API_KEY environment variable.
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
@@ -20,6 +22,7 @@ in progress. Classify ONLY the user's most recent message into exactly one inten
 - question_field_size: asking about field specs (5-a-side, 11-a-side, dimensions, surface).
 - booking_new: a fresh, first-time intent to reserve a field (no booking underway yet).
 - booking_continue: supplying details (date, time, name, duration) to an ALREADY ongoing booking.
+- booking_cancel: any cancelling intention, even if cancel was already performed.
 - other: greetings, thanks, small talk, or anything unrelated.
 
 When the prior turns show the bot asking for booking details, treat the user's reply
@@ -47,35 +50,7 @@ def route_incoming_message(chat_history: Union[str, List[Dict[str, str]]]) -> st
             model="gpt-4o-mini",
             temperature=0,  # deterministic classification
             messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history_messages,
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "route_message",
-                    "description": "Return the single categorized intent of the latest user message.",
-                    # strict mode requires `additionalProperties: False` and every property
-                    # listed in `required` — otherwise the API rejects the request.
-                    "strict": True,
-                    "parameters": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "enum": [
-                                    "question_price",
-                                    "question_slots",
-                                    "question_field_size",
-                                    "booking_new",
-                                    "booking_continue",
-                                    "other"
-                                ],
-                                "description": "The categorized intent of the message."
-                            }
-                        },
-                        "required": ["type"]
-                    }
-                }
-            }],
+            tools=[SELECT_INTENT_LLM],
             tool_choice={"type": "function", "function": {"name": "route_message"}}
         )
 

@@ -21,6 +21,7 @@ def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+
 def get_user_upcoming_bookings(phone: str) -> list[dict]:
     """Return upcoming (today or later) non-cancelled bookings for a phone number."""
     with _conn() as conn:
@@ -135,3 +136,18 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
                    OR (state = 'draft' AND created_at < NOW() - make_interval(secs => %s))
             """, (session_ttl_seconds,))
             return [dict(r) for r in cur.fetchall()]
+
+
+
+def cancel_user_drafts(phone: str) -> bool:
+    """Return upcoming (today or later) non-cancelled bookings for a phone number."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                UPDATE bookings SET state = 'cancelled' 
+                WHERE phone = %s AND state = 'draft'
+            """, (phone,))
+
+            cnt = cur.rowcount > 0
+            print("COUNT cancelled", cnt)
+            return cnt

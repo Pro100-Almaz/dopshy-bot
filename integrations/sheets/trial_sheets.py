@@ -26,12 +26,6 @@ _GROUP_COL_COUNT = len(_HEADERS['groups'])
 _TRIAL_COL_COUNT = len(_HEADERS['trials'])
 
 # DB state → sheet status label (uppercase, matches Apps Script dropdown).
-_STATE_DISPLAY = {
-    "draft":            "DRAFT",
-    "confirmed":        "CONFIRMED",
-    "cancelled":        "CANCELLED",
-    "failed":           "FAILED",
-}
 
 _STATES_RUSSIAN = {
     "draft":            "ЧЕРНОВИК",
@@ -109,7 +103,7 @@ def _trial_to_row(g: dict) -> list:
         str(g["trial_day"]),
         str(g["start_time"]),
         str(g["end_time"]),
-        _STATE_DISPLAY[g["state"]],
+        _STATES_RUSSIAN[g["state"]],
         str(g["notes"]),
         str(g["attended"]),
         str(g["subscribed"]),

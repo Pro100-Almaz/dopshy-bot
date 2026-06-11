@@ -6,7 +6,9 @@ import logging
 import threading
 
 from chat.conversation import append_message, get_history, clear_history
-from chat.llm import get_ai_response
+from chat.llm import get_ai_response, route_incoming_message
+from handlers.extractor import extract_booking_details
+from handlers.payment.pricing import process_field_prices
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.sheets.booking_sheets import upsert_booking_row
 from rag.retriever import retrieve_context
@@ -16,7 +18,9 @@ from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation
-from integrations.repo import booking_repo
+from integrations.repo import booking_repo, postgres
+from integrations.repo import postgres as _pg
+from handlers.llm_booking_flow import LlmBookingFlowHandler
 import config
 
 logger = logging.getLogger(__name__)
@@ -65,10 +69,23 @@ _PAYMENT_REJECT_FOOTER_KK = (
     "Қажет болса — әкімшімен хабарласыңыз."
 )
 
+_CANCEL_STATUS = (
+
+        "По вашему номеру не найдено записей."
+        "\n\n–––\n\n"
+        "Сіздің нөміріңізге белсенді жазба табылмады.",
+
+        "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂"
+        "\n\n–––\n\n"
+        "Брондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"
+
+)
+
 builder = BasePromptBuilder({}, "", (), ())
 
+
 def _format_payment_reject_message(
-    code: str, parsed: dict, booking: dict
+        code: str, parsed: dict, booking: dict
 ) -> str:
     """Build the bilingual user message for a rejected payment receipt."""
     ru, kk = _PAYMENT_REJECT_MESSAGES.get(code, _PAYMENT_REJECT_MESSAGES["unreadable"])
@@ -164,22 +181,68 @@ def handle_incoming_message(payload: dict) -> None:
             user_text[:80],
         )
 
-        # 1. Booking session handler (Bot 1 — Dopshy field rental only)
+        context = retrieve_context(user_text)
+        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
+
+        history = get_history(chat_id)
+        logger.info("[LLM] History length: %d messages", len(history))
+
+        # 1. Booking handler (Bot 1 — Dopshy field rental)
+        #
+        # Two-LLM architecture:
+        #   a) Active session → existing deterministic step handler
+        #      (handles step_date, step_time, … step_confirm)
+        #   b) No active session → LLM1 (intent + extraction) → LLM2 (process)
+        #   c) If LLM2 returns None → fall through to legacy RAG/LLM pipeline
         if bot_config["name"] == "dopsy_bot":
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
-            booking_reply = handle_booking_turn(
-                chat_id, phone_number_id, sender_id, user_text
-            )
-            if booking_reply is not None:
-                logger.info(
-                    "[BOOKING] Booking branch handled message — skipping RAG/LLM. "
-                    "Reply preview: %.120s", booking_reply
+
+            _session = _pg.get_active_session("dopsy_bot", chat_id)
+
+            if _session:
+                # (a) Active booking session → deterministic step handler
+                booking_reply = handle_booking_turn(
+                    chat_id, phone_number_id, sender_id, user_text
                 )
+                if booking_reply is not None:
+                    logger.info(
+                        "[BOOKING] Session handler replied: %.120s", booking_reply,
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", booking_reply)
+                    send_text_message(phone_number_id, sender_id, booking_reply)
+                    return
+
+            intent = route_incoming_message(history, user_text)
+            logger.info("[BOOKING] Intent detection replied, Intent is %s", intent)
+            if intent == 'question_price':
+                send_text_message(phone_number_id, sender_id, process_field_prices())
+                # calculate price method needed
+            elif intent in ['booking_new', 'booking_continue']:
+                extracted_data = extract_booking_details(history, user_text)
+                logger.info("[BOOKING] Data Extracted: %s", extracted_data)
+                handler = LlmBookingFlowHandler()
+                reply = handler.handle(extracted_data, chat_id, user_text, sender_id)
                 append_message(chat_id, "user", user_text)
-                append_message(chat_id, "assistant", booking_reply)
-                send_text_message(phone_number_id, sender_id, booking_reply)
+                append_message(chat_id, "assistant", reply)
+                logger.info("[LLM2] reply: %s", reply)
+                send_text_message(phone_number_id, sender_id, reply)
                 return
-            logger.info("[BOOKING] Booking branch returned None — falling through to RAG/LLM")
+            elif intent == 'booking_cancel':
+                logger.info("[BOOKING] Cancelling all drafts of the user")
+                cancelled = booking_repo.cancel_user_drafts(sender_id)
+                clear_history(chat_id)
+                send_text_message(phone_number_id, sender_id, _CANCEL_STATUS[cancelled])
+                return
+
+            # (c) Neither handled the message → fall through to RAG/LLM
+            logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
+
+            from integrations.booking import get_free_windows, format_availability_context
+            free = get_free_windows()
+            availability_ctx = format_availability_context(free)
+            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
+            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
         else:
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
@@ -197,30 +260,11 @@ def handle_incoming_message(payload: dict) -> None:
                 return
             logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
-
-        # 2. Retrieve relevant context from knowledge base
-        context = retrieve_context(user_text)
-        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
-
-        # 3a. For Bot 1: inject live availability so the LLM can answer
-        #     "what's free?" questions and decide when to emit [BOOK].
-        if bot_config["name"] == "dopsy_bot":
-            from integrations.booking import get_free_windows, format_availability_context
-            free = get_free_windows()
-            availability_ctx = format_availability_context(free)
-            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
-            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
-
-        else:
             from integrations.trial import get_trial_daytime, format_availability_context
             free = get_trial_daytime(bot_config["name"], None)
             availability_ctx = format_availability_context(free)
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
-
-        # 3b. Get conversation history
-        history = get_history(chat_id)
-        logger.info("[LLM] History length: %d messages", len(history))
 
         # 4. Generate response
         reply, tool_call = get_ai_response(
@@ -264,7 +308,7 @@ def handle_incoming_message(payload: dict) -> None:
         append_message(chat_id, "assistant", reply)
 
         # 7. Send reply
-        send_text_message(phone_number_id,  sender_id, reply)
+        send_text_message(phone_number_id, sender_id, reply)
         logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
@@ -292,15 +336,15 @@ def handle_incoming_message(payload: dict) -> None:
 def _refresh_booking_sheet(booking: dict, state: str) -> None:
     """Push a booking's current state to the flat Bookings sheet (background)."""
     row = {
-        "id":            booking["id"],
-        "field":         booking["field"],
-        "date":          booking["date"],
-        "time_start":    booking["time_start"],
-        "time_end":      booking["time_end"],
+        "id": booking["id"],
+        "field": booking["field"],
+        "date": booking["date"],
+        "time_start": booking["time_start"],
+        "time_end": booking["time_end"],
         "customer_name": booking.get("customer_name", ""),
-        "players":       booking.get("players"),
-        "state":         state,
-        "notes":         "",
+        "players": booking.get("players"),
+        "state": state,
+        "notes": "",
     }
 
     def _run():
