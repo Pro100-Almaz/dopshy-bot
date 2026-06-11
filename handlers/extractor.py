@@ -15,7 +15,7 @@ SYSTEM_PROMPT = """You extract football field booking details from a WhatsApp co
 Return exactly 6 parameters. For ANY parameter that is completely missing, not yet
 mentioned, or ambiguous in the text, you MUST set its value to literal JSON null.
 Never invent, infer, or guess a value to fill a gap — when in doubt, return null.
-Normalize dates to YYYY-MM-DD and times to 24-hour HH:MM."""
+Normalize dates to DD-MM-YYYY and times to 24-hour HH:MM."""
 
 
 def extract_booking_details(chat_history: Union[str, List[Dict[str, str]]]) -> Dict[str, Any]:
