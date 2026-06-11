@@ -58,8 +58,8 @@ def process(
     if intent == "simple_qa" and answer:
         return answer
 
-    # ── create_booking: smart booking flow with partial data ─────────
-    if intent == "create_booking":
+    # ── create_booking / booking_continue: smart booking flow with partial data ─────────
+    if intent in ("create_booking", "booking_continue"):
         return _handle_create_booking(extracted, chat_id, sender_phone, lang)
 
     # ── my_bookings: query DB, generate natural reply ────────────────

@@ -29,6 +29,7 @@ INTENT_TYPES = [
     "my_bookings",            # user wants to view their own existing bookings
     "general_availability",   # asking about schedule / free slots (no booking intent)
     "create_booking",         # wants to create a new booking (0 or more params extracted)
+    "booking_continue",       # supplies missing params to an in-progress booking (params extracted)
     "cancel_booking",         # wants to cancel an existing booking
     "modify_booking",         # wants to change / edit an existing booking
     "unknown",                # cannot determine intent
@@ -81,8 +82,8 @@ _ROUTE_TOOL = {
                     "additionalProperties": False,
                     "description": (
                         "Booking parameters extracted from the user's message. "
-                        "Only populated for create_booking intent — all other "
-                        "intents must have every field set to null."
+                        "Only populated for create_booking and booking_continue "
+                        "intents — all other intents must have every field set to null."
                     ),
                     "properties": {
                         "date": {
@@ -144,8 +145,7 @@ def _build_system_prompt(rag_context: str = "") -> str:
     fields_info = ", ".join(
         f"Поле {f['id']} ({f['format']})" for f in config.BOOKING_FIELDS
     )
-
-    prompt = f"""Ты — маршрутизатор намерений (intent router) для «Допши» (Dopshy) — чат-бота аренды футбольных полей в WhatsApp.
+    prompt = f"""Ты — маршрутизатор намерений (intent router) для «Допшы» (Dopshy) — чат-бот аренды футбольных полей в WhatsApp.
 Пользователи пишут на русском или казахском. Твоя задача:
 1. Классифицировать намерение пользователя.
 2. Для create_booking — дополнительно извлечь все упомянутые параметры брони.
@@ -185,15 +185,19 @@ def _build_system_prompt(rag_context: str = "") -> str:
   Пользователь хочет ИЗМЕНИТЬ или РЕДАКТИРОВАТЬ существующую бронь (перенести дату, сменить поле и т.д.).
   → answer = null; все extracted_data = null.
 
+"booking_continue"
+  Пользователь даёт недостающую информацию по уже начатой брони. Например, ранее он не указал, сколько человек, а сейчас написал количество.
+  → answer = null; извлеки те параметры брони, которые пользователь только что сообщил.
+
 "unknown"
   Невозможно определить намерение.
   → answer = null; все extracted_data = null.
 
-══════ ПРАВИЛА ИЗВЛЕЧЕНИЯ (только для create_booking) ══════
+══════ ПРАВИЛА ИЗВЛЕЧЕНИЯ (только для create_booking и booking_continue) ══════
 
-Для ВСЕХ намерений, КРОМЕ create_booking, каждое поле extracted_data ДОЛЖНО быть null.
+Для ВСЕХ намерений, КРОМЕ create_booking и booking_continue, каждое поле extracted_data ДОЛЖНО быть null.
 
-Внутри create_booking:
+Для create_booking и booking_continue:
 • Любой параметр, который НЕ указан явно → null. НИКОГДА не угадывай и не додумывай.
 • date: приведи к формату DD-MM-YYYY, считая, что сегодня = {today.strftime('%d-%m-%Y')}.
   "завтра" / "tomorrow" → {tomorrow.strftime('%d-%m-%Y')}.
@@ -204,7 +208,9 @@ def _build_system_prompt(rag_context: str = "") -> str:
 • field: ТОЛЬКО "5x5" или "6x6".
   "большое поле" = "6x6". "маленькое" = "5x5". Просто "поле" без размера → null.
 • players: целое число. "нас 10 человек" → 10. "с друзьями" → null (количество неизвестно).
-• name: имя клиента. "меня зовут Алмаз" → "Алмаз". Не указано → null."""
+• name: имя клиента. "меня зовут Алмаз" → "Алмаз". Не указано → null.
+"""
+
 
     if rag_context:
         prompt += f"\n\n══════ БАЗА ЗНАНИЙ ══════\n{rag_context}\n══════"
