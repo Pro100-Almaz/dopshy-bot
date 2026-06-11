@@ -31,7 +31,7 @@ INTENT_TYPES = [
     "create_booking",         # wants to create a new booking (0 or more params extracted)
     "booking_continue",       # supplies missing params to an in-progress booking (params extracted)
     "cancel_booking",         # wants to cancel an existing booking
-    "modify_booking",         # wants to change / edit an existing booking
+    "edit_booking",           # wants to change / edit an existing booking
     "unknown",                # cannot determine intent
 ]
 

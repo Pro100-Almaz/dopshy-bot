@@ -6,7 +6,8 @@ import logging
 import threading
 
 from chat.conversation import append_message, get_history, clear_history
-from chat.llm import get_ai_response
+from chat.llm import get_ai_response, route_incoming_message
+from handlers.extractor import extract_booking_details
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.sheets.booking_sheets import upsert_booking_row
 from rag.retriever import retrieve_context
@@ -17,6 +18,8 @@ from handlers.edit_booking import handle_edit_request as handle_edit_booking_req
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation
 from integrations.repo import booking_repo
+from integrations.repo import postgres as _pg
+from handlers.llm_booking_flow import LlmBookingFlowHandler
 import config
 
 logger = logging.getLogger(__name__)
@@ -164,6 +167,12 @@ def handle_incoming_message(payload: dict) -> None:
             user_text[:80],
         )
 
+        context = retrieve_context(user_text)
+        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
+
+        history = get_history(chat_id)
+        logger.info("[LLM] History length: %d messages", len(history))
+
         # 1. Booking handler (Bot 1 — Dopshy field rental)
         #
         # Two-LLM architecture:
@@ -174,7 +183,6 @@ def handle_incoming_message(payload: dict) -> None:
         if bot_config["name"] == "dopsy_bot":
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
 
-            from integrations.repo import postgres as _pg
             _session = _pg.get_active_session("dopsy_bot", chat_id)
 
             if _session:
@@ -190,32 +198,31 @@ def handle_incoming_message(payload: dict) -> None:
                     append_message(chat_id, "assistant", booking_reply)
                     send_text_message(phone_number_id, sender_id, booking_reply)
                     return
-            else:
-                # (b) No active session → Two-LLM flow
-                from handlers import llm1_router, llm2_processor
 
-                _rag = retrieve_context(user_text)
-                _history = get_history(chat_id)
-
-                llm1_result = llm1_router.route(
-                    user_text, _history, rag_context=_rag,
-                )
-                llm2_reply = llm2_processor.process(
-                    llm1_result, chat_id, sender_id,
-                    phone_number_id, user_text,
-                )
-                if llm2_reply is not None:
-                    logger.info(
-                        "[LLM1→LLM2] type=%s | reply: %.120s",
-                        llm1_result.get("type"), llm2_reply,
-                    )
-                    append_message(chat_id, "user", user_text)
-                    append_message(chat_id, "assistant", llm2_reply)
-                    send_text_message(phone_number_id, sender_id, llm2_reply)
-                    return
+            intent = route_incoming_message(history, user_text)
+            logger.info("[BOOKING] Intent detection replied, Intent is %s", intent)
+            if intent == 'question_price':
+                pass
+                # calculate price method needed
+            elif intent in ['booking_new', 'booking_continue']:
+                extracted_data = extract_booking_details(history, user_text)
+                logger.info("[BOOKING] Data Extracted: %s", extracted_data)
+                handler = LlmBookingFlowHandler()
+                reply = handler.handle(extracted_data, chat_id, user_text, sender_id)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", reply)
+                logger.info("[LLM2] reply: %s", reply)
+                send_text_message(phone_number_id, sender_id, reply)
+                return
 
             # (c) Neither handled the message → fall through to RAG/LLM
             logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
+
+            from integrations.booking import get_free_windows, format_availability_context
+            free = get_free_windows()
+            availability_ctx = format_availability_context(free)
+            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
+            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
         else:
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
@@ -233,30 +240,11 @@ def handle_incoming_message(payload: dict) -> None:
                 return
             logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
-
-        # 2. Retrieve relevant context from knowledge base
-        context = retrieve_context(user_text)
-        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
-
-        # 3a. For Bot 1: inject live availability so the LLM can answer
-        #     "what's free?" questions and decide when to emit [BOOK].
-        if bot_config["name"] == "dopsy_bot":
-            from integrations.booking import get_free_windows, format_availability_context
-            free = get_free_windows()
-            availability_ctx = format_availability_context(free)
-            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
-            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
-
-        else:
             from integrations.trial import get_trial_daytime, format_availability_context
             free = get_trial_daytime(bot_config["name"], None)
             availability_ctx = format_availability_context(free)
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
-
-        # 3b. Get conversation history
-        history = get_history(chat_id)
-        logger.info("[LLM] History length: %d messages", len(history))
 
         # 4. Generate response
         reply, tool_call = get_ai_response(
