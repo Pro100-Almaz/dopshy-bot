@@ -142,3 +142,5 @@ def _handle_availability(user_text: str) -> str:
     free = booking_logic.get_free_windows()
     ctx = booking_logic.format_availability_context(free)
     return get_booking_reply(user_text, ctx)
+
+

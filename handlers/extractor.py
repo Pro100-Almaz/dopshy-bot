@@ -90,3 +90,4 @@ def extract_booking_details(chat_history: Union[str, List[Dict[str, str]]]) -> D
         logging.error(f"extract_booking_details failed: {err}")
         return empty_result
 
+
