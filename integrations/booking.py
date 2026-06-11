@@ -62,7 +62,9 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
 
 def get_all_booked(week_start: date, week_end: date) -> list[dict]:
     """Booked slots from PostgreSQL (the single source of truth) for a date range."""
-    return booking_repo.get_booked_slots(str(week_start), str(week_end))
+    d = booking_repo.get_booked_slots(str(week_start), str(week_end))
+    print(d)
+    return d
 
 
 def is_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:

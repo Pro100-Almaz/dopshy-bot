@@ -1,17 +1,23 @@
 from datetime import datetime
 
+from handlers.payment.pricing_repo import get_total_field_prices
 
-def process_field_prices(all_prices: list):
+
+PRICING_TYPE_RU = {
+    "morning_day": "Утро / день",
+    "evening": "Вечер",
+    "late_night": "Поздний вечер",
+    "after_midnight": "После полуночи",
+    "weekend_holiday": "Выходные / праздники",
+}
+
+def process_field_prices() -> str:
+    all_prices = get_total_field_prices()
     if not all_prices:
         return 'Пока цены не указаны.'
     message = '💰 Наши тарифы:\n\n'
     price_elems = {}
 
-    # building the hashmap with the format dicts that contain the pricing information
-    #{ '5x5' : {
-    #       'morning_day' : 20000,
-    #           }
-    #       }
     for price_elem in all_prices:
         format_name = price_elem['format_name']
         pricing_type = price_elem['pricing_type']
@@ -25,7 +31,7 @@ def process_field_prices(all_prices: list):
         message += f"⚽ Поле {format_name}:\n"
 
         for pricing_type, price in prices.items():
-            message += f"  • {pricing_type}: {price:,} тг/час\n".replace(",", " ")
+            message += f"  • {PRICING_TYPE_RU[pricing_type]}: {price:,} тг/час\n".replace(",", " ")
 
         message += "\n"
 

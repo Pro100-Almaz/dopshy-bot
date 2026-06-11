@@ -84,13 +84,35 @@ EXTRACT_DATA_LLM = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "date": {"type": ["string", "null"], "description": "Format YYYY-MM-DD"},
-                "time_start": {"type": ["string", "null"], "description": "Format HH:MM"},
-                "time_end": {"type": ["string", "null"], "description": "Format HH:MM"},
-                "field": {"type": ["string", "null"], "enum": ["5x5", "6x6", None]},
-                "players": {"type": ["number", "null"],
-                            "description": "The total number of players expected"},
-                "name": {"type": ["string", "null"], "description": "The name of the booker"}
+                "date": {
+                    "type": ["string", "null"],
+                    "description": "Format YYYY-MM-DD"
+                                   "Return null unless the user explicitly states a date."
+                },
+                "time_start": {
+                    "type": ["string", "null"],
+                    "description": "Format HH:MM"
+                                   "Return null unless the user explicitly states a time."
+                },
+                "time_end": {
+                    "type": ["string", "null"],
+                    "description": "Format HH:MM"
+                                    "Return null unless the user explicitly states a time."
+                },
+                "field": {
+                    "type": ["string", "null"],
+                    "enum": ["5x5", "6x6", None]
+                },
+                "players": {
+                    "type": ["number", "null"],
+                    "description": "The total number of players expected. "
+                                   "Return null unless the user explicitly states a number."
+                },
+                "name": {
+                    "type": ["string", "null"],
+                    "description": "The name of the booker"
+                                   "Return null unless the user explicitly states a name."
+                }
             },
             "required": ["date", "time_start", "time_end", "field", "players", "name"]
         }
@@ -117,6 +139,7 @@ SELECT_INTENT_LLM = {
                         # "question_field_size",
                         "booking_new",
                         "booking_continue",
+                        "booking_cancel",
                         "other"
                     ],
                     "description": "The categorized intent of the message."

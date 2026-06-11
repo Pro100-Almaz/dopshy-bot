@@ -1,3 +1,5 @@
+import psycopg2.extras
+
 from integrations.repo.postgres import _conn
 
 def get_total_field_prices() -> list:

@@ -22,6 +22,7 @@ in progress. Classify ONLY the user's most recent message into exactly one inten
 - question_field_size: asking about field specs (5-a-side, 11-a-side, dimensions, surface).
 - booking_new: a fresh, first-time intent to reserve a field (no booking underway yet).
 - booking_continue: supplying details (date, time, name, duration) to an ALREADY ongoing booking.
+- booking_cancel: any cancelling intention, even if cancel was already performed.
 - other: greetings, thanks, small talk, or anything unrelated.
 
 When the prior turns show the bot asking for booking details, treat the user's reply

@@ -30,6 +30,7 @@ import psycopg2.extras
 from openai import OpenAI
 
 import config
+from chat.conversation import clear_history
 from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import postgres
@@ -298,7 +299,7 @@ class LlmBookingFlowHandler:
                     return self._finalize_booking(draft, chat_id, phone)
                 if confirm == "no":
                     logger.info("[LLM_FLOW] NO → cancel id=%d", draft["id"])
-                    return self._cancel_draft(draft)
+                    return self._cancel_draft(draft, chat_id)
                 # Not yes/no — user is changing data; fall through to extraction
 
             # 3. Extract new data, merge into draft, evaluate
@@ -314,7 +315,6 @@ class LlmBookingFlowHandler:
                 )
 
             self._update_draft_in_db(draft["id"], merged)
-
             return self._evaluate_and_respond(merged)
 
         # Create a new draft with whatever data was extracted
@@ -325,6 +325,8 @@ class LlmBookingFlowHandler:
                      "players", "customer_name", "format"):
             if data.get(key) is not None:
                 create_kwargs[key] = data[key]
+
+        # check if available needed
 
         result = postgres.create_draft(
             bot_name=self.BOT_NAME, chat_id=chat_id, **create_kwargs,
@@ -372,6 +374,7 @@ class LlmBookingFlowHandler:
             week_start, week_end = booking_logic.get_week_range()
             booked = booking_logic.get_all_booked(week_start, week_end)
             for f in matching:
+
                 if booking_logic.is_range_free(
                     booked, date_str, ts, te, f["id"],
                 ):
@@ -535,6 +538,7 @@ class LlmBookingFlowHandler:
         name = draft.get("customer_name", "")
 
         logger.info("[LLM_FLOW] Booking id=%d → awaiting_payment", booking_id)
+        clear_history(chat_id)
 
         return (
             f"📋 Бронь зарегистрирована, ожидает оплаты!\n\n"
@@ -557,8 +561,9 @@ class LlmBookingFlowHandler:
             f"⚠️ 1 сағат ішінде төлем болмаса — бронь жойылады."
         )
 
-    def _cancel_draft(self, draft: dict) -> str:
+    def _cancel_draft(self, draft: dict, chat_id: str) -> str:
         """Cancel the draft and return user-facing confirmation."""
+        clear_history(chat_id)
         postgres.cancel_booking_trial(
             self.BOT_NAME, draft["id"],
             actor_type="whatsapp", reason="user_cancel_llm_flow",
@@ -599,6 +604,7 @@ class LlmBookingFlowHandler:
             )
 
         has_time = has_ts and has_te
+        print("HAS", has_date, has_time, has_field, has_players, has_name)
 
         # ── Validate time order ──
         if has_time and data["time_start"] >= data["time_end"]:
