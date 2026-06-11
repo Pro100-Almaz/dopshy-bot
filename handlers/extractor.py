@@ -12,11 +12,11 @@ client = OpenAI(api_key = config.OPENAI_API_KEY)
 # The extractor reads the whole session log and pulls structured booking data.
 # The critical instruction is the null contract: anything not clearly stated must
 # be null (None), never guessed — downstream code relies on null to know what's missing.
-SYSTEM_PROMPT = """You extract football field booking details from a WhatsApp conversation.
-Return exactly 6 parameters. For ANY parameter that is completely missing, not yet
-mentioned, or ambiguous in the text, you MUST set its value to literal JSON null.
-Never invent, infer, or guess a value to fill a gap — when in doubt, return null.
-Normalize dates to YYYY-MM-DD and times to 24-hour HH:MM."""
+SYSTEM_PROMPT = """Ты извлекаешь детали брони футбольного поля из переписки в WhatsApp.
+Верни ровно 6 параметров. Для ЛЮБОГО параметра, который полностью отсутствует, ещё
+не упомянут или неоднозначен в тексте, ты ОБЯЗАН установить значение в литерал JSON null.
+Никогда не выдумывай, не домысливай и не угадывай значение, чтобы заполнить пробел — если сомневаешься, верни null.
+Приводи даты к формату DD-MM-YYYY, а время — к 24-часовому формату HH:MM."""
 
 
 def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Dict[str, Any]:
