@@ -1,4 +1,11 @@
 from datetime import datetime
+PRICING_TYPE_RU = {
+    "morning_day": "Утро / день",
+    "evening": "Вечер",
+    "late_night": "Поздний вечер",
+    "after_midnight": "После полуночи",
+    "weekend_holiday": "Выходные / праздники",
+}
 
 
 def process_field_prices(all_prices: list):
@@ -25,7 +32,7 @@ def process_field_prices(all_prices: list):
         message += f"⚽ Поле {format_name}:\n"
 
         for pricing_type, price in prices.items():
-            message += f"  • {pricing_type}: {price:,} тг/час\n".replace(",", " ")
+            message += f"  • {PRICING_TYPE_RU[pricing_type]}: {price:,} тг/час\n".replace(",", " ")
 
         message += "\n"
 

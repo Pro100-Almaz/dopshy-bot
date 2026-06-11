@@ -686,6 +686,56 @@ class LlmBookingFlowHandler:
     #  Availability Checks  (Rules 1–5 + combinations)
     # ══════════════════════════════════════════════════════════════════════
 
+    def _check_full_slot(self, data: dict) -> str:
+        """
+        Rule 4: date + time + field are all known.
+        Check if this exact slot is free; ask for remaining fields if so.
+        """
+        date_str = data["date"]
+        ts, te = data["time_start"], data["time_end"]
+        field_id = int(data["field"])
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+
+        field_conf = next(
+            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
+        )
+        fmt = data.get("format") or field_conf.get("format", "?")
+
+        if booking_logic.is_range_free(booked, date_str, ts, te, field_id):
+            # Slot is free — ask for what's still missing
+            missing_ru, missing_kk = self._format_missing_fields(data)
+
+            if not missing_ru:
+                # All fields present but routed here anyway — confirm
+                return self._check_and_confirm(data)
+
+            return (
+                f"✅ Поле {field_id} ({fmt}) свободно \n"
+                f"{self._fmt_date(date_str)} с {ts} до {te}!\n\n"
+                f"Осталось указать:\n{missing_ru}\n\n"
+                f"— — —\n\n"
+                f"✅ Алаң {field_id} ({fmt}) бос \n"
+                f"{self._fmt_date(date_str)} {ts}–{te}!\n\n"
+                f"Қалған деректер:\n{missing_kk}"
+            )
+
+        # Slot taken — show what IS available on that date
+        free = booking_logic.get_free_windows()
+        day_windows = [w for w in free if str(w["date"]) == date_str]
+        alt_text = self._format_windows_by_field(day_windows)
+
+        return (
+            f"❌ Поле {field_id} ({fmt}) занято "
+            f"{self._fmt_date(date_str)} с {ts} до {te}.\n\n"
+            f"Доступные варианты на эту дату:\n{alt_text}\n\n"
+            f"— — —\n\n"
+            f"❌ Алаң {field_id} ({fmt}) бос емес "
+            f"{self._fmt_date(date_str)} {ts}–{te}.\n\n"
+            f"Бұл күнге қолжетімді нұсқалар:\n{alt_text}"
+        )
+
     def _check_date_only(self, data: dict) -> str:
         """Rule 1: show all free fields and their time ranges for the given date."""
         date_str = data["date"]
@@ -760,6 +810,53 @@ class LlmBookingFlowHandler:
 
         return "\n".join(lines_ru) + "\n\n— — —\n\n" + "\n".join(lines_kk)
 
+    def _check_date_and_field(self, data: dict) -> str:
+        """Date + field known, time unknown. Show free time ranges."""
+        date_str = data["date"]
+        field_id = int(data["field"])
+        free = booking_logic.get_free_windows()
+
+        windows = [
+            w for w in free
+            if str(w["date"]) == date_str and w["field"] == field_id
+        ]
+
+        field_conf = next(
+            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
+        )
+        fmt = field_conf.get("format", "?")
+
+        if not windows:
+            # Field fully booked on this date — show other fields
+            day_windows = [w for w in free if str(w["date"]) == date_str]
+            alt_text = self._format_windows_by_field(day_windows)
+            return (
+                f"Поле {field_id} ({fmt}) полностью занято "
+                f"{self._fmt_date(date_str)}.\n\n"
+                f"Другие варианты:\n{alt_text}\n\n"
+                f"— — —\n\n"
+                f"Алаң {field_id} ({fmt}) {self._fmt_date(date_str)} "
+                f"толығымен бос емес.\n\n"
+                f"Басқа нұсқалар:\n{alt_text}"
+            )
+
+        times_str = ", ".join(
+            f"{self._fmt_time(w['time_start'])}–{self._fmt_time(w['time_end'])}"
+            for w in sorted(windows, key=lambda w: w["time_start"])
+        )
+        return (
+            f"⚽ Поле {field_id} ({fmt}), "
+            f"{self._fmt_date(date_str)}\n"
+            f"Свободное время: {times_str}\n\n"
+            f"Укажите время (напр. *18:00 - 20:00*).\n\n"
+            f"— — —\n\n"
+            f"⚽ Алаң {field_id} ({fmt}), "
+            f"{self._fmt_date(date_str)}\n"
+            f"Бос уақыт: {times_str}\n\n"
+            f"Уақытты жазыңыз (мыс. *18:00 - 20:00*)."
+        )
+
+
     def _check_field_only(self, data: dict) -> str:
         """Rule 3: show available dates and time ranges for the given field."""
         field_id = int(data["field"])
@@ -789,56 +886,6 @@ class LlmBookingFlowHandler:
             f"⚽ Алаң {field_id} ({fmt}) — бос слоттар:\n\n"
             f"{windows_text}\n\n"
             f"Күн мен уақытты жазыңыз."
-        )
-
-    def _check_full_slot(self, data: dict) -> str:
-        """
-        Rule 4: date + time + field are all known.
-        Check if this exact slot is free; ask for remaining fields if so.
-        """
-        date_str = data["date"]
-        ts, te = data["time_start"], data["time_end"]
-        field_id = int(data["field"])
-
-        week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
-
-        field_conf = next(
-            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
-        )
-        fmt = data.get("format") or field_conf.get("format", "?")
-
-        if booking_logic.is_range_free(booked, date_str, ts, te, field_id):
-            # Slot is free — ask for what's still missing
-            missing_ru, missing_kk = self._format_missing_fields(data)
-
-            if not missing_ru:
-                # All fields present but routed here anyway — confirm
-                return self._check_and_confirm(data)
-
-            return (
-                f"✅ Поле {field_id} ({fmt}) свободно "
-                f"{self._fmt_date(date_str)} с {ts} до {te}!\n\n"
-                f"Осталось указать:\n{missing_ru}\n\n"
-                f"— — —\n\n"
-                f"✅ Алаң {field_id} ({fmt}) бос "
-                f"{self._fmt_date(date_str)} {ts}–{te}!\n\n"
-                f"Қалған деректер:\n{missing_kk}"
-            )
-
-        # Slot taken — show what IS available on that date
-        free = booking_logic.get_free_windows()
-        day_windows = [w for w in free if str(w["date"]) == date_str]
-        alt_text = self._format_windows_by_field(day_windows)
-
-        return (
-            f"❌ Поле {field_id} ({fmt}) занято "
-            f"{self._fmt_date(date_str)} с {ts} до {te}.\n\n"
-            f"Доступные варианты на эту дату:\n{alt_text}\n\n"
-            f"— — —\n\n"
-            f"❌ Алаң {field_id} ({fmt}) бос емес "
-            f"{self._fmt_date(date_str)} {ts}–{te}.\n\n"
-            f"Бұл күнге қолжетімді нұсқалар:\n{alt_text}"
         )
 
     def _check_date_and_time(self, data: dict) -> str:
@@ -916,51 +963,7 @@ class LlmBookingFlowHandler:
             f"Алаң нөмірін жазыңыз."
         )
 
-    def _check_date_and_field(self, data: dict) -> str:
-        """Date + field known, time unknown. Show free time ranges."""
-        date_str = data["date"]
-        field_id = int(data["field"])
-        free = booking_logic.get_free_windows()
 
-        windows = [
-            w for w in free
-            if str(w["date"]) == date_str and w["field"] == field_id
-        ]
-
-        field_conf = next(
-            (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
-        )
-        fmt = field_conf.get("format", "?")
-
-        if not windows:
-            # Field fully booked on this date — show other fields
-            day_windows = [w for w in free if str(w["date"]) == date_str]
-            alt_text = self._format_windows_by_field(day_windows)
-            return (
-                f"Поле {field_id} ({fmt}) полностью занято "
-                f"{self._fmt_date(date_str)}.\n\n"
-                f"Другие варианты:\n{alt_text}\n\n"
-                f"— — —\n\n"
-                f"Алаң {field_id} ({fmt}) {self._fmt_date(date_str)} "
-                f"толығымен бос емес.\n\n"
-                f"Басқа нұсқалар:\n{alt_text}"
-            )
-
-        times_str = ", ".join(
-            f"{self._fmt_time(w['time_start'])}–{self._fmt_time(w['time_end'])}"
-            for w in sorted(windows, key=lambda w: w["time_start"])
-        )
-        return (
-            f"⚽ Поле {field_id} ({fmt}), "
-            f"{self._fmt_date(date_str)}\n"
-            f"Свободное время: {times_str}\n\n"
-            f"Укажите время (напр. *18:00 - 20:00*).\n\n"
-            f"— — —\n\n"
-            f"⚽ Алаң {field_id} ({fmt}), "
-            f"{self._fmt_date(date_str)}\n"
-            f"Бос уақыт: {times_str}\n\n"
-            f"Уақытты жазыңыз (мыс. *18:00 - 20:00*)."
-        )
 
     def _check_and_confirm(self, data: dict) -> str:
         """
