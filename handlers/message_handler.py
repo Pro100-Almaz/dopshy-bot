@@ -8,6 +8,7 @@ import threading
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
 from handlers.extractor import extract_booking_details
+from handlers.payment.pricing import process_field_prices
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.sheets.booking_sheets import upsert_booking_row
 from rag.retriever import retrieve_context
@@ -17,7 +18,7 @@ from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation
-from integrations.repo import booking_repo
+from integrations.repo import booking_repo, postgres
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
 import config
@@ -68,10 +69,23 @@ _PAYMENT_REJECT_FOOTER_KK = (
     "Қажет болса — әкімшімен хабарласыңыз."
 )
 
+_CANCEL_STATUS = (
+
+        "По вашему номеру не найдено записей."
+        "\n\n–––\n\n"
+        "Сіздің нөміріңізге белсенді жазба табылмады.",
+
+        "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂"
+        "\n\n–––\n\n"
+        "Брондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"
+
+)
+
 builder = BasePromptBuilder({}, "", (), ())
 
+
 def _format_payment_reject_message(
-    code: str, parsed: dict, booking: dict
+        code: str, parsed: dict, booking: dict
 ) -> str:
     """Build the bilingual user message for a rejected payment receipt."""
     ru, kk = _PAYMENT_REJECT_MESSAGES.get(code, _PAYMENT_REJECT_MESSAGES["unreadable"])
@@ -202,7 +216,7 @@ def handle_incoming_message(payload: dict) -> None:
             intent = route_incoming_message(history, user_text)
             logger.info("[BOOKING] Intent detection replied, Intent is %s", intent)
             if intent == 'question_price':
-                pass
+                send_text_message(phone_number_id, sender_id, process_field_prices())
                 # calculate price method needed
             elif intent in ['booking_new', 'booking_continue']:
                 extracted_data = extract_booking_details(history, user_text)
@@ -213,6 +227,12 @@ def handle_incoming_message(payload: dict) -> None:
                 append_message(chat_id, "assistant", reply)
                 logger.info("[LLM2] reply: %s", reply)
                 send_text_message(phone_number_id, sender_id, reply)
+                return
+            elif intent == 'booking_cancel':
+                logger.info("[BOOKING] Cancelling all drafts of the user")
+                cancelled = booking_repo.cancel_user_drafts(sender_id)
+                clear_history(chat_id)
+                send_text_message(phone_number_id, sender_id, _CANCEL_STATUS[cancelled])
                 return
 
             # (c) Neither handled the message → fall through to RAG/LLM
@@ -288,7 +308,7 @@ def handle_incoming_message(payload: dict) -> None:
         append_message(chat_id, "assistant", reply)
 
         # 7. Send reply
-        send_text_message(phone_number_id,  sender_id, reply)
+        send_text_message(phone_number_id, sender_id, reply)
         logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
@@ -316,15 +336,15 @@ def handle_incoming_message(payload: dict) -> None:
 def _refresh_booking_sheet(booking: dict, state: str) -> None:
     """Push a booking's current state to the flat Bookings sheet (background)."""
     row = {
-        "id":            booking["id"],
-        "field":         booking["field"],
-        "date":          booking["date"],
-        "time_start":    booking["time_start"],
-        "time_end":      booking["time_end"],
+        "id": booking["id"],
+        "field": booking["field"],
+        "date": booking["date"],
+        "time_start": booking["time_start"],
+        "time_end": booking["time_end"],
         "customer_name": booking.get("customer_name", ""),
-        "players":       booking.get("players"),
-        "state":         state,
-        "notes":         "",
+        "players": booking.get("players"),
+        "state": state,
+        "notes": "",
     }
 
     def _run():

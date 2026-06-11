@@ -5,6 +5,7 @@ from typing import Union, List, Dict, Any
 from openai import OpenAI
 import config
 from chat.tools.arena_tools import EXTRACT_DATA_LLM
+from utils import today_almaty
 
 # Initialize the OpenAI client. It automatically picks up the OPENAI_API_KEY environment variable.
 client = OpenAI(api_key = config.OPENAI_API_KEY)
@@ -12,11 +13,20 @@ client = OpenAI(api_key = config.OPENAI_API_KEY)
 # The extractor reads the whole session log and pulls structured booking data.
 # The critical instruction is the null contract: anything not clearly stated must
 # be null (None), never guessed — downstream code relies on null to know what's missing.
-SYSTEM_PROMPT = """Ты извлекаешь детали брони футбольного поля из переписки в WhatsApp.
-Верни ровно 6 параметров. Для ЛЮБОГО параметра, который полностью отсутствует, ещё
-не упомянут или неоднозначен в тексте, ты ОБЯЗАН установить значение в литерал JSON null.
-Никогда не выдумывай, не домысливай и не угадывай значение, чтобы заполнить пробел — если сомневаешься, верни null.
-Приводи даты к формату DD-MM-YYYY, а время — к 24-часовому формату HH:MM."""
+
+today = today_almaty()
+
+SYSTEM_PROMPT = f"""Твоя задача — извлечение, а не вывод информации.
+Запрещено:
+- делать предположения;
+- использовать типичные значения;
+- выводить данные из контекста футбола;
+- выводить данные из предыдущих бронирований;
+- вычислять отсутствующие значения.
+Поле может быть заполнено ТОЛЬКО если оно явно присутствует в сообщениях пользователя.
+Если значение не указано буквально или однозначно не следует из текста, верни null.
+Приводи даты, если существуют, к формату YYYY-MM-DD, считая что сегодня {today.strftime('%Y-%m-%d')}.
+А время, если существуют — к 24-часовому формату HH:MM."""
 
 
 def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Dict[str, Any]:

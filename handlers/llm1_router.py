@@ -199,8 +199,8 @@ def _build_system_prompt(rag_context: str = "") -> str:
 
 Для create_booking и booking_continue:
 • Любой параметр, который НЕ указан явно → null. НИКОГДА не угадывай и не додумывай.
-• date: приведи к формату DD-MM-YYYY, считая, что сегодня = {today.strftime('%d-%m-%Y')}.
-  "завтра" / "tomorrow" → {tomorrow.strftime('%d-%m-%Y')}.
+• date: приведи к формату YYYY-MM-DD, считая, что сегодня = {today.strftime('%Y-%m-%d')}.
+  "завтра" / "tomorrow" → {tomorrow.strftime('%Y-%m-%d')}.
   Названия дней недели → БЛИЖАЙШАЯ дата начиная с сегодня.
 • time_start / time_end: 24-часовой формат HH:MM.
   "вечером" / "evening" слишком расплывчато → null.
