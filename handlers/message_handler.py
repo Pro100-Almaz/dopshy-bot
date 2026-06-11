@@ -17,6 +17,8 @@ from handlers.edit_booking import handle_edit_request as handle_edit_booking_req
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation
 from integrations.repo import booking_repo
+from integrations.repo import postgres as _pg
+from handlers import llm1_router, llm2_processor
 import config
 
 logger = logging.getLogger(__name__)
@@ -174,7 +176,35 @@ def handle_incoming_message(payload: dict) -> None:
         if bot_config["name"] == "dopsy_bot":
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
 
-            from integrations.repo import postgres as _pg
+            # check LLM1 for intent + extract data
+            _rag = retrieve_context(user_text)
+            _history = get_history(chat_id)
+
+            llm1_result = llm1_router.route(
+                user_text, _history, rag_context=_rag,
+            )
+            llm2_reply = llm2_processor.process(
+                llm1_result, chat_id, sender_id,
+                phone_number_id, user_text,
+            )
+            if llm2_reply is not None:
+                logger.info(
+                    "[LLM1→LLM2] type=%s | reply: %.120s",
+                    llm1_result.get("type"), llm2_reply,
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", llm2_reply)
+                send_text_message(phone_number_id, sender_id, llm2_reply)
+                return
+                # if intent is new or cont. booking then proceed
+
+                # if intent is FAQ, compute and send response
+
+            # if not handle_step
+
+            # if not AI for general_purpose
+
+
             _session = _pg.get_active_session("dopsy_bot", chat_id)
 
             if _session:
@@ -191,28 +221,8 @@ def handle_incoming_message(payload: dict) -> None:
                     send_text_message(phone_number_id, sender_id, booking_reply)
                     return
             else:
-                # (b) No active session → Two-LLM flow
-                from handlers import llm1_router, llm2_processor
 
-                _rag = retrieve_context(user_text)
-                _history = get_history(chat_id)
-
-                llm1_result = llm1_router.route(
-                    user_text, _history, rag_context=_rag,
-                )
-                llm2_reply = llm2_processor.process(
-                    llm1_result, chat_id, sender_id,
-                    phone_number_id, user_text,
-                )
-                if llm2_reply is not None:
-                    logger.info(
-                        "[LLM1→LLM2] type=%s | reply: %.120s",
-                        llm1_result.get("type"), llm2_reply,
-                    )
-                    append_message(chat_id, "user", user_text)
-                    append_message(chat_id, "assistant", llm2_reply)
-                    send_text_message(phone_number_id, sender_id, llm2_reply)
-                    return
+                pass
 
             # (c) Neither handled the message → fall through to RAG/LLM
             logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")

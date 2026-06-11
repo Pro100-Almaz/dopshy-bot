@@ -184,3 +184,10 @@ Draft booking creation or update when enough useful data is available.
 Availability-checking logic for all six required cases.
 User-facing responses that never ask again for information the user already provided.
 The main goal is to make the chatbot more context-aware and reduce unnecessary hardcoded flow behavior while still keeping the booking process reliable and structured.
+
+
+Following files are allowed to be modified: message_handler.py, llm1_router.py, llm2_processor.py, llm_booking_flow.py
+llm1_router.py sends prompt to AI and return answer as json with user data if given.
+The possible data user can give is [date, time_start, time_end, field, players, and name].
+If user's intent is to create new booking, then you should send those data to llm_booking_flow.py and process them.
+If user's intention
