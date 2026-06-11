@@ -14,15 +14,19 @@ repo emits it):
 import logging
 import threading
 import time
-import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import booking_service, postgres, sheets
-from integrations.sheets import refresh_week_sheet, _single_table_write, _single_table_erase
+from integrations import booking_service
+from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
+    create_or_update_group, on_manual_group_edit
+from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
+    upsert_booking_row
+from integrations.repo import booking_repo as repo, postgres
+from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,7 @@ def list_bookings():
     today = date.today()
     start = request.args.get("from", str(today))
     end = request.args.get("to", str(today + timedelta(days=30)))
-    rows = postgres.get_bookings_in_range(
+    rows = repo.get_bookings_in_range(
         start, end, states=("draft", "awaiting_payment", "confirmed")
     )
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
@@ -90,7 +94,7 @@ def list_bookings():
 
 @manager_api.get("/api/manager/bookings/<int:booking_id>")
 def get_booking(booking_id: int):
-    row = postgres.get_booking(booking_id)
+    row = repo.get_booking(booking_id)
     if not row:
         return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Бронь не найдена."}), 404
     return jsonify({"ok": True, "data": _serialize(row)}), 200
@@ -122,9 +126,9 @@ def create_booking():
     )
 
     if res["ok"] and res.get("data", {}).get("booking_id"):
-        booking_row = postgres.get_booking(res["data"]["booking_id"])
+        booking_row = repo.get_booking(res["data"]["booking_id"])
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
 
         _single_table_write(booking_row)
 
@@ -146,9 +150,9 @@ def patch_booking(booking_id: int):
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
     if res["ok"]:
-        booking_row = postgres.get_booking(booking_id)
+        booking_row = repo.get_booking(booking_id)
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
 
         _single_table_write(booking_row)
 
@@ -156,14 +160,14 @@ def patch_booking(booking_id: int):
 
 
 @manager_api.delete("/api/manager/bookings/<int:booking_id>")
-def delete_booking(booking_id: int):
-    res = booking_service.cancel_booking(
-        booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
+def delete_booking(object_id: int):
+    res = postgres.cancel_booking_trial(bot_name="dopsy_bot",
+        object_id=object_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
-        booking_row = postgres.get_booking(booking_id)
+        booking_row = repo.get_booking(object_id)
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
         _single_table_erase(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 404)
@@ -174,9 +178,9 @@ def delete_repetitive_booking(booking_id: int):
         booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
-        booking_row = postgres.get_booking(booking_id)
+        booking_row = repo.get_booking(booking_id)
         if booking_row:
-            sheets.upsert_booking_row(booking_row)
+            upsert_booking_row(booking_row)
 
     refresh_week_sheet()
     return jsonify(res), (200 if res["ok"] else 404)
@@ -185,3 +189,98 @@ def delete_repetitive_booking(booking_id: int):
 def daily_refresh():
     refresh_week_sheet()
     return jsonify({"ok": True}), 200
+
+# --------------GROUPS
+
+@manager_api.post("/api/manager/academy_groups/refresh_all")
+def refresh_academy_groups():
+    refresh_all_groups()
+    return jsonify({"ok": True}), 200
+
+
+@manager_api.post("/api/manager/academy_groups")
+def create_academy_group_with_time():
+    # make current capacity 0 by default
+    # this function should receive the payload --> create a grouping and schedule row. Schedule should reveive
+    # this group's id as a Foreign Key
+
+    body = request.get_json(silent=True) or {}
+    required = ("group_type", "group_name",  "time_start", "time_end", "training_day", "max_cap")
+
+    if not all(body.get(k) for k in required):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "group_type, group_name, max_cap, training_day, time_start, time_end are required."}), 400
+
+    training_day = int(body["training_day"])
+    time_start = body["time_start"]
+    time_end = body["time_end"]
+
+    group_id = create_or_update_group(
+        group_name = body['group_name'],
+        group_type = body['group_type'],
+        max_cap = body['max_cap'],
+        is_active = body.get('is_active', True)
+    )
+
+    if not group_id:
+        return jsonify({
+            "ok" : False,
+            'code': 'CREATE_FAILED',
+            'message': "Could not create group."
+        }), 409
+
+    scheduled_time_id = setting_training_time(group_id, training_day, time_start, time_end)
+
+    group_row = get_group_by_id(group_id)
+    if group_row:
+        group_row['training_day'] = training_day
+        group_row['time_start'] = time_start
+        group_row['time_end'] = time_end
+
+    refresh_all_groups()
+
+    return jsonify({
+        'ok' : True,
+        'data' : {
+            'group_id' : group_id,
+            "schedule_id": scheduled_time_id
+        }
+    }), 201
+
+
+@manager_api.patch("/api/manager/academy_groups/<int:group_id>")
+def edit_academy_group(group_id: int):
+    body = request.get_json(silent=True) or {}
+
+    max_cap = body.get("max_cap")
+    group_name = body.get("group_name")
+
+    if max_cap is not None:
+        max_cap = int(max_cap)
+
+    res = on_manual_group_edit(
+        group_id=group_id,
+        group_name=str(group_name),
+        max_cap=max_cap
+    )
+
+    if res["ok"]:
+        refresh_all_groups()
+    return jsonify(res), 200 if res["ok"] else 404
+
+
+@manager_api.post("/api/manager/academy_groups/<int:group_id>")
+def delete_academy_group(group_id: int):
+    res = deactivate_group_repo(group_id)
+    if res["ok"]:
+        refresh_all_groups()
+
+    return jsonify(res), (200 if res["ok"] else 404)
+
+# ------------TRIALS
+
+@manager_api.get("/api/manager/academy_trials/refresh_all_trials")
+def refresh_academy_trials():
+    refresh_all_trials()
+    return jsonify({"ok": True}), 200
+

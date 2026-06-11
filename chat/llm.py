@@ -1,94 +1,24 @@
 """OpenAI GPT-4o-mini integration."""
+import config
 import json
 import logging
 
 from openai import OpenAI
-import config
+
+from chat.conversation import Message
+from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL
+from chat.tools.academy_tools import START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL
 
 logger = logging.getLogger(__name__)
 
 _client = OpenAI(api_key=config.OPENAI_API_KEY)
-
-# Tool definition for Bot 1: LLM calls this instead of emitting a text tag
-_START_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "start_booking",
-        "description": (
-            "Запустить пошаговый процесс бронирования футбольного поля. "
-            "ВЫЗЫВАЙ эту функцию при ЛЮБОМ намёке на желание забронировать, арендовать, "
-            "снять поле, занять время или просто прийти поиграть — даже если пользователь "
-            "ещё не уверен, не назвал дату/время или прислал только часть деталей. "
-            "Лучше вызвать функцию лишний раз, чем пропустить намерение: пошаговый процесс "
-            "сам спросит всё необходимое и сам сообщит, если бронировать сейчас нельзя. "
-            "Не пытайся собрать дату/время/состав в свободном тексте до вызова функции. "
-            "НЕ вызывай эту функцию, если пользователь хочет ИЗМЕНИТЬ уже существующую бронь — "
-            "для этого есть edit_booking."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-}
-
-# Tool definition for Bot 1: LLM extracts the diff for editing an existing
-# booking. The backend (booking_service.client_edit_booking) is the only place
-# that enforces the 48h window + once-only + slot-clash rules — this tool's
-# job is purely extraction, not policy.
-_EDIT_BOOKING_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "edit_booking",
-        "description": (
-            "Изменить детали уже существующей подтверждённой или ожидающей оплаты брони. "
-            "ВЫЗЫВАЙ эту функцию, когда пользователь хочет ПЕРЕНЕСТИ время/дату, СМЕНИТЬ "
-            "поле, изменить число игроков или своё имя в активной брони "
-            "(например: «перенесите на пятницу в 18:00», «давайте на другое поле», "
-            "«нас будет 10», «измените имя на Алмат»). "
-            "Заполняй ТОЛЬКО те параметры, которые пользователь действительно изменил — "
-            "остальные оставь пустыми, бэкенд возьмёт значения из текущей брони. "
-            "Если деталей нет вообще (например, «перенесите мою бронь» без новой даты), "
-            "всё равно вызывай функцию с пустыми параметрами — бот сам спросит детали. "
-            "Не пытайся сам проверить, можно ли редактировать (правило 48 часов и т.п.) — "
-            "это сделает бэкенд и вернёт понятную ошибку."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {
-                    "type": "string",
-                    "description": "Новая дата в формате YYYY-MM-DD. Опускай, если дата не меняется.",
-                },
-                "time_start": {
-                    "type": "string",
-                    "description": "Новое время начала в формате HH:MM (24h). Опускай, если время не меняется.",
-                },
-                "time_end": {
-                    "type": "string",
-                    "description": "Новое время окончания в формате HH:MM (24h). Опускай, если время не меняется.",
-                },
-                "field": {
-                    "type": "integer",
-                    "description": "Новый номер поля (1, 2, …). Опускай, если поле не меняется.",
-                },
-                "players": {
-                    "type": "integer",
-                    "description": "Новое количество игроков. Опускай, если число игроков не меняется.",
-                },
-                "customer_name": {
-                    "type": "string",
-                    "description": "Новое имя клиента. Опускай, если имя не меняется.",
-                },
-            },
-            "required": [],
-        },
-    },
-}
 
 
 def get_ai_response(
     phone_number_id: str,
     chat_id: str,
     user_message: str,
-    history: list[dict],
+    history: list[Message],
     context: str,
 ) -> tuple[str, dict | None]:
     """
@@ -126,7 +56,10 @@ def get_ai_response(
         max_tokens=512,
     )
     if is_dopsy:
-        kwargs["tools"] = [_START_BOOKING_TOOL, _EDIT_BOOKING_TOOL]
+        kwargs["tools"] = [START_BOOKING_TOOL, EDIT_BOOKING_TOOL]
+        kwargs["tool_choice"] = "auto"
+    else:
+        kwargs["tools"] = [START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL]
         kwargs["tool_choice"] = "auto"
 
     response = _client.chat.completions.create(**kwargs)
@@ -136,19 +69,18 @@ def get_ai_response(
     if msg.tool_calls:
         for tc in msg.tool_calls:
             name = tc.function.name
-            if name not in ("start_booking", "edit_booking"):
-                continue
-            args: dict = {}
-            if name == "edit_booking":
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "[LLM] edit_booking returned unparseable arguments: %r",
-                        tc.function.arguments,
-                    )
-                    args = {}
-            return preamble, {"name": name, "args": args}
+            if name in ("start_booking", "edit_booking", "start_trial", "edit_trial", "cancel_trial"):
+                args: dict = {}
+                if name in ("edit_booking", "edit_trial"):
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "[LLM] edit_booking returned unparseable arguments: %r",
+                            tc.function.arguments,
+                        )
+                        args = {}
+                return preamble, {"name": name, "args": args}
 
     return preamble, None
 
@@ -182,3 +114,76 @@ def get_booking_reply(
         max_tokens=400,
     )
     return response.choices[0].message.content.strip()
+
+
+import os
+import json
+import logging
+from typing import Union, List, Dict
+from openai import OpenAI
+
+from chat.tools.arena_tools import SELECT_INTENT_LLM
+
+# Initialize the OpenAI client. It automatically picks up the OPENAI_API_KEY environment variable.
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# System prompt: the classifier must reason over the WHOLE history, not just the
+# last line, so it can resolve pronouns ("book it", "that one") and detect whether
+# the user is starting a booking vs. answering questions in an ongoing one.
+SYSTEM_PROMPT = """You are an intent classifier for a WhatsApp football field rental bot.
+Read the ENTIRE chat history as context — earlier turns disambiguate pronouns
+("it", "that slot", "the same one") and reveal whether a booking flow is already
+in progress. Classify ONLY the user's most recent message into exactly one intent:
+
+- question_price: asking about cost, rates, or fees.
+- question_slots: asking what times/dates are free or available.
+- question_field_size: asking about field specs (5-a-side, 11-a-side, dimensions, surface).
+- booking_new: a fresh, first-time intent to reserve a field (no booking underway yet).
+- booking_continue: supplying details (date, time, name, duration) to an ALREADY ongoing booking.
+- booking_cancel: any cancelling intention, even if cancel was already performed.
+- other: greetings, thanks, small talk, or anything unrelated.
+
+When the prior turns show the bot asking for booking details, treat the user's reply
+as booking_continue, not booking_new."""
+
+
+def route_incoming_message(history: list, user_message: str) -> str:
+    """Classify the intent of the latest user message given full conversation context.
+
+    Args:
+        chat_history: Prior turns as either an array of dicts (preferred) or a single string.
+
+    Returns:
+        One of the strict enum intents; "other" on any failure.
+    """
+    # Accept either a structured message array or a raw string; normalize to messages
+    # so role structure (and therefore flow context) is preserved for the model.
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0,  # deterministic classification
+            messages=messages,
+            tools=[SELECT_INTENT_LLM],
+            tool_choice={"type": "function", "function": {"name": "route_message"}}
+        )
+
+        # Safely reach into the tool call; any missing link defaults to "other".
+        tool_calls = response.choices[0].message.tool_calls
+        if not tool_calls:
+            return "other"
+
+        raw_args = tool_calls[0].function.arguments
+        if not raw_args:
+            return "other"
+
+        data = json.loads(raw_args)
+        return data.get("type", "other")
+
+    except Exception as err:
+        # Network errors, schema rejections, or malformed JSON all fall back gracefully.
+        logging.error(f"route_incoming_message failed: {err}")
+        return "other"

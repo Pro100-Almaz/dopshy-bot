@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 import config
-from integrations import postgres
+from integrations.repo import booking_repo
 from utils import now_almaty, today_almaty
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,9 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
 
 def get_all_booked(week_start: date, week_end: date) -> list[dict]:
     """Booked slots from PostgreSQL (the single source of truth) for a date range."""
-    return postgres.get_booked_slots(str(week_start), str(week_end))
+    d = booking_repo.get_booked_slots(str(week_start), str(week_end))
+    print(d)
+    return d
 
 
 def is_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:

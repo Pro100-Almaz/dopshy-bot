@@ -26,7 +26,7 @@ def _migrated_schema():
 
 @pytest.fixture(autouse=True)
 def clean_db(_migrated_schema):
-    from integrations.postgres import _conn
+    from integrations.repo.postgres import _conn
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(

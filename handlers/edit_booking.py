@@ -12,7 +12,9 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from integrations import booking_service, postgres, sheets
+from integrations import booking_service
+from integrations.repo import booking_repo
+from integrations.sheets import booking_sheets as sheets
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +157,7 @@ def _pick_target(bookings: list[dict]) -> dict | None:
 
 def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
     """Push both the cancelled old row and the new row to Google Sheets."""
-    old_row = postgres.get_booking(old_booking_id) or {}
+    old_row = booking_repo.get_booking(old_booking_id) or {}
     rows = [
         {
             "id":            old_booking_id,
@@ -202,7 +204,7 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict) -> str:
     diff = {k: v for k, v in (diff or {}).items() if v not in (None, "")}
     logger.info("[EDIT] chat_id=%s phone=%s diff=%s", chat_id, sender_phone, diff)
 
-    bookings = postgres.get_user_editable_bookings(sender_phone)
+    bookings = booking_repo.get_user_editable_bookings(sender_phone)
     target = _pick_target(bookings)
     if target is None:
         logger.info("[EDIT] No editable booking for %s — rejecting", sender_phone)

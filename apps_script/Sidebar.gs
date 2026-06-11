@@ -36,6 +36,8 @@ function submitNewBooking(form) {
     var res = apiCreateBooking(payload);
     if (!res.ok) return { ok: false, message: res.message || 'Ошибка' };
 
+
+
     var bookingId = res.data.booking_id;
     var sheet = _bookingsSheet();
     sheet.appendRow([
@@ -43,7 +45,9 @@ function submitNewBooking(form) {
       payload.customer, payload.notes, (res.data.status || 'CONFIRMED'),
       Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm')
     ]);
+
     refreshFromServer();
+
     return { ok: true, message: 'Бронь создана (#' + bookingId + ')' };
   } catch (err) {
     return { ok: false, message: err.message };

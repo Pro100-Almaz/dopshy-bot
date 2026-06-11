@@ -15,7 +15,8 @@ from flask import Flask, request, jsonify, abort
 
 import config
 from handlers.message_handler import handle_incoming_message
-from integrations.sheets import refresh_week_sheet
+from integrations.repo import postgres
+from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +46,7 @@ def _scheduled_sheet_refresh():
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
-        from integrations.sheets import refresh_all_bookings
+        from integrations.sheets.booking_sheets import refresh_all_bookings
         refresh_all_bookings()
         logger.info("Scheduled sheet refresh complete.")
     except Exception as exc:
@@ -57,18 +58,19 @@ def _cancel_expired_bookings():
     if not config.POSTGRES_DSN:
         return
     try:
-        from integrations.postgres import get_expired_bookings
-        from integrations import booking_service, sheets
+        from integrations.repo import booking_repo
+        from integrations import booking_service
+        from integrations.sheets import booking_sheets as sheets
         from handlers.whatsapp_client import send_text_message
 
-        expired = get_expired_bookings(config.BOOKING_SESSION_TTL)
+        expired = booking_repo.get_expired_bookings(config.BOOKING_SESSION_TTL)
         if not expired:
             return
 
         # Cancel each through the service layer so every transition is audited.
         for b in expired:
-            booking_service.cancel_booking(
-                b["id"], actor_type="system", reason="ttl_expired"
+            postgres.cancel_booking_trial(
+                config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name'], b["id"], actor_type="system", reason="ttl_expired"
             )
 
         # Only awaiting_payment expiries are user-facing (drafts never reserved a slot).
@@ -210,9 +212,8 @@ def admin_setup_sheet():
     if auth != config.WHATSAPP_VERIFY_TOKEN:
         abort(403)
 
-    from integrations.sheets import setup_sheet_template, refresh_all_bookings
+    from integrations.sheets.booking_sheets import refresh_all_bookings
     try:
-        setup_sheet_template()
         refresh_all_bookings()
         refresh_week_sheet()
         return jsonify({"status": "ok"}), 200

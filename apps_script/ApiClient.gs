@@ -40,8 +40,12 @@ function _request(method, path, body) {
 
 function apiCreateBooking(payload) { return _request('post',   '/api/manager/bookings', payload); }
 function apiCancelBooking(id)      { return _request('delete', '/api/manager/bookings/' + id); }
-function apiCancelRepetitiveBooking(id)      { return _request('delete', '/api/manager/bookings/all/' + id); }
-function apiChangeStatusBooking(id, patch)      { return _request('patch', '/api/manager/bookings/status/' + id, patch); }
+function apiCancelRepetitiveBooking(id)      { return _request('delete',   '/api/manager/bookings/all/' + id); }
+function apiChangeStatusBooking(id, patch)      { return _request('patch', '/api/manager/bookings/status/' + id, patch);}
 function apiPatch(id, patch)       { return _request('patch',  '/api/manager/bookings/' + id, patch); }
-function apiListBookings(from, to) { return _request('get', '/api/manager/bookings?from=' + from + '&to=' + to);}
+function apiListBookings(from, to) { return _request('get',    '/api/manager/bookings?from=' + from + '&to=' + to);}
 function apiDailyRefresh() {return _request('post', '/api/manager/bookings/daily_refresh');}
+function apiCreateGrouping(payload)  {return _request('post',    '/api/manager/academy_groups', payload);}
+function apiPatchGrouping(id, patch) {return _request('patch',   '/api/manager/academy_groups/' + id, patch);}
+function apiDeactivateGrouping(id)   {return _request('post',  '/api/manager/academy_groups/' + id);}
+function apiRefreshGroupTables()     {return _request('post',    '/api/manager/academy_groups/refresh_all');}

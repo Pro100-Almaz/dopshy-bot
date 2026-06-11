@@ -1,54 +1,10 @@
-"""PostgreSQL integration — connection pool, schema init, booking CRUD."""
-
-import json
-import logging
-import threading
-from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
-import config
+from integrations.repo.postgres import _conn
 
-logger = logging.getLogger(__name__)
-
-_pool: psycopg2.pool.ThreadedConnectionPool | None = None
-_pool_lock = threading.Lock()
-
-
-def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
-    global _pool
-    if _pool is None:
-        with _pool_lock:
-            if _pool is None:
-                _pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1, maxconn=config.POSTGRES_MAX_CONN, dsn=config.POSTGRES_DSN
-                )
-    return _pool
-
-
-@contextmanager
-def _conn():
-    pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
-
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Bookings
-# ---------------------------------------------------------------------------
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
     """Return slot-holding bookings (awaiting_payment + confirmed) in a date range."""
@@ -63,6 +19,7 @@ def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
                 ORDER BY date, time_start, field
             """, (week_start, week_end))
             return [dict(r) for r in cur.fetchall()]
+
 
 
 def get_user_upcoming_bookings(phone: str) -> list[dict]:
@@ -161,15 +118,6 @@ def get_booking(booking_id: int) -> dict | None:
             return dict(row) if row else None
 
 
-def get_payment_recipients() -> list[dict]:
-    """Active acceptable payment recipients (for receipt validation)."""
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                "SELECT bank, bin, name, phone FROM payment_recipients WHERE active = TRUE"
-            )
-            return [dict(r) for r in cur.fetchall()]
-
 
 def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
     """
@@ -190,45 +138,16 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
-# ---------------------------------------------------------------------------
-# Booking sessions
-# ---------------------------------------------------------------------------
 
-def get_active_session(chat_id: str) -> dict | None:
-    """Return the active (non-expired) session for chat_id, or None."""
+def cancel_user_drafts(phone: str) -> bool:
+    """Return upcoming (today or later) non-cancelled bookings for a phone number."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT chat_id, state, params, booking_id
-                FROM booking_sessions
-                WHERE chat_id = %s AND expires_at > NOW()
-            """, (chat_id,))
-            row = cur.fetchone()
-            return dict(row) if row else None
+                UPDATE bookings SET state = 'cancelled' 
+                WHERE phone = %s AND state = 'draft'
+            """, (phone,))
 
-
-def upsert_session(
-    chat_id: str,
-    state: str,
-    params: dict,
-    booking_id: int | None = None,
-) -> None:
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO booking_sessions (chat_id, state, params, booking_id, expires_at)
-                VALUES (%s, %s, %s, %s, NOW() + make_interval(secs => %s))
-                ON CONFLICT (chat_id) DO UPDATE SET
-                    state      = EXCLUDED.state,
-                    params     = EXCLUDED.params,
-                    booking_id = EXCLUDED.booking_id,
-                    updated_at = NOW(),
-                    expires_at = EXCLUDED.expires_at
-            """, (chat_id, state, json.dumps(params, ensure_ascii=False, default=str),
-                  booking_id, config.BOOKING_SESSION_TTL))
-
-
-def delete_session(chat_id: str) -> None:
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM booking_sessions WHERE chat_id = %s", (chat_id,))
+            cnt = cur.rowcount > 0
+            print("COUNT cancelled", cnt)
+            return cnt

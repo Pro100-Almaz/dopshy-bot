@@ -1,0 +1,151 @@
+"""
+Client self-service edit handler — invoked when the LLM calls the
+`edit_booking` tool. Looks up the user's editable bookings, picks the most
+likely target (soonest in-window), calls booking_service.client_edit_booking,
+and formats a bilingual reply.
+
+All policy (48h window, once-only, slot clash) lives in the service layer;
+this module is glue: target selection + message formatting + Sheets sync.
+"""
+
+import logging
+
+from chat.conversation import clear_history
+from integrations.repo import postgres, academy_repo
+from integrations.repo.academy_repo import get_all_active_trials, cancel_all_trials
+from integrations.sheets.trial_sheets import refresh_all_trials
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Bilingual message catalogue
+# ---------------------------------------------------------------------------
+
+# Each entry is (ru, kk). Curly placeholders are filled at format time.
+_EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
+    "NO_TRIAL": (
+        "У вас нет активной записи на пробный урок, которую можно изменить.",
+        "Сізде өзгертуге болатын белсенді сынақ сабағы жоқ.",
+    ),
+    "NO_CHANGE": (
+        "Я не понял, что именно изменить. Напишите новое время, дату, ",
+        "Нақты не өзгерту керек екенін түсінбедім. Жаңа уақытты, күнді, "
+    ),
+    "NOT_FOUND": (
+        "❌ Пробное занятие не найдено.",
+        "❌ Жахылым табылмады.",
+    ),
+}
+
+_REJECT_FALLBACK = (
+    "❌ Не удалось изменить бронь. Свяжитесь с администратором.",
+    "❌ Бронды өзгерту мүмкін болмады. Әкімшімен хабарласыңыз.",
+)
+
+_CANCEL_MESSAGES = {
+    "SUCCESS": (
+        "Ваша запись на пробное занятие было успешно отменено.",
+        "Жазылым сәтті өшірілді."
+    ),
+    "NOT_FOUND": (
+        "Записи не найдены на ваш номер",
+        "Сіздің нөміріңізге сабаққа жазылым табылмады"
+    )
+}
+
+
+def _bilingual(ru: str, kk: str) -> str:
+    return f"{ru}\n\n— — —\n\n{kk}"
+
+
+def _format_reject(code: str) -> str:
+    ru, kk = _EDIT_REJECT_MESSAGES.get(code, _REJECT_FALLBACK)
+    return _bilingual(ru, kk)
+
+
+def _format_cancel(code: str) -> str:
+    ru, kk = _CANCEL_MESSAGES.get(code)
+    return _bilingual(ru, kk)
+
+
+def _format_success(result_data: dict) -> str:
+    """Render the diff so the user sees exactly what changed."""
+    # Build a per-field "old → new" line only for fields that actually changed.
+
+    # Current booking card (resulting state)
+    ts = str(result_data["start_time"])[:5]
+    te = str(result_data["end_time"])[:5]
+
+    summary_ru = (
+        f"✅ Запись обновлена!\n\n"
+        f"📅 {result_data['trial_day']}\n"
+        f"⏰ {ts}–{te}\n"
+        f"👤 Имя: {result_data.get('child_name', '')}\n"
+        f"🎂 Возраст: {result_data.get('child_age', '')}"
+    )
+    summary_kk = (
+        f"✅ Жазылым жаңартылды!\n\n"
+        f"📅 {result_data['trial_day']}\n"
+        f"⏰ {ts}–{te}\n"
+        f"👤 Аты: {result_data.get('child_name', '')}\n"
+        f"🎂 Жасы: {result_data.get('child_age', '')}\n\n"
+    )
+    return _bilingual(summary_ru, summary_kk)
+
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def handle_edit_request(chat_id: str, sender_phone: str, diff: dict, bot_name: str) -> str:
+    """Process a single edit_booking tool-call payload from the LLM."""
+    diff = {k: v for k, v in (diff or {}).items() if v not in (None, "")}
+    logger.info("[EDIT_TRIAL] chat_id=%s phone=%s diff=%s", chat_id, sender_phone, diff)
+
+    target = None
+    all_trials = academy_repo.get_all_active_trials(sender_phone, bot_name)
+    for trial in all_trials:
+        if trial["state"] == "confirmed":
+            target = trial
+            break
+
+    if target is None:
+        logger.info("[EDIT_TRIAL] No editable trial for %s — rejecting", sender_phone)
+        return _format_reject("NO_TRIAL")
+
+    if not diff:
+        logger.info("[EDIT_TRIAL] trial_id=%d — empty diff, asking user", target["id"])
+        return _format_reject("NO_CHANGE")
+
+    result = postgres.update_draft(bot_name, target["id"], 'confirmed', **diff)
+    if not result["ok"]:
+        logger.info(
+            "[EDIT_TRIAL] trial_id=%d rejected code=%s msg=%s",
+            target["id"], result["code"], result["message"],
+        )
+        return _format_reject(result["code"])
+
+    logger.info(
+        "[EDIT_TRIAL] trial_id=%d → new id=%d successful", target["id"], result["data"]["object_id"]
+    )
+    trial = academy_repo.get_trial(result["data"]["object_id"])
+    refresh_all_trials()
+    return _format_success(trial)
+
+
+def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) -> str:
+    trials = get_all_active_trials(sender_phone, bot_name)
+
+    trial_ids = [t["id"] for t in trials]
+    clear_history(chat_id)
+    postgres.delete_session(bot_name, chat_id)
+
+    if len(trial_ids) == 0:
+        return _format_cancel("NOT_FOUND")
+    cancel_all_trials(trial_ids)
+
+    refresh_all_trials()
+    logger.info("[CANCEL_TRIAL] successful",)
+    return _format_cancel("SUCCESS")

@@ -1,4 +1,4 @@
-"""Tests for slot-availability functions in integrations/booking.py.
+"""Tests for slot-availability functions in integrations/booking_repo.py.
 
 Covers:
 - get_free_windows: empty DB, single booking subtraction, adjacent bookings,
@@ -18,7 +18,9 @@ from datetime import date, timedelta
 import pytest
 
 import config
-from integrations import booking_service as svc
+from integrations.repo import postgres as svc
+from integrations.repo import  academy_repo, booking_repo
+from integrations import booking_service
 from integrations.booking import (
     format_availability_context,
     get_all_booked,
@@ -51,7 +53,7 @@ def _near_date(days_ahead: int = 3) -> str:
 
 def _confirmed_booking(field: int, date_str: str, ts: str, te: str) -> int:
     """Create a confirmed booking via manager_create_booking (fastest path)."""
-    res = svc.manager_create_booking(
+    res = booking_service.manager_create_booking(
         field=field, date=date_str, end_date=date_str,
         time_start=ts, time_end=te,
         customer="Test", phone="77001234567",
@@ -64,14 +66,21 @@ def _awaiting_booking(field: int, date_str: str, ts: str, te: str) -> int:
     """Create a booking in awaiting_payment state via the normal flow."""
     token = _token()
     res = svc.create_draft(
-        "chat_test", "77009999999", token,
-        date=date_str, time_start=ts, time_end=te,
-        field=field, format=_format_for(field), players=6,
+        'dopsy_bot',
+        chat_id="chat_test",
+        phone="77009999999",
+        token=token,
+        date=date_str,
+        time_start=ts,
+        time_end=te,
+        field=field,
+        format=_format_for(field),
+        players=6,
         customer_name="AwaitTest",
     )
     assert res["ok"]
     bid = res["data"]["booking_id"]
-    res2 = svc.request_payment(bid, token)
+    res2 = booking_service.request_payment(bid, token)
     assert res2["ok"], f"request_payment failed: {res2}"
     return bid
 
@@ -128,7 +137,7 @@ class TestGetAllBooked:
         """DRAFT rows must not appear in get_all_booked (they hold no slot)."""
         token = _token()
         svc.create_draft(
-            "chat_draft", "77000000001", token,
+            "chat_draft", "77000000001", client_token=token,
             date=_near_date(3), time_start="14:00", time_end="15:00",
             field=_field_ids()[0], format=_format_for(_field_ids()[0]),
             players=5, customer_name="DraftOnly",
@@ -140,7 +149,7 @@ class TestGetAllBooked:
     def test_cancelled_booking_excluded(self):
         date_str = _near_date(3)
         bid = _confirmed_booking(field=_field_ids()[0], date_str=date_str, ts="15:00", te="16:00")
-        svc.cancel_booking(bid)
+        svc.cancel_booking_trial('dopsy_bot', bid)
         today = today_almaty()
         booked = get_all_booked(today, today + timedelta(days=6))
         assert booked == []
@@ -151,7 +160,7 @@ class TestGetAllBooked:
         # failed directly (reject_payment keeps awaiting_payment; only manager/sweeper
         # transitions to failed via cancel path in older code).
         # We create an awaiting_payment booking, then manually flip it to failed.
-        from integrations.postgres import _conn
+        from integrations.repo.postgres import _conn
         date_str = _near_date(3)
         bid = _awaiting_booking(field=_field_ids()[0], date_str=date_str, ts="16:00", te="17:00")
         with _conn() as conn:
@@ -285,7 +294,7 @@ class TestGetFreeWindows:
         field_id = _field_ids()[0]
         token = _token()
         svc.create_draft(
-            "chat_draft2", "77000000002", token,
+            "chat_draft2", "77000000002", client_token=token,
             date=target_date, time_start="10:00", time_end="12:00",
             field=field_id, format=_format_for(field_id),
             players=5, customer_name="DraftOnly2",
@@ -306,7 +315,7 @@ class TestGetFreeWindows:
         target_date = (today_almaty() + timedelta(days=3)).isoformat()
         field_id = _field_ids()[0]
         bid = _confirmed_booking(field=field_id, date_str=target_date, ts="10:00", te="12:00")
-        svc.cancel_booking(bid)
+        svc.cancel_booking_trial('dopsy_bot', bid)
 
         windows = get_free_windows()
         day_wins = [
@@ -397,7 +406,7 @@ class TestGetFreeWindows:
 
     def test_failed_booking_does_not_block_slot(self):
         """failed state must not reduce free windows."""
-        from integrations.postgres import _conn
+        from integrations.repo.postgres import _conn
         target_date = (today_almaty() + timedelta(days=3)).isoformat()
         field_id = _field_ids()[0]
         bid = _awaiting_booking(field=field_id, date_str=target_date, ts="18:00", te="20:00")

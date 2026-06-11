@@ -26,28 +26,15 @@ import psycopg2.errors
 import psycopg2.extras
 
 import config
-from integrations.postgres import _conn
+from integrations.repo.utils import _conn, _err, _ok
 
 logger = logging.getLogger(__name__)
 
-# Patch fields a draft may set via update_draft.
-_DRAFT_FIELDS = {
-    "date", "time_start", "time_end", "field", "format",
-    "players", "customer_name", "notes",
-}
 
 
 # ---------------------------------------------------------------------------
 # Result envelope
 # ---------------------------------------------------------------------------
-
-def _ok(data: dict | None = None, code: str = "OK", message: str = "") -> dict:
-    return {"ok": True, "code": code, "data": data, "message": message}
-
-
-def _err(code: str, message: str) -> dict:
-    return {"ok": False, "code": code, "data": None, "message": message}
-
 
 def _record_event(cur, booking_id: int, event: str, actor_type: str,
                   actor_id: str | None = None, note: str | None = None) -> None:
@@ -62,55 +49,9 @@ def _record_event(cur, booking_id: int, event: str, actor_type: str,
 # Service functions
 # ---------------------------------------------------------------------------
 
-def create_draft(chat_id: str, phone: str, client_token: str, **fields) -> dict:
-    """Create (or return existing) DRAFT booking. Idempotent on client_token."""
-    patch = {k: v for k, v in fields.items() if k in _DRAFT_FIELDS}
-    cols = ["phone", "state", "client_token", "source"] + list(patch.keys())
-    vals = [phone, "draft", client_token, "whatsapp"] + list(patch.values())
-    placeholders = ", ".join(["%s"] * len(vals))
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"INSERT INTO bookings ({', '.join(cols)}) VALUES ({placeholders}) "
-                f"ON CONFLICT (client_token) DO NOTHING RETURNING id",
-                vals,
-            )
-            row = cur.fetchone()
-            if row:
-                booking_id = row["id"]
-                _record_event(cur, booking_id, "draft_created", "whatsapp", chat_id)
-            else:
-                cur.execute(
-                    "SELECT id FROM bookings WHERE client_token = %s", (client_token,)
-                )
-                booking_id = cur.fetchone()["id"]
-    return _ok({"booking_id": booking_id})
 
 
-def update_draft(booking_id: int, **patch) -> dict:
-    """Patch a DRAFT booking's collected fields. Rejects if not in DRAFT."""
-    fields = {k: v for k, v in patch.items() if k in _DRAFT_FIELDS}
-    if not fields:
-        return _ok({"booking_id": booking_id})
 
-    set_clause = ", ".join(f"{k} = %s" for k in fields) + ", updated_at = NOW()"
-    vals = list(fields.values()) + [booking_id]
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE bookings SET {set_clause} "
-                f"WHERE id = %s AND state = 'draft' RETURNING id",
-                vals,
-            )
-            if cur.fetchone():
-                _record_event(cur, booking_id, "draft_updated", "whatsapp")
-                return _ok({"booking_id": booking_id})
-
-            cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
-            row = cur.fetchone()
-    if not row:
-        return _err("NOT_FOUND", "Бронь не найдена.")
-    return _err("BOOKING_WRONG_STATE", "Эту бронь уже нельзя изменить.")
 
 
 def request_payment(booking_id: int, client_token: str) -> dict:
@@ -230,29 +171,17 @@ def reject_payment(booking_id: int, reason: str, parsed: dict | None = None) -> 
     return _ok({"booking_id": booking_id})
 
 
-def cancel_booking(booking_id: int, actor_type: str = "whatsapp",
-                   actor_id: str | None = None, reason: str | None = None) -> dict:
-    """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
-    and clears any conversation session still referencing it."""
+
+def get_payment_recipients() -> list[dict]:
+    """Active acceptable payment recipients (for receipt validation)."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "UPDATE bookings SET state = 'cancelled', updated_at = NOW() "
-                "WHERE (id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)) "
-                "AND state NOT IN ('cancelled', 'failed') RETURNING id",
-                (booking_id, booking_id,),
+                "SELECT bank, bin, name, phone FROM payment_recipients WHERE active = TRUE"
             )
-            if cur.fetchone():
-                _record_event(cur, booking_id, "cancelled", actor_type, actor_id, reason)
-                cur.execute(
-                    "DELETE FROM booking_sessions WHERE booking_id = %s", (booking_id,)
-                )
-                return _ok({"booking_id": booking_id})
-            cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
-            row = cur.fetchone()
-    if not row:
-        return _err("NOT_FOUND", "Бронь не найдена.")
-    return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+            return [dict(r) for r in cur.fetchall()]
+
+
 
 
 def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",

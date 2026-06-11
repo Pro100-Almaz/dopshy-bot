@@ -7,7 +7,7 @@ from flask import Flask
 
 import config
 from blueprints.manager_api import manager_api
-from integrations.postgres import _conn
+from integrations.repo.postgres import _conn
 
 _KEY = "test-key"
 _HDR = {"X-API-Key": _KEY}

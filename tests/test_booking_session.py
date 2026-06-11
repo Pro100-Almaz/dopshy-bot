@@ -14,15 +14,15 @@ from unittest.mock import patch
 
 
 import config
-from handlers.booking_session import (
-    _TIME_RANGE_RE,
-    _is_cancel_intent,
-    _pad_time,
+from handlers.sessions.booking_session import (
     handle_booking_turn,
     start_booking_flow,
+    BookingPromptBuilder
 )
-from integrations import booking_service as svc
-from integrations.postgres import _conn, get_active_session
+
+from integrations import booking_service
+from integrations.repo import postgres as svc
+from integrations.repo.postgres import _conn, get_active_session
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,7 +70,7 @@ def _future_date_str(days_ahead: int = 3) -> str:
 
 def _seed_confirmed_booking(field_id: int, date_str: str, ts: str, te: str) -> int:
     """Insert a confirmed booking to occupy a slot (so SLOT_TAKEN fires)."""
-    res = svc.manager_create_booking(
+    res = booking_service.manager_create_booking(
         field=field_id, date=date_str, end_date=date_str,
         time_start=ts, time_end=te,
         customer="Blocker", phone="7700000000",
@@ -129,91 +129,100 @@ def _fake_windows_for_date(target_date: date):
 # ---------------------------------------------------------------------------
 
 class TestTimeRangeRegex:
+    def __init__(self):
+        self.builder = BookingPromptBuilder('dopsy_bot')
+
     def test_standard_до(self):
-        m = _TIME_RANGE_RE.search("10:00 до 12:00")
+        m = self.builder.TIME_RANGE_RE.search("10:00 до 12:00")
         assert m is not None
         assert m.group(1) == "10:00"
         assert m.group(2) == "12:00"
 
     def test_hyphen_separator(self):
-        m = _TIME_RANGE_RE.search("14:30-16:00")
+        m = self.builder.TIME_RANGE_RE.search("14:30-16:00")
         assert m is not None
         assert m.group(1) == "14:30"
         assert m.group(2) == "16:00"
 
     def test_en_dash_separator(self):
-        m = _TIME_RANGE_RE.search("09:00–11:00")
+        m = self.builder.TIME_RANGE_RE.search("09:00–11:00")
         assert m is not None
         assert m.group(1) == "09:00"
         assert m.group(2) == "11:00"
 
     def test_em_dash_separator(self):
-        m = _TIME_RANGE_RE.search("18:00—20:00")
+        m = self.builder.TIME_RANGE_RE.search("18:00—20:00")
         assert m is not None
         assert m.group(1) == "18:00"
         assert m.group(2) == "20:00"
 
     def test_single_digit_hour(self):
-        m = _TIME_RANGE_RE.search("9:00 до 11:00")
+        m = self.builder.TIME_RANGE_RE.search("9:00 до 11:00")
         assert m is not None
         assert m.group(1) == "9:00"
         assert m.group(2) == "11:00"
 
     def test_extra_whitespace(self):
-        m = _TIME_RANGE_RE.search("10:00  до  12:00")
+        m = self.builder.TIME_RANGE_RE.search("10:00  до  12:00")
         assert m is not None
 
     def test_embedded_in_sentence(self):
-        m = _TIME_RANGE_RE.search("Хочу забронировать с 10:00 до 12:00 завтра")
+        m = self.builder.TIME_RANGE_RE.search("Хочу забронировать с 10:00 до 12:00 завтра")
         assert m is not None
         assert m.group(1) == "10:00"
         assert m.group(2) == "12:00"
 
     def test_no_match_plain_text(self):
-        assert _TIME_RANGE_RE.search("abc") is None
+        assert self.builder.TIME_RANGE_RE.search("abc") is None
 
     def test_no_match_single_time(self):
-        assert _TIME_RANGE_RE.search("10:00") is None
+        assert self.builder.TIME_RANGE_RE.search("10:00") is None
 
     def test_no_match_invalid_format(self):
-        assert _TIME_RANGE_RE.search("1000 до 1200") is None
+        assert self.builder.TIME_RANGE_RE.search("1000 до 1200") is None
 
 
 class TestPadTime:
+    def __init__(self):
+        self.builder = BookingPromptBuilder('dopsy_bot')
+
     def test_already_padded(self):
-        assert _pad_time("10:00") == "10:00"
+        assert self.builder.pad_time("10:00") == "10:00"
 
     def test_single_digit_hour(self):
-        assert _pad_time("9:30") == "09:30"
+        assert self.builder.pad_time("9:30") == "09:30"
 
     def test_midnight(self):
-        assert _pad_time("0:00") == "00:00"
+        assert self.builder.pad_time("0:00") == "00:00"
 
 
 class TestIsCancelIntent:
+    def __init__(self):
+        self.builder = BookingPromptBuilder('dopsy_bot')
+
     def test_отмена(self):
-        assert _is_cancel_intent("отмена")
+        assert self.builder.is_cancel_intent("отмена")
 
     def test_передумал(self):
-        assert _is_cancel_intent("передумал")
+        assert self.builder.is_cancel_intent("передумал")
 
     def test_не_хочу(self):
-        assert _is_cancel_intent("не хочу")
+        assert self.builder.is_cancel_intent("не хочу")
 
     def test_стоп(self):
-        assert _is_cancel_intent("стоп")
+        assert self.builder.is_cancel_intent("стоп")
 
     def test_тоқтат(self):
-        assert _is_cancel_intent("тоқтат")
+        assert self.builder.is_cancel_intent("тоқтат")
 
     def test_normal_да_not_cancel(self):
-        assert not _is_cancel_intent("да")
+        assert not self.builder.is_cancel_intent("да")
 
     def test_normal_нет_not_cancel(self):
-        assert not _is_cancel_intent("нет")
+        assert not self.builder.is_cancel_intent("нет")
 
     def test_empty_string(self):
-        assert not _is_cancel_intent("")
+        assert not self.builder.is_cancel_intent("")
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +242,7 @@ class TestStepTimeHandling:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             reply2 = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
         assert reply2 is not None
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time", f"expected step_time, got {session['state']}"
 
     def test_valid_time_range_advances_session(self):
@@ -246,7 +255,7 @@ class TestStepTimeHandling:
             start_booking_flow(chat_id, SENDER_PHONE)
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time"
         booking_id = session["params"]["booking_id"]
 
@@ -255,7 +264,7 @@ class TestStepTimeHandling:
                 reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "10:00 до 12:00")
 
         assert reply is not None
-        session_after = get_active_session(chat_id)
+        session_after = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session_after is not None
         assert session_after["state"] in ("step_players", "step_field")
 
@@ -278,7 +287,7 @@ class TestStepTimeHandling:
                 reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "14:30-16:00")
 
         assert reply is not None
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] in ("step_players", "step_field")
 
     def test_invalid_time_plain_text_stays_on_step_time(self):
@@ -296,7 +305,7 @@ class TestStepTimeHandling:
 
         assert reply is not None
         assert "не распознал" in reply.lower() or "пример" in reply.lower() or "10:00" in reply
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time"
 
     def test_invalid_time_no_range_stays_on_step_time(self):
@@ -312,7 +321,7 @@ class TestStepTimeHandling:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "просто текст без времени")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time"
 
     def test_no_free_fields_for_occupied_time_stays_on_step_time(self):
@@ -334,7 +343,7 @@ class TestStepTimeHandling:
             reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "10:00 до 12:00")
 
         assert "нет свободных" in reply.lower() or "свободн" in reply.lower()
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time"
 
 
@@ -355,7 +364,7 @@ class TestFullHappyPath:
             reply = start_booking_flow(chat_id, SENDER_PHONE)
         assert "выберите дату" in reply.lower() or "1." in reply
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_date"
         booking_id = session["params"]["booking_id"]
         assert _booking_state(booking_id) == "draft"
@@ -363,7 +372,7 @@ class TestFullHappyPath:
         # ── step_date → step_time ────────────────────────────────────────────
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time"
         assert _get_draft_fields(booking_id)["date"] is not None
 
@@ -372,14 +381,14 @@ class TestFullHappyPath:
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "11:00 до 13:00")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session is not None
 
         # If step_field was triggered (multiple free fields), pick one
         if session["state"] == "step_field":
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
-            session = get_active_session(chat_id)
+            session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
 
         assert session["state"] == "step_players"
         draft = _get_draft_fields(booking_id)
@@ -389,14 +398,14 @@ class TestFullHappyPath:
 
         # ── step_players → step_name ─────────────────────────────────────────
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "10")
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_name"
         assert "имя" in reply.lower() or "укажите" in reply.lower()
         assert _get_draft_fields(booking_id)["players"] == 10
 
         # ── step_name → step_confirm ─────────────────────────────────────────
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "Алибек Джаксыбеков")
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_confirm"
         assert "подтвердить" in reply.lower() or "детали" in reply.lower()
         assert _get_draft_fields(booking_id)["customer_name"] == "Алибек Джаксыбеков"
@@ -409,7 +418,7 @@ class TestFullHappyPath:
         assert reply is not None
         assert "оплат" in reply.lower() or "kaspi" in reply.lower() or "бронь" in reply.lower()
 
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
         assert _booking_state(booking_id) == "awaiting_payment"
 
 
@@ -444,15 +453,14 @@ class TestSlotTakenBranch:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
         # Manually populate the DRAFT so request_payment can be called
-        svc.update_draft(booking_id, date=date_str, time_start="14:00", time_end="16:00",
+        svc.update_draft(bot_name='dopsy_bot', object_id=booking_id, date=date_str, time_start="14:00", time_end="16:00",
                          field=field_id, format="5x5", players=8, customer_name="Racer")
 
         # Advance session to step_confirm by writing it directly
-        from integrations.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str,
@@ -463,7 +471,7 @@ class TestSlotTakenBranch:
             "players": 8,
             "customer_name": "Racer",
         })
-        upsert_session(chat_id, "step_confirm", params, booking_id=booking_id)
+        svc.upsert_session(bot_name='dopsy_bot', chat_id=chat_id, state="step_confirm", params=params, object_id=booking_id)
 
         # Confirm — must hit SLOT_TAKEN
         with patch("handlers.booking_session.sheets.upsert_booking_row"):
@@ -474,7 +482,7 @@ class TestSlotTakenBranch:
         assert "слот" in reply.lower() or "занят" in reply.lower() or "заняли" in reply.lower()
 
         # Session must be cleared
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
 
         # DRAFT booking must NOT be in awaiting_payment
         state = _booking_state(booking_id)
@@ -505,19 +513,19 @@ class TestSlotTakenBranch:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
-        svc.update_draft(booking_id, date=date_str, time_start="16:00", time_end="18:00",
+        svc.update_draft('dopsy_bot', booking_id, date=date_str, time_start="16:00", time_end="18:00",
                          field=field_id, format="6x6", players=6, customer_name="Test2")
 
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str, "time_start": "16:00", "time_end": "18:00",
             "field": field_id, "format": "6x6", "players": 6, "customer_name": "Test2",
         })
-        upsert_session(chat_id, "step_confirm", params, booking_id=booking_id)
+        upsert_session(bot_name='dopsy_bot', chat_id=chat_id, state="step_confirm", params=params, object_id=booking_id)
 
         with patch("handlers.booking_session.sheets.upsert_booking_row"):
             with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
@@ -536,7 +544,7 @@ class TestMidFlowCancel:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
-        return get_active_session(chat_id)
+        return get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
 
     def test_отмена_at_step_time_cancels_draft_and_clears_session(self):
         from utils import today_almaty
@@ -553,7 +561,7 @@ class TestMidFlowCancel:
 
         assert reply is not None
         assert "отменена" in reply.lower() or "брондау" in reply.lower()
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
         assert _booking_state(booking_id) == "cancelled"
 
     def test_передумал_at_step_players_cancels(self):
@@ -566,21 +574,21 @@ class TestMidFlowCancel:
             start_booking_flow(chat_id, SENDER_PHONE)
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "11:00 до 13:00")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         if session and session["state"] == "step_field":
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "передумал")
         assert reply is not None
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
         assert _booking_state(booking_id) == "cancelled"
 
     def test_cancel_at_step_confirm_via_нет(self):
@@ -595,23 +603,23 @@ class TestMidFlowCancel:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
-        svc.update_draft(booking_id, date=date_str, time_start="10:00", time_end="11:00",
+        svc.update_draft('dopsy_bot', booking_id, date=date_str, time_start="10:00", time_end="11:00",
                          field=field_id, format="5x5", players=8, customer_name="Тест")
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str, "time_start": "10:00", "time_end": "11:00",
             "field": field_id, "format": "5x5", "players": 8, "customer_name": "Тест",
         })
-        upsert_session(chat_id, "step_confirm", params, booking_id=booking_id)
+        upsert_session(bot_name='dopsy_bot', chat_id=chat_id, state="step_confirm", params=params, object_id=booking_id)
 
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "нет")
         assert reply is not None
         assert "отменено" in reply.lower() or "отменена" in reply.lower() or "захотите" in reply.lower()
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
         assert _booking_state(booking_id) == "cancelled"
 
     def test_не_хочу_at_step_date(self):
@@ -623,14 +631,14 @@ class TestMidFlowCancel:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "не хочу")
 
         assert reply is not None
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
         assert _booking_state(booking_id) == "cancelled"
 
 
@@ -644,7 +652,7 @@ class TestStartBookingFlow:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=[]):
             reply = start_booking_flow(chat_id, SENDER_PHONE)
         assert "нет" in reply.lower() or "нет." in reply.lower()
-        assert get_active_session(chat_id) is None
+        assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
 
     def test_creates_draft_booking_and_session(self):
         from utils import today_almaty
@@ -656,7 +664,7 @@ class TestStartBookingFlow:
             reply = start_booking_flow(chat_id, SENDER_PHONE)
 
         assert reply is not None
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session is not None
         assert session["state"] == "step_date"
         booking_id = session["params"]["booking_id"]
@@ -679,7 +687,7 @@ class TestStepDate:
             reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
         assert reply is not None
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_time"
 
     def test_invalid_choice_stays_on_step_date(self):
@@ -692,7 +700,7 @@ class TestStepDate:
             start_booking_flow(chat_id, SENDER_PHONE)
             reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "99")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_date"
         assert "список" in reply.lower() or "введите" in reply.lower() or "номер" in reply.lower()
 
@@ -708,14 +716,14 @@ class TestStepPlayers:
             start_booking_flow(chat_id, SENDER_PHONE)
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "11:00 до 13:00")
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         if session and session["state"] == "step_field":
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
@@ -727,11 +735,11 @@ class TestStepPlayers:
         chat_id = _chat_id()
         target = today_almaty() + timedelta(days=3)
         bid = self._reach_step_players(chat_id, target)
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_players"
 
         handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "8")
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_name"
         assert _get_draft_fields(bid)["players"] == 8
 
@@ -740,11 +748,11 @@ class TestStepPlayers:
         chat_id = _chat_id()
         target = today_almaty() + timedelta(days=3)
         self._reach_step_players(chat_id, target)
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_players"
 
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "много")
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_players"
         assert "количество" in reply.lower() or "введите" in reply.lower()
 
@@ -765,21 +773,21 @@ class TestStepConfirm:
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
 
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         booking_id = session["params"]["booking_id"]
 
-        svc.update_draft(booking_id, date=date_str, time_start="10:00", time_end="11:00",
+        svc.update_draft(bot_name='dopsy_bot', object_id=booking_id, date=date_str, time_start="10:00", time_end="11:00",
                          field=field_id, format="5x5", players=8, customer_name="Тест")
-        from integrations.postgres import upsert_session
+        from integrations.repo.postgres import upsert_session
         params = session["params"].copy()
         params.update({
             "date": date_str, "time_start": "10:00", "time_end": "11:00",
             "field": field_id, "format": "5x5", "players": 8, "customer_name": "Тест",
         })
-        upsert_session(chat_id, "step_confirm", params, booking_id=booking_id)
+        upsert_session(bot_name='dopsy_bot', chat_id=chat_id, state="step_confirm", params=params, object_id=booking_id)
 
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "может быть")
-        session = get_active_session(chat_id)
+        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session["state"] == "step_confirm"
         assert "да" in reply.lower() or "нет" in reply.lower() or "подтвердить" in reply.lower()
 
@@ -799,18 +807,18 @@ class TestStepConfirm:
             with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
                 start_booking_flow(chat_id, SENDER_PHONE)
 
-            session = get_active_session(chat_id)
+            session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
             booking_id = session["params"]["booking_id"]
 
-            svc.update_draft(booking_id, date=date_str, time_start=time_start, time_end=time_end,
+            svc.update_draft(bot_name='dopcy_bot', object_id=booking_id, date=date_str, time_start=time_start, time_end=time_end,
                              field=field_id, format="5x5", players=8, customer_name="T")
-            from integrations.postgres import upsert_session
+            from integrations.repo.postgres import upsert_session
             params = session["params"].copy()
             params.update({
                 "date": date_str, "time_start": time_start, "time_end": time_end,
                 "field": field_id, "format": "5x5", "players": 8, "customer_name": "T",
             })
-            upsert_session(chat_id, "step_confirm", params, booking_id=booking_id)
+            upsert_session(bot_name='dopsy_bot', chat_id=chat_id, state="step_confirm", params=params, object_id=booking_id)
 
             with patch("handlers.booking_session.sheets.upsert_booking_row"):
                 handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, yes_word)
