@@ -148,6 +148,4 @@ def cancel_user_drafts(phone: str) -> bool:
                 WHERE phone = %s AND state = 'draft'
             """, (phone,))
 
-            cnt = cur.rowcount > 0
-            print("COUNT cancelled", cnt)
-            return cnt
+            return cur.rowcount > 0

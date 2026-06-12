@@ -139,9 +139,6 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whats
     return _ok({"object_id": object_id}, message="Запись уже была отменена.")
 
 
-
-
-
 # ---------------------------------------------------------------------------
 #  Booking/Trial sessions
 # ---------------------------------------------------------------------------

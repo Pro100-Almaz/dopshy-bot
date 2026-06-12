@@ -6,7 +6,8 @@ import logging
 from openai import OpenAI
 
 from chat.conversation import Message
-from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL
+from chat.system_prompts.sp_1 import INTENT_PROMPT
+from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL, SELECT_INTENT_LLM
 from chat.tools.academy_tools import START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL
 
 logger = logging.getLogger(__name__)
@@ -15,11 +16,11 @@ _client = OpenAI(api_key=config.OPENAI_API_KEY)
 
 
 def get_ai_response(
-    phone_number_id: str,
-    chat_id: str,
-    user_message: str,
-    history: list[Message],
-    context: str,
+        phone_number_id: str,
+        chat_id: str,
+        user_message: str,
+        history: list[Message],
+        context: str,
 ) -> tuple[str, dict | None]:
     """
     Build the full prompt with RAG context and conversation history,
@@ -86,9 +87,9 @@ def get_ai_response(
 
 
 def get_booking_reply(
-    user_text: str,
-    booking_context: str,
-    system_hint: str = "",
+        user_text: str,
+        booking_context: str,
+        system_hint: str = "",
 ) -> str:
     """
     Generate a natural-language reply for booking-related queries.
@@ -116,37 +117,6 @@ def get_booking_reply(
     return response.choices[0].message.content.strip()
 
 
-import os
-import json
-import logging
-from typing import Union, List, Dict
-from openai import OpenAI
-
-from chat.tools.arena_tools import SELECT_INTENT_LLM
-
-# Initialize the OpenAI client. It automatically picks up the OPENAI_API_KEY environment variable.
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-# System prompt: the classifier must reason over the WHOLE history, not just the
-# last line, so it can resolve pronouns ("book it", "that one") and detect whether
-# the user is starting a booking vs. answering questions in an ongoing one.
-SYSTEM_PROMPT = """You are an intent classifier for a WhatsApp football field rental bot.
-Read the ENTIRE chat history as context — earlier turns disambiguate pronouns
-("it", "that slot", "the same one") and reveal whether a booking flow is already
-in progress. Classify ONLY the user's most recent message into exactly one intent:
-
-- question_price: asking about cost, rates, or fees.
-- question_slots: asking what times/dates are free or available.
-- question_field_size: asking about field specs (5-a-side, 11-a-side, dimensions, surface).
-- booking_new: a fresh, first-time intent to reserve a field (no booking underway yet).
-- booking_continue: supplying details (date, time, name, duration) to an ALREADY ongoing booking.
-- booking_cancel: any cancelling intention, even if cancel was already performed.
-- other: greetings, thanks, small talk, or anything unrelated.
-
-When the prior turns show the bot asking for booking details, treat the user's reply
-as booking_continue, not booking_new."""
-
-
 def route_incoming_message(history: list, user_message: str) -> str:
     """Classify the intent of the latest user message given full conversation context.
 
@@ -158,12 +128,12 @@ def route_incoming_message(history: list, user_message: str) -> str:
     """
     # Accept either a structured message array or a raw string; normalize to messages
     # so role structure (and therefore flow context) is preserved for the model.
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": INTENT_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = client.chat.completions.create(
+        response = _client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0,  # deterministic classification
             messages=messages,
@@ -184,6 +154,5 @@ def route_incoming_message(history: list, user_message: str) -> str:
         return data.get("type", "other")
 
     except Exception as err:
-        # Network errors, schema rejections, or malformed JSON all fall back gracefully.
         logging.error(f"route_incoming_message failed: {err}")
         return "other"

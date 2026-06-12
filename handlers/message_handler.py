@@ -18,7 +18,7 @@ from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation
-from integrations.repo import booking_repo, postgres
+from integrations.repo import booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
 import config
@@ -70,15 +70,10 @@ _PAYMENT_REJECT_FOOTER_KK = (
 )
 
 _CANCEL_STATUS = (
-
-        "По вашему номеру не найдено записей."
-        "\n\n–––\n\n"
-        "Сіздің нөміріңізге белсенді жазба табылмады.",
-
-        "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂"
-        "\n\n–––\n\n"
-        "Брондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"
-
+    """По вашему номеру не найдено записей.
+    \n\n–––\n\n"Сіздің нөміріңізге белсенді жазба табылмады.""",
+    """Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂
+    \n\n–––\n\nБрондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"""
 )
 
 builder = BasePromptBuilder({}, "", (), ())
