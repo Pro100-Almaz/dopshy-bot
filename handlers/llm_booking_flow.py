@@ -35,6 +35,7 @@ from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import postgres
 from integrations.repo.utils import _conn
+from integrations.sheets.booking_sheets import refresh_all_bookings
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
@@ -539,6 +540,7 @@ class LlmBookingFlowHandler:
 
         logger.info("[LLM_FLOW] Booking id=%d → awaiting_payment", booking_id)
         clear_history(chat_id)
+        refresh_all_bookings()
 
         return (
             f"📋 Бронь зарегистрирована, ожидает оплаты!\n\n"
@@ -549,7 +551,7 @@ class LlmBookingFlowHandler:
             f"(⚠️ Возврат не производится в случае неявки)\n\n"
             f"После оплаты отправьте PDF-чек из Kaspi сюда — "
             f"мы подтвердим бронь. 🙏\n"
-            f"⚠️ Без оплаты бронь отменится через 1 час.\n\n"
+            f"⚠️ Без оплаты бронь отменится через 15 минут.\n\n"
             f"— — —\n\n"
             f"📋 Брондау тіркелді, төлем күтілуде!\n\n"
             f"📅 {self._fmt_date(d)}\n⏰ {ts}–{te}\n"
@@ -862,7 +864,6 @@ class LlmBookingFlowHandler:
             f"Уақытты жазыңыз (мыс. *18:00 - 20:00*)."
         )
 
-
     def _check_field_only(self, data: dict) -> str:
         """Rule 3: show available dates and time ranges for the given field."""
         field_id = int(data["field"])
@@ -968,8 +969,6 @@ class LlmBookingFlowHandler:
             f"Бос алаңдар:\n{fl_kk}\n\n"
             f"Алаң нөмірін жазыңыз."
         )
-
-
 
     def _check_and_confirm(self, data: dict) -> str:
         """

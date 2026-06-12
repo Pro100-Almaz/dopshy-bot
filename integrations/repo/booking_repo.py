@@ -139,15 +139,31 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
 
 
 
-def cancel_user_drafts(phone: str) -> bool:
+def cancel_draft_awaiting_payment(phone: str) -> bool:
     """Return upcoming (today or later) non-cancelled bookings for a phone number."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                UPDATE bookings SET state = 'cancelled' 
-                WHERE phone = %s AND state = 'draft'
+                UPDATE bookings SET state = 'cancelled', updated_at = NOW()
+                WHERE id = (SELECT id FROM bookings WHERE phone = %s AND state IN ('draft', 'awaiting_payment')
+                ORDER BY created_at DESC 
+                LIMIT 1)
             """, (phone,))
 
             cnt = cur.rowcount > 0
             print("COUNT cancelled", cnt)
             return cnt
+
+def has_awaiting_payments(phone: str) -> bool:
+    """Return upcoming (today or later) non-cancelled bookings for a phone number."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 1
+                FROM bookings
+                WHERE phone = %s
+                  AND state  = 'awaiting_payment'
+                LIMIT 1
+            """, (phone,))
+
+            return cur.rowcount > 0
