@@ -25,14 +25,11 @@ Seven checking rules (see _evaluate_and_respond):
 import logging
 import uuid
 
-import psycopg2.extras
-
 import config
 from chat.conversation import clear_history
 from integrations import booking as booking_logic
 from integrations import booking_service
-from integrations.repo import postgres
-from integrations.repo.utils import _conn
+from integrations.repo import postgres, booking_repo
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +99,7 @@ class LlmBookingFlowHandler:
             data["field"] = self._resolve_field_id(format_str, data)
 
         # ── 1. Check for an existing draft ────────────────────────────────
-        draft = self._get_existing_draft(phone)
+        draft = booking_repo.get_existing_draft(phone)
 
         if draft:
             logger.info(
@@ -198,26 +195,6 @@ class LlmBookingFlowHandler:
     # ══════════════════════════════════════════════════════════════════════
     #  Draft Management
     # ══════════════════════════════════════════════════════════════════════
-
-    @staticmethod
-    def _get_existing_draft(phone: str) -> dict | None:
-        """
-        Find the most recent draft booking for this phone.
-        This replaces the booking_sessions lookup — drafts are identified
-        solely by phone + state='draft'.
-        """
-        with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT id, date, time_start, time_end, field, format, "
-                    "       players, customer_name, phone, state, client_token "
-                    "FROM bookings "
-                    "WHERE phone = %s AND state = 'draft' "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (phone,),
-                )
-                row = cur.fetchone()
-                return dict(row) if row else None
 
     @staticmethod
     def _draft_to_data(draft: dict) -> dict:
@@ -362,7 +339,7 @@ class LlmBookingFlowHandler:
             f"(⚠️ Возврат не производится в случае неявки)\n\n"
             f"После оплаты отправьте PDF-чек из Kaspi сюда — "
             f"мы подтвердим бронь. 🙏\n"
-            f"⚠️ Без оплаты бронь отменится через 1 час.\n\n"
+            f"⚠️ Без оплаты бронь отменится через 15 минут.\n\n"
             f"— — —\n\n"
             f"📋 Брондау тіркелді, төлем күтілуде!\n\n"
             f"📅 {self._fmt_date(d)}\n⏰ {ts}–{te}\n"
@@ -371,7 +348,7 @@ class LlmBookingFlowHandler:
             f"Растау үшін төлем жасаңыз:\n{config.KASPI_PAYMENT_URL}\n"
             f"(⚠️ Ойынға келмей қалған жағдайда төлем қайтарылмайды)\n\n"
             f"PDF-чекті осы чатқа жіберіңіз — брондауды растаймыз. 🙏\n"
-            f"⚠️ 1 сағат ішінде төлем болмаса — бронь жойылады."
+            f"⚠️ 15 минут ішінде төлем болмаса — бронь жойылады."
         )
 
     def _cancel_draft(self, draft: dict, chat_id: str) -> str:

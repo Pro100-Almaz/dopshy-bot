@@ -138,6 +138,25 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+def get_existing_draft(phone: str) -> dict | None:
+    """
+    Find the most recent draft booking for this phone.
+    This replaces the booking_sessions lookup — drafts are identified
+    solely by phone + state='draft'.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, date, time_start, time_end, field, format, "
+                "       players, customer_name, phone, state, client_token "
+                "FROM bookings "
+                "WHERE phone = %s AND state = 'draft' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (phone,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
 
 def cancel_user_drafts(phone: str) -> bool:
     """Return upcoming (today or later) non-cancelled bookings for a phone number."""
