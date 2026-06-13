@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any
 from openai import OpenAI
 import config
-from chat.system_prompts.sp_1 import DATA_EXTRACT_PROMPT
+from chat.system_prompts.sp_1 import get_data_extract_prompt
 from chat.tools.arena_tools import EXTRACT_DATA_LLM
 
 client = OpenAI(api_key = config.OPENAI_API_KEY)
@@ -18,7 +18,7 @@ def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Di
     Returns:
         A dictionary containing date, start_time, end_time, field_size, players, and name.
     """
-    messages = [{"role": "system", "content": DATA_EXTRACT_PROMPT}]
+    messages = [{"role": "system", "content": get_data_extract_prompt()}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
