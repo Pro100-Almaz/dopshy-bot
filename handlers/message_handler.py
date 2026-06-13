@@ -10,7 +10,8 @@ from chat.llm import get_ai_response, route_incoming_message
 from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from integrations.sheets.booking_sheets import upsert_booking_row
+from integrations.repo.booking_repo import has_awaiting_payments
+from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
@@ -229,6 +230,13 @@ def handle_incoming_message(payload: dict) -> None:
                 return
 
             elif intent in ['booking_new', 'booking_continue']:
+                if has_awaiting_payments(sender_id):
+                    send_text_message(phone_number_id, sender_id,
+                                      'Вы не можете создать новую бронь пока не оплатите предыдущую! \n'
+                                      '\n----\n'
+                                      'Осығын дейінгі брондарыңызды төлемей жаңа брондар өоя алмайсыз! \n')
+                    clear_history(chat_id)
+                    return
                 extracted_data = extract_booking_details(history, user_text)
                 logger.info("[BOOKING] Data Extracted: %s", extracted_data)
                 handler = LlmBookingFlowHandler()
@@ -241,8 +249,9 @@ def handle_incoming_message(payload: dict) -> None:
 
             elif intent == 'booking_cancel':
                 logger.info("[BOOKING] Cancelling all drafts of the user")
-                cancelled = booking_repo.cancel_user_drafts(sender_id)
+                cancelled = booking_repo.cancel_draft_awaiting_payment(sender_id)
                 clear_history(chat_id)
+                refresh_all_bookings()
                 send_text_message(phone_number_id, sender_id, _CANCEL_STATUS[cancelled])
                 return
 
