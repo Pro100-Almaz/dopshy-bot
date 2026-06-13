@@ -29,7 +29,7 @@ import config
 from chat.conversation import clear_history
 from integrations import booking as booking_logic
 from integrations import booking_service
-from integrations.repo import postgres
+from integrations.repo import booking_repo, postgres
 from integrations.repo.utils import _conn
 from integrations.sheets.booking_sheets import refresh_all_bookings
 from utils import today_almaty
