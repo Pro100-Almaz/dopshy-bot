@@ -18,8 +18,8 @@ from handlers.sessions.booking_session import handle_booking_turn, start_booking
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
-from integrations import booking_service, payment_validation
-from integrations.repo import booking_repo, postgres
+from integrations import booking_service, payment_validation, booking, trial
+from integrations.repo import booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
 import config
@@ -71,15 +71,10 @@ _PAYMENT_REJECT_FOOTER_KK = (
 )
 
 _CANCEL_STATUS = (
-
-        "По вашему номеру не найдено записей."
-        "\n\n–––\n\n"
-        "Сіздің нөміріңізге белсенді жазба табылмады.",
-
-        "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂"
-        "\n\n–––\n\n"
-        "Брондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"
-
+    """По вашему номеру не найдено записей.
+    \n\n–––\n\n"Сіздің нөміріңізге белсенді жазба табылмады.""",
+    """Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂
+    \n\n–––\n\nБрондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"""
 )
 
 builder = BasePromptBuilder({}, "", (), ())
@@ -198,6 +193,11 @@ def handle_incoming_message(payload: dict) -> None:
         if bot_config["name"] == "dopsy_bot":
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
 
+            free = booking.get_free_windows()
+            availability_ctx = booking.format_availability_context(free)
+            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
+            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
+
             _session = _pg.get_active_session("dopsy_bot", chat_id)
 
             if _session:
@@ -218,7 +218,17 @@ def handle_incoming_message(payload: dict) -> None:
             logger.info("[BOOKING] Intent detection replied, Intent is %s", intent)
             if intent == 'question_price':
                 send_text_message(phone_number_id, sender_id, process_field_prices())
-                # calculate price method needed
+                return
+
+            elif intent == 'question_slots':
+                response = f"""Давайте забронируем! Вот доступные слоты:\n\n{availability_ctx}\n\n
+                            Укажите дату, время, или номер поля.\n\n
+                            — — —\n\n
+                            Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n
+                            Күнді, уақытты немесе алаң нөмірін жазыңыз."""
+                send_text_message(phone_number_id, sender_id, response)
+                return
+
             elif intent in ['booking_new', 'booking_continue']:
                 if has_awaiting_payments(sender_id):
                     send_text_message(phone_number_id, sender_id,
@@ -236,6 +246,7 @@ def handle_incoming_message(payload: dict) -> None:
                 logger.info("[LLM2] reply: %s", reply)
                 send_text_message(phone_number_id, sender_id, reply)
                 return
+
             elif intent == 'booking_cancel':
                 logger.info("[BOOKING] Cancelling all drafts of the user")
                 cancelled = booking_repo.cancel_draft_awaiting_payment(sender_id)
@@ -246,12 +257,6 @@ def handle_incoming_message(payload: dict) -> None:
 
             # (c) Neither handled the message → fall through to RAG/LLM
             logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
-
-            from integrations.booking import get_free_windows, format_availability_context
-            free = get_free_windows()
-            availability_ctx = format_availability_context(free)
-            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
-            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
         else:
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
@@ -269,9 +274,8 @@ def handle_incoming_message(payload: dict) -> None:
                 return
             logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
-            from integrations.trial import get_trial_daytime, format_availability_context
-            free = get_trial_daytime(bot_config["name"], None)
-            availability_ctx = format_availability_context(free)
+            free = trial.get_trial_daytime(bot_config["name"], None)
+            availability_ctx = trial.format_availability_context(free)
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 

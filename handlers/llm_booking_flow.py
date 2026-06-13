@@ -22,12 +22,8 @@ Seven checking rules (see _evaluate_and_respond):
   7. name / players       → basic validation
 """
 
-import json
 import logging
 import uuid
-
-import psycopg2.extras
-from openai import OpenAI
 
 import config
 from chat.conversation import clear_history
@@ -69,184 +65,6 @@ class LlmBookingFlowHandler:
 
     BOT_NAME = "dopsy_bot"
 
-    def __init__(self):
-        self._llm = OpenAI(api_key=config.OPENAI_API_KEY)
-
-    # ══════════════════════════════════════════════════════════════════════
-    #  LLM Integration
-    #  Combines the roles of router.py (intent) and extractor.py (params)
-    #  into callable methods instead of FastAPI endpoints.
-    # ══════════════════════════════════════════════════════════════════════
-
-    def route_and_extract(
-        self,
-        user_message: str,
-        chat_history: list | str,
-        rag_context: str = "",
-    ) -> tuple[str, dict]:
-        """
-        Single LLM call that determines the user's intent AND extracts any
-        booking parameters from the latest message.
-
-        Returns:
-            (intent, extracted_data)
-            intent: 'booking_new' | 'booking_continue' | 'question' | 'other'
-            extracted_data: dict with keys date, time_start, time_end,
-                            field, players, customer_name  (any may be None)
-        """
-        today = today_almaty()
-        fields_info = "\n".join(
-            f"  - Поле {f['id']}: формат {f['format']}"
-            for f in config.BOOKING_FIELDS
-        )
-
-        system_prompt = (
-            f"You are an intent classifier and data extractor for 'Допши', "
-            f"a WhatsApp football field rental bot.\n"
-            f"Today is {today}.\n"
-            f"Available fields:\n{fields_info}\n\n"
-            f"Analyze the user's LATEST message in the context of the chat history.\n\n"
-            f"1. Classify intent:\n"
-            f"   - 'booking_new'      — user wants to make a NEW booking\n"
-            f"   - 'booking_continue' — user is providing/changing details "
-            f"for an ongoing booking\n"
-            f"   - 'question'         — user asks a question (price, availability, etc.)\n"
-            f"   - 'other'            — greetings, thanks, unrelated\n\n"
-            f"2. Extract booking details from the LATEST message ONLY.\n"
-            f"   For any parameter the user did NOT clearly state, return null.\n"
-            f"   Never guess or infer unstated values.\n"
-            f"   - Dates → YYYY-MM-DD  (convert relative: 'завтра', 'четверг' …)\n"
-            f"   - Times → HH:MM  (24-hour)\n"
-            f"   - Field → integer field ID (1, 2, or 3)\n"
-            f"   - If user says a format like '5x5' without a specific number, "
-            f"pick the first matching field ID.\n"
-        )
-        if rag_context:
-            system_prompt += f"\n--- Context ---\n{rag_context}\n---"
-
-        # Build the message array: system + prior history + current user message
-        messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        if isinstance(chat_history, list):
-            messages.extend(chat_history)
-        elif chat_history:
-            messages.append({"role": "user", "content": str(chat_history)})
-        messages.append({"role": "user", "content": user_message})
-
-        empty = self._empty_extracted()
-
-        try:
-            response = self._llm.chat.completions.create(
-                model=config.MODEL_NAME,
-                temperature=0,
-                messages=messages,
-                tools=[{
-                    "type": "function",
-                    "function": {
-                        "name": "classify_and_extract",
-                        "description": (
-                            "Classify the user's intent and extract "
-                            "booking parameters from the latest message."
-                        ),
-                        "strict": True,
-                        "parameters": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "intent": {
-                                    "type": "string",
-                                    "enum": [
-                                        "booking_new",
-                                        "booking_continue",
-                                        "question",
-                                        "other",
-                                    ],
-                                },
-                                "date": {
-                                    "type": ["string", "null"],
-                                    "description": "YYYY-MM-DD",
-                                },
-                                "time_start": {
-                                    "type": ["string", "null"],
-                                    "description": "HH:MM (24h)",
-                                },
-                                "time_end": {
-                                    "type": ["string", "null"],
-                                    "description": "HH:MM (24h)",
-                                },
-                                "field": {
-                                    "type": ["integer", "null"],
-                                    "description": "Field ID (1, 2, or 3)",
-                                },
-                                "players": {
-                                    "type": ["integer", "null"],
-                                    "description": "Total number of players",
-                                },
-                                "name": {
-                                    "type": ["string", "null"],
-                                    "description": "Customer name",
-                                },
-                            },
-                            "required": [
-                                "intent", "date", "time_start",
-                                "time_end", "field", "players", "name",
-                            ],
-                        },
-                    },
-                }],
-                tool_choice={
-                    "type": "function",
-                    "function": {"name": "classify_and_extract"},
-                },
-            )
-
-            tc = response.choices[0].message.tool_calls
-            if not tc:
-                return "other", empty
-
-            parsed = json.loads(tc[0].function.arguments or "{}")
-            intent = parsed.get("intent", "other")
-
-            extracted = {
-                "date": parsed.get("date"),
-                "time_start": parsed.get("time_start"),
-                "time_end": parsed.get("time_end"),
-                "field": parsed.get("field"),
-                "players": parsed.get("players"),
-                "customer_name": parsed.get("name"),
-            }
-
-            # Sanitize: reject non-positive player counts
-            if extracted["players"] is not None and extracted["players"] <= 0:
-                extracted["players"] = None
-
-            return intent, extracted
-
-        except Exception as exc:
-            logger.error("[LLM_FLOW] route_and_extract failed: %s", exc)
-            return "other", empty
-
-    def extract_booking_data(
-        self, user_message: str, chat_history: list | str
-    ) -> dict:
-        """
-        Extract-only variant for draft continuation (intent already known).
-        Returns the same dict shape as route_and_extract's second element.
-        """
-        _, extracted = self.route_and_extract(user_message, chat_history)
-        return extracted
-
-    @staticmethod
-    def _empty_extracted() -> dict:
-        """All booking fields set to None."""
-        return {
-            "date": None,
-            "time_start": None,
-            "time_end": None,
-            "field": None,
-            "players": None,
-            "customer_name": None,
-        }
-
     # ══════════════════════════════════════════════════════════════════════
     #  Main Entry Point
     # ══════════════════════════════════════════════════════════════════════
@@ -284,7 +102,7 @@ class LlmBookingFlowHandler:
             data["field"] = self._resolve_field_id(format_str, data)
 
         # ── 1. Check for an existing draft ────────────────────────────────
-        draft = self._get_existing_draft(phone)
+        draft = booking_repo.get_existing_draft(phone)
 
         if draft:
             logger.info(
@@ -327,15 +145,9 @@ class LlmBookingFlowHandler:
             if data.get(key) is not None:
                 create_kwargs[key] = data[key]
 
-        # check if available needed
-
-        result = postgres.create_draft(
-            bot_name=self.BOT_NAME, chat_id=chat_id, **create_kwargs,
-        )
+        result = postgres.create_draft(bot_name=self.BOT_NAME, chat_id=chat_id, **create_kwargs)
         booking_id = result["data"]["booking_id"]
-        logger.info(
-            "[LLM_FLOW] Created draft id=%d fields=%s", booking_id, create_kwargs,
-        )
+        logger.info("[LLM_FLOW] Created draft id=%d fields=%s", booking_id, create_kwargs)
 
         data = {
             "date": data.get("date"),
@@ -386,26 +198,6 @@ class LlmBookingFlowHandler:
     # ══════════════════════════════════════════════════════════════════════
     #  Draft Management
     # ══════════════════════════════════════════════════════════════════════
-
-    @staticmethod
-    def _get_existing_draft(phone: str) -> dict | None:
-        """
-        Find the most recent draft booking for this phone.
-        This replaces the booking_sessions lookup — drafts are identified
-        solely by phone + state='draft'.
-        """
-        with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT id, date, time_start, time_end, field, format, "
-                    "       players, customer_name, phone, state, client_token "
-                    "FROM bookings "
-                    "WHERE phone = %s AND state = 'draft' "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (phone,),
-                )
-                row = cur.fetchone()
-                return dict(row) if row else None
 
     @staticmethod
     def _draft_to_data(draft: dict) -> dict:
@@ -560,7 +352,7 @@ class LlmBookingFlowHandler:
             f"Растау үшін төлем жасаңыз:\n{config.KASPI_PAYMENT_URL}\n"
             f"(⚠️ Ойынға келмей қалған жағдайда төлем қайтарылмайды)\n\n"
             f"PDF-чекті осы чатқа жіберіңіз — брондауды растаймыз. 🙏\n"
-            f"⚠️ 1 сағат ішінде төлем болмаса — бронь жойылады."
+            f"⚠️ 15 минут ішінде төлем болмаса — бронь жойылады."
         )
 
     def _cancel_draft(self, draft: dict, chat_id: str) -> str:
@@ -606,7 +398,6 @@ class LlmBookingFlowHandler:
             )
 
         has_time = has_ts and has_te
-        print("HAS", has_date, has_time, has_field, has_players, has_name)
 
         # ── Validate time order ──
         if has_time and data["time_start"] >= data["time_end"]:
