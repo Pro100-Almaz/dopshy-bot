@@ -135,8 +135,9 @@ SELECT_INTENT_LLM = {
                     "type": "string",
                     "enum": [
                         "question_price",
-                        # "question_slots",
+                        "question_slots",
                         # "question_field_size",
+                        "booking_init",
                         "booking_new",
                         "booking_continue",
                         "booking_cancel",
