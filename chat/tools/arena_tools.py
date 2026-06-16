@@ -91,12 +91,15 @@ EXTRACT_DATA_LLM = {
                 },
                 "time_start": {
                     "type": ["string", "null"],
-                    "description": "Format HH:MM"
-                                   "Return null unless the user explicitly states a time."
+                    "description": "Время начала, формат HH:MM (24h). "
+                                   "Число с временным маркером («на 10», «в 10», «сағат 10», «10ға») "
+                                   "без слова про людей — это время; нормализуй по правилам system-промпта "
+                                   "(утро/вечер по текущему времени). "
+                                   "null, если время не упомянуто."
                 },
                 "time_end": {
                     "type": ["string", "null"],
-                    "description": "Format HH:MM"
+                    "description": "Время окончания, формат HH:MM (24h). "
                                     "Return null unless the user explicitly states a time."
                 },
                 "field": {
@@ -105,8 +108,9 @@ EXTRACT_DATA_LLM = {
                 },
                 "players": {
                     "type": ["number", "null"],
-                    "description": "The total number of players expected. "
-                                   "Return null unless the user explicitly states a number."
+                    "description": "Количество игроков. Заполняй ТОЛЬКО при маркере людей "
+                                   "(«для 10», «10 человек», «нас 10», «10 адам», «10 кісі»). "
+                                   "Голое число с временным маркером («на 10») — это НЕ игроки, верни null."
                 },
                 "name": {
                     "type": ["string", "null"],
