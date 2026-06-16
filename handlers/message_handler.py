@@ -230,11 +230,11 @@ def handle_incoming_message(payload: dict) -> None:
                 if slots_date:
                     response = LlmBookingFlowHandler()._check_date_only({"date": slots_date})
                 else:
-                    response = f"""Давайте забронируем! Вот доступные слоты:\n\n{availability_ctx}\n\n
-                                Укажите дату, время, или номер поля.\n\n
-                                — — —\n\n
+                    response = f"""Давайте забронируем! Вот доступные слоты / 
                                 Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n
-                                Күнді, уақытты немесе алаң нөмірін жазыңыз."""
+                                Укажите дату, время, или номер поля./
+                                Күнді, уақытты немесе алаң нөмірін жазыңыз.
+                                """
                 send_text_message(phone_number_id, sender_id, response)
                 return
 
