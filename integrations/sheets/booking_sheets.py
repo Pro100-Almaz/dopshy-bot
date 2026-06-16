@@ -106,7 +106,7 @@ def _booking_to_row(b: dict) -> list:
         b.get("customer_name", "") or "",
         b.get("phone", ""),
         b.get("notes", "") or "",
-        _STATE_DISPLAY.get(b.get("state", ""), b.get("state", "")),
+        _STATES_RUSSIAN.get(b.get("state", ""), b.get("state", "")),
         now_almaty().strftime("%Y-%m-%d %H:%M"),
         b.get("source", ""),
         b.get("reserved_until", ""),
@@ -148,7 +148,9 @@ def update_booking_row(booking_id: int, fields: dict) -> None:
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     col_for = {"field": 2, "date": 3, "time_start": 4, "time_end": 5,
-               "customer_name": 6, "notes": 7, "state": 8}
+               "customer_name": 6, "phone": 7, "notes": 8, "state": 9,
+               "source": 11, "reserved_until": 12, "price_total": 13,
+               "payment_current": 14}
     try:
         ws = _get_worksheet()
         col_a = ws.col_values(1)
@@ -158,9 +160,9 @@ def update_booking_row(booking_id: int, fields: dict) -> None:
             if not col:
                 continue
             if key == "state":
-                value = _STATE_DISPLAY.get(value, value)
+                value = _STATES_RUSSIAN.get(value, value)
             ws.update_cell(idx, col, value)
-        ws.update_cell(idx, 9, now_almaty().strftime("%Y-%m-%d %H:%M"))
+        ws.update_cell(idx, 10, now_almaty().strftime("%Y-%m-%d %H:%M"))
     except ValueError:
         logger.warning("Sheets update_booking_row: booking %s not found", booking_id)
     except Exception as exc:
