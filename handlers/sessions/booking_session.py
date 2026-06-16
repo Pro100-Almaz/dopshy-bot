@@ -16,7 +16,6 @@ After confirming "да":
   - Kaspi payment link sent
   - Session deleted
 """
-import json
 import logging
 import re
 import threading
@@ -28,7 +27,7 @@ from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
 from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import booking_repo, postgres
-from integrations.sheets.booking_sheets import upsert_booking_row
+from integrations.sheets.booking_sheets import refresh_all_bookings
 
 logger = logging.getLogger(__name__)
 
@@ -497,22 +496,9 @@ class BookingPromptBuilder(BasePromptBuilder):
 
         logger.info("[BOOKING:confirm] booking_id=%d → awaiting_payment", booking_id)
 
-        booking_row = {
-            "id": booking_id,
-            "field": field,
-            "date": params["date"],
-            "time_start": time_start_str,
-            "time_end": time_end_str,
-            "customer_name": params.get("customer_name", ""),
-            "phone": sender_phone,
-            "players": params.get("players"),
-            "state": "ожидание оплаты",
-            "notes": "",
-        }
-
         def _write_to_sheets():
             try:
-                upsert_booking_row(booking_row)
+                refresh_all_bookings()
             except Exception as e:
                 logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 
