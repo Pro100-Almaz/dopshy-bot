@@ -14,7 +14,7 @@ from integrations.repo.booking_repo import has_awaiting_payments
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
-from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
+from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow, start_await_date_flow
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
@@ -140,7 +140,8 @@ def handle_incoming_message(payload: dict) -> None:
             send_text_message(
                 phone_number_id,
                 sender_id,
-                "Пожалуйста, отправьте текстовое сообщение. / Мәтіндік хабарлама жіберіңіз.",
+                "Извините, я не могу слушать голосовые сообщение, можете ли отправить текстовое сообщение. "
+                "/ Дыбысты хабарламаны тыңдай алмайтын едім. Өтініш, мәтіндік хабарлама жіберіңіз.",
             )
             return
 
@@ -221,12 +222,38 @@ def handle_incoming_message(payload: dict) -> None:
                 return
 
             elif intent == 'question_slots':
-                response = f"""Давайте забронируем! Вот доступные слоты:\n\n{availability_ctx}\n\n
-                            Укажите дату, время, или номер поля.\n\n
-                            — — —\n\n
-                            Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n
-                            Күнді, уақытты немесе алаң нөмірін жазыңыз."""
+                # If the user named a date, show slots for that day only; otherwise
+                # fall back to the full 7-day overview. _check_date_only also handles
+                # the "no free slots on that date" case (lists alternative dates).
+                slots_date = extract_booking_details(history, user_text).get("date")
+                logger.info("[BOOKING] question_slots — extracted date=%s", slots_date)
+                if slots_date:
+                    response = LlmBookingFlowHandler()._check_date_only({"date": slots_date})
+                else:
+                    response = f"""Давайте забронируем! Вот доступные слоты:\n\n{availability_ctx}\n\n
+                                Укажите дату, время, или номер поля.\n\n
+                                — — —\n\n
+                                Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n
+                                Күнді, уақытты немесе алаң нөмірін жазыңыз."""
                 send_text_message(phone_number_id, sender_id, response)
+                return
+
+            elif intent == 'booking_init':
+                # Booking intent but no date/time/field yet → ask for the date first,
+                # extract it on the next turn, then launch the flow on that date.
+                if has_awaiting_payments(sender_id):
+                    send_text_message(phone_number_id, sender_id,
+                                      'Вы не можете создать новую бронь пока не оплатите предыдущую! \n'
+                                      '\n----\n'
+                                      'Осығын дейінгі брондарыңызды төлемей жаңа брондар өоя алмайсыз! \n')
+                    clear_history(chat_id)
+                    return
+                lang = builder.detect_lang(user_text)
+                reply = start_await_date_flow(chat_id, sender_id, lang)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", reply)
+                logger.info("[BOOKING] booking_init — asked for date, awaiting reply")
+                send_text_message(phone_number_id, sender_id, reply)
                 return
 
             elif intent in ['booking_new', 'booking_continue']:
