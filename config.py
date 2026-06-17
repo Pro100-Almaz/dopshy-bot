@@ -102,3 +102,5 @@ CHUNK_OVERLAP: int = 50
 # Conversation
 MAX_HISTORY_MESSAGES: int = 20  # total messages kept per chat (user+assistant)
 CONVERSATION_DB_PATH: str = os.getenv("CONVERSATION_DB_PATH", "./data/conversations.db")
+
+MAX_PLAYERS: int = 200

@@ -56,7 +56,7 @@ def get_user_editable_bookings(phone: str) -> list[dict]:
                 WHERE phone = %s
                   AND state IN ('awaiting_payment', 'confirmed')
                   AND start_at > NOW()
-                ORDER BY start_at
+                ORDER BY date, start_at
             """, (phone,))
             return [dict(r) for r in cur.fetchall()]
 
@@ -83,7 +83,7 @@ def get_bookings_for_sheet() -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state
+                       phone, notes, state, price_total, reserved_until, source, updated_at
                 FROM bookings
                 WHERE state IN ('awaiting_payment', 'confirmed')
                 ORDER BY date, time_start, field

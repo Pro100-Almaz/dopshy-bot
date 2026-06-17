@@ -107,9 +107,9 @@ def _booking_to_row(b: dict) -> list:
         b.get("phone", ""),
         b.get("notes", "") or "",
         _STATES_RUSSIAN.get(b.get("state", ""), b.get("state", "")),
-        now_almaty().strftime("%Y-%m-%d %H:%M"),
+        (b.get("updated_at") or now_almaty()).strftime("%Y-%m-%d %H:%M"),
         b.get("source", ""),
-        b.get("reserved_until", ""),
+        b.get("reserved_until").strftime("%Y-%m-%d %H:%M") if b.get("reserved_until") else "",
         float(b.get("price_total", 0)),
         b.get("payment_current", 0),
     ]

@@ -514,7 +514,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state"}
+_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source",}
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
@@ -527,7 +527,7 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"UPDATE bookings SET {set_clause} WHERE id = %s RETURNING id", vals
+                f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
             )
             if cur.fetchone():
                 _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
