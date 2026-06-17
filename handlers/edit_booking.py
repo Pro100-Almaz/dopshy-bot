@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import config
 from integrations import booking_service
+from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo
 from integrations.sheets.booking_sheets import refresh_all_bookings
 
@@ -206,6 +207,11 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
 def handle_edit_request(chat_id: str, sender_phone: str, diff: dict) -> str:
     """Process a single edit_booking tool-call payload from the LLM."""
     diff = {k: v for k, v in (diff or {}).items() if v not in (None, "")}
+    for key in ("time_start", "time_end"):
+        if key in diff:
+            diff[key] = floor_time_to_30_minutes(
+                datetime.strptime(diff[key], "%H:%M").time()
+            )
     logger.info("[EDIT] chat_id=%s phone=%s diff=%s", chat_id, sender_phone, diff)
 
     bookings = booking_repo.get_user_editable_bookings(sender_phone)

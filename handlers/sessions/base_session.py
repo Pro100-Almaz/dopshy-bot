@@ -4,6 +4,7 @@ import re
 from datetime import date, datetime, time
 
 from chat.conversation import clear_history
+from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import postgres
 from utils import today_almaty
 
@@ -293,6 +294,8 @@ class BaseStepHandler:
         time_start, time_end = m.group(1), m.group(2)
         time_start = self.builder.pad_time(time_start)
         time_end = self.builder.pad_time(time_end)
+        time_start = floor_time_to_30_minutes(datetime.strptime(time_start, "%H:%M").time())
+        time_end = floor_time_to_30_minutes(datetime.strptime(time_end, "%H:%M").time())
         logger.info(self.LOGGER_MESSAGES["step_time_parse"], time_start, time_end)
 
         # TRANSITIVE BOOKING: time_start > time_end is allowed (day transition, e.g. 23:00→01:00)

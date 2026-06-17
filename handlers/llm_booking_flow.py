@@ -26,6 +26,8 @@ import logging
 import re
 import uuid
 
+from datetime import datetime
+
 import config
 from chat.conversation import clear_history
 from handlers.base_classes.base_asker import BaseAsker
@@ -36,6 +38,7 @@ from handlers.base_classes.base_format import BaseFormat
 from handlers.base_classes.base_helper import BaseHelper
 from integrations import booking as booking_logic
 from integrations import booking_service
+from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings
 
@@ -75,6 +78,8 @@ T = {
                              "kk": "Алаң табылмады. Қолжетімді:"},
     "players_invalid":      {"ru": "Игроков должно быть > 0.",
                              "kk": "Ойыншылар саны 0-ден көп болуы керек."},
+    "players_overflow":     {"ru": f"Макс. количество игроков: {config.MAX_PLAYERS}",
+                             "kk": f"Макс. ойыншы саны: {config.MAX_PLAYERS}"},
     "field_free":           {"ru": "✅ Поле {fid} ({fmt}) свободно\n{date} {ts}–{te}!",
                              "kk": "✅ Алаң {fid} ({fmt}) бос\n{date} {ts}–{te}!"},
     "field_taken":          {"ru": "❌ Поле {fid} ({fmt}) занято {date} {ts}–{te}.",
@@ -191,6 +196,12 @@ class LlmBookingFlowHandler:
             None — not a booking intent; caller should fall through to RAG/LLM
         """
         data["lang"] = lang
+
+        for key in ("time_start", "time_end"):
+            if data.get(key):
+                data[key] = floor_time_to_30_minutes(
+                    datetime.strptime(data[key], "%H:%M").time()
+                )
 
         # data["field"] from the extractor is a format string ("5x5", "6x6"),
         # not a field ID.
@@ -406,6 +417,11 @@ class LlmBookingFlowHandler:
         # ── Rule 7: validate players ──
         if has_players and int(data["players"]) <= 0:
             return self.asker.localize(lang, "players_invalid")
+        if has_players and int(data["players"]) > config.MAX_PLAYERS:
+            data["players"] = None
+            has_players = False
+            return (self.asker.localize(lang, "players_overflow")
+                    + "\n" + self.asker.localize(lang, "ask_players"))
 
         # ── All 6 fields → confirm ──
         if has_date and has_time and has_field and has_players and has_name:
