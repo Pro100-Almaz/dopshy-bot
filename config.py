@@ -66,12 +66,12 @@ GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Bookings")
 # ---------------------------------------------------------------------------
 # Booking (Bot 1 — Dopshy field rental only)
 # ---------------------------------------------------------------------------
-BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "09:00")
-BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:00")
+BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "00:00")
+BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:59")
 BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
 BOOKING_FIELDS: list = _json.loads(
-    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"5x5"},'
-                                '{"id":2,"format":"6x6"},'
+    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"6x6"},'
+                                '{"id":2,"format":"5x5"},'
                                 '{"id":3,"format":"5x5"}]')
 )
 BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")

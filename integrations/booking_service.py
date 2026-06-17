@@ -119,7 +119,7 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     "  start_at = (date + time_start) AT TIME ZONE %s, "
                     "  end_at   = (date + time_end)   AT TIME ZONE %s, "
                     "  price_total = (SELECT price_per_hour FROM fields WHERE id = bookings.field) "
-                    "                * (EXTRACT(EPOCH FROM ((date + time_end) - (date + time_start))) / 3600.0), "
+                    "                * (ROUND(EXTRACT(EPOCH FROM ((date + time_end) - (date + time_start))) / 3600.0, 1)), "
                     "  updated_at = NOW() "
                     "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
                     (booking_id, config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
@@ -408,7 +408,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (%s::date + '23:59:59'::time) AT TIME ZONE %s, "
                         "   (SELECT price_per_hour FROM fields WHERE id = %s) "
-                        "   * (EXTRACT(EPOCH FROM ('23:59:59'::time - %s::time)) / 3600.0), "
+                        "   * (EXTRACT(EPOCH FROM ('23:59:59'::time - %s::time + INTERVAL '1 second')) / 3600.0), "
                         "   %s) "
                         "RETURNING id",
                         (row["phone"], new_name, new_date, new_ts,
@@ -456,7 +456,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "  (%s, %s, %s::date, %s::time, %s::time, %s, %s, "
                         "   %s, %s, %s, %s, gen_random_uuid(), %s, "
                         "   %s, "
-                        "   (%s::date + %s::time) AT TIME ZONE %s, "
+                     "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (SELECT price_per_hour FROM fields WHERE id = %s) "
                         "   * (EXTRACT(EPOCH FROM (%s::time - %s::time)) / 3600.0)) "

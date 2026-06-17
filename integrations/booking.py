@@ -18,8 +18,18 @@ _T = {
                              "kk": "Келесі 7 күнге бос уақыт жоқ."},
     "available_days":       {"ru": "Свободные окна на ближайшие 7 дней:",
                              "kk": "Келесі 7 күнге бос уақыттар:"},
-    "field":                 {"ru": "Поле",
+    "field":                {"ru": "Поле",
                              "kk": "Алаң"},
+    "no_bookings":          {"ru": "У вас нет предстоящих броней.",
+                             "kk": "Сізде алдағы уақытта бронь жоқ."},
+    "my_bookings":          {"ru": "Ваши брони:",
+                             "kk": "Сіздің брондарыңыз:"},
+    "awaiting_payment":     {"ru": "⏳ ожидает оплату",
+                             "kk": "⏳ төлем күтілуде"},
+    "confirmed":            {"ru": "✅ оплачено",
+                             "kk": "✅ төленді"},
+    "players":              {"ru": "игроков",
+                             "kk": "ойыншы"}
 }
 
 
@@ -69,6 +79,18 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
             current_dt += duration
         current_date += timedelta(days=1)
     return slots
+
+
+def floor_time_to_30_minutes(t: time) -> str:
+    hour = t.hour
+    minute = 30
+    if t.minute < 10:
+        minute = 0
+    elif t.minute > 50:
+        minute = 0
+        hour = (hour + 1) % 24
+
+    return f"{hour:02d}:{minute:02d}"
 
 
 def get_all_booked(week_start: date, week_end: date) -> list[dict]:
@@ -207,26 +229,23 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
     return "\n".join(lines)
 
 
-def format_user_booking_context(bookings: list[dict]) -> str:
+def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
     if not bookings:
-        return "У этого пользователя нет предстоящих броней."
+        return _T["no_bookings"][lang]
 
-    status_map = {
-        "awaiting_payment": "⏳ ожидает оплату",
-        "confirmed": "✅ оплачено",
-    }
+    WEEKDAYS = _WEEKDAY_RU if lang == 'ru' else _WEEKDAY_KZ
 
-    lines = ["Брони этого пользователя:"]
+    lines = [_T["my_bookings"][lang]]
     for b in bookings:
         d = b["date"] if isinstance(b["date"], date) else \
             datetime.strptime(str(b["date"]), "%Y-%m-%d").date()
         ts = str(b["time_start"])[:5]
         te = str(b["time_end"])[:5]
-        day_label = f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}"
-        status_str = status_map.get(b.get("state", ""), b.get("state", ""))
+        day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
+        status_str = _T.get(b.get("state", ""))[lang] if _T.get(b.get("state", "")) else b.get("state", "")
         lines.append(
-            f"  {day_label} {ts}–{te} | Поле {b['field']} ({b['format']}) | "
-            f"{b.get('players', '?')} игр. | {status_str}"
+            f"  {day_label} {ts}–{te} | {_T['field'][lang]} {b['field']} ({b['format']}) | "
+            f"{b.get('players', '?')} {_T['players'][lang]}. | {status_str}"
         )
     return "\n".join(lines)
 

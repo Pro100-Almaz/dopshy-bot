@@ -64,6 +64,8 @@ _T = {
                                 "kk": "Қанша ойыншы болады?"},
     "ask_players_invalid":    {"ru": "Пожалуйста, введите количество игроков (например: *8*).",
                                 "kk": "Ойыншылар санын енгізіңіз (мысалы: *8*)."},
+    "players_overflow":       {"ru": f"Макс. количество игроков: {config.MAX_PLAYERS}",
+                                "kk": f"Макс. ойыншы саны: {config.MAX_PLAYERS}"},
     "ask_name":               {"ru": "Укажите ваше имя:",
                                 "kk": "Атыңызды жазыңыз:"},
     "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 Игроков: {players}\n👤 Имя: {name}\n\nПодтвердить? Ответьте *да* или *нет*.",
@@ -477,7 +479,11 @@ class BookingStepHandler(BaseStepHandler):
             logger.info(self.LOGGER_MESSAGES["step_players_reject"], user_text)
             return self.builder.data_localization(lang, "ask_players_invalid")
 
-        params["players"] = int(m.group(1))
+        players = int(m.group(1))
+        if players > config.MAX_PLAYERS:
+            return (self.builder.data_localization(lang, "players_overflow")
+                    + "\n" + self.builder.data_localization(lang, "ask_players"))
+        params["players"] = players
         logger.info(self.LOGGER_MESSAGES["step_players_advance"], params["players"])
         postgres.update_draft(self.builder.bot_name, params["booking_id"], players=params["players"])
         self.save_session(chat_id, "step_name", params)

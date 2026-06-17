@@ -302,7 +302,7 @@ def handle_incoming_message(payload: dict) -> None:
                 logger.info("[BOOKING] Fetching user's own bookings")
                 bookings = booking_repo.get_user_upcoming_bookings(sender_id)
                 send_text_message(phone_number_id, sender_id,
-                                  booking.format_user_booking_context(bookings))
+                                  booking.format_user_booking_context(bookings, lang))
                 return
 
             elif intent == 'booking_cancel':
