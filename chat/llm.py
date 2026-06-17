@@ -1,4 +1,4 @@
-"""OpenAI GPT-4o-mini integration."""
+"""OpenAI GPT-4.1 integration."""
 import config
 import json
 import logging
@@ -138,7 +138,7 @@ def route_incoming_message(history: list, user_message: str) -> str:
 
     try:
         response = _client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=config.INTENT_MODEL,
             temperature=0,  # deterministic classification
             messages=messages,
             tools=[SELECT_INTENT_LLM],
