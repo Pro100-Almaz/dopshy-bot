@@ -57,8 +57,6 @@ def _serialize(b: dict) -> dict:
             out[k] = float(v)
         elif hasattr(v, "isoformat"):  # time
             out[k] = str(v)[:5]
-        elif v is None:
-            out[k] = ""
     return out
 
 
@@ -73,15 +71,6 @@ def _authenticate():
         return jsonify({"ok": False, "code": "RATE_LIMITED",
                         "message": "Too many requests."}), 429
     return None
-
-
-def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> list[dict]:
-    for booking in bookings:
-        booking.setdefault("payment_current", 0)
-        for payment in payments:
-            if payment['booking_id'] == booking["id"]:
-                booking["payment_current"] += payment.get("amount", 0)
-    return bookings
 
 
 def _api_key_actor() -> str:
@@ -100,8 +89,6 @@ def list_bookings():
     rows = repo.get_bookings_in_range(
         start, end, states=("draft", "awaiting_payment", "confirmed")
     )
-    payments = booking_service.get_payments()
-    rows = _combine_bookings_payments(rows, payments)
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
 
 
@@ -136,12 +123,13 @@ def create_booking():
         price_total=body.get("price_total"),
         client_token=body.get("client_token"),
         actor_id=_api_key_actor(),
-        reserved_until=body.get("reserved_until"),
-        updated_by=body.get("updated_by", "Неизвестен")
     )
 
     if res["ok"] and res.get("data", {}).get("booking_id"):
         booking_row = repo.get_booking(res["data"]["booking_id"])
+        if booking_row:
+            upsert_booking_row(booking_row)
+
         _single_table_write(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 409)
@@ -151,8 +139,6 @@ def create_booking():
 def patch_booking(booking_id: int):
     body = request.get_json(silent=True) or {}
     patch = {}
-    if "source" in body:
-        patch["source"] = body["source"]
     if "customer" in body:
         patch["customer_name"] = body["customer"]
     if "notes" in body:

@@ -14,7 +14,6 @@ import threading
 from typing import Any
 
 import config
-from integrations.booking_service import get_payments
 from integrations.repo import booking_repo
 from utils import now_almaty, today_almaty
 import datetime
@@ -23,9 +22,8 @@ logger = logging.getLogger(__name__)
 
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-_HEADERS = ["Номер брони", "Поле", "Дата", "Начало", "Конец",
-            "Имя клиента", "Телефон", "Заметки", "Статус", "Посл. обновлено",
-            "Менеджер", "Резерв до", "Сумма", "Оплачено"]
+_HEADERS = ["booking_id", "field", "date", "start", "end",
+            "customer", "notes", "status", "last_synced"]
 _COL_COUNT = len(_HEADERS)  # 9
 
 # DB state → sheet status label (uppercase, matches Apps Script dropdown).
@@ -55,15 +53,6 @@ _ws_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> list[dict]:
-    for booking in bookings:
-        booking.setdefault("payment_current", 0)
-        for payment in payments:
-            if payment['booking_id'] == booking["id"]:
-                booking["payment_current"] += payment.get("amount", 0)
-    return bookings
-
 
 def _get_spreadsheet():
     global _client, _spreadsheet
@@ -104,14 +93,9 @@ def _booking_to_row(b: dict) -> list:
         str(b.get("time_start", ""))[:5],
         str(b.get("time_end", ""))[:5],
         b.get("customer_name", "") or "",
-        b.get("phone", ""),
         b.get("notes", "") or "",
-        _STATES_RUSSIAN.get(b.get("state", ""), b.get("state", "")),
+        _STATE_DISPLAY.get(b.get("state", ""), b.get("state", "")),
         now_almaty().strftime("%Y-%m-%d %H:%M"),
-        b.get("source", ""),
-        b.get("reserved_until", ""),
-        float(b.get("price_total", 0)),
-        b.get("payment_current", 0),
     ]
 
 
@@ -148,9 +132,7 @@ def update_booking_row(booking_id: int, fields: dict) -> None:
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     col_for = {"field": 2, "date": 3, "time_start": 4, "time_end": 5,
-               "customer_name": 6, "phone": 7, "notes": 8, "state": 9,
-               "source": 11, "reserved_until": 12, "price_total": 13,
-               "payment_current": 14}
+               "customer_name": 6, "notes": 7, "state": 8}
     try:
         ws = _get_worksheet()
         col_a = ws.col_values(1)
@@ -160,9 +142,9 @@ def update_booking_row(booking_id: int, fields: dict) -> None:
             if not col:
                 continue
             if key == "state":
-                value = _STATES_RUSSIAN.get(value, value)
+                value = _STATE_DISPLAY.get(value, value)
             ws.update_cell(idx, col, value)
-        ws.update_cell(idx, 10, now_almaty().strftime("%Y-%m-%d %H:%M"))
+        ws.update_cell(idx, 9, now_almaty().strftime("%Y-%m-%d %H:%M"))
     except ValueError:
         logger.warning("Sheets update_booking_row: booking %s not found", booking_id)
     except Exception as exc:
@@ -175,8 +157,6 @@ def refresh_all_bookings() -> None:
         return
     try:
         rows = booking_repo.get_bookings_for_sheet()
-        payments = get_payments()
-        rows = _combine_bookings_payments(rows, payments)
         ws = _get_worksheet()
         ws.clear()
         data = [_HEADERS] + [_booking_to_row(b) for b in rows]
@@ -323,9 +303,8 @@ def _paint_confirmed_booking(worksheet, booking, requests) -> None:
     booking_end_time = _floor_time_to_30_minutes(booking['time_end'])
 
     col = booking_date.weekday() + 2
-    time_slots = _TIME_SLOTS + ["24:00"]
-    start_slot_index = time_slots.index(booking_start_time)
-    end_slot_index = time_slots.index(booking_end_time)
+    start_slot_index = _TIME_SLOTS.index(booking_start_time)
+    end_slot_index = _TIME_SLOTS.index(booking_end_time)
 
     sheet_row = start_slot_index + 2
 
