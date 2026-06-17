@@ -168,18 +168,22 @@ SELECT_INTENT_LLM = {
                         "question_price",
                         "question_slots",
                         "question_location",
-                        # "question_field_size",
-                        "booking_init",
                         "booking_new",
                         "booking_continue",
+                        "booking_edit",
                         "booking_status",
                         "booking_cancel",
                         "other"
                     ],
                     "description": "The categorized intent of the message."
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["ru", "kk"],
+                    "description": "Language of the user's latest message: ru=Russian, kk=Kazakh."
                 }
             },
-            "required": ["type"]
+            "required": ["type", "lang"]
         }
     }
 }

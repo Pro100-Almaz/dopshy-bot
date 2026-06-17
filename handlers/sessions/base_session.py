@@ -295,7 +295,9 @@ class BaseStepHandler:
         time_end = self.builder.pad_time(time_end)
         logger.info(self.LOGGER_MESSAGES["step_time_parse"], time_start, time_end)
 
-        if time_start >= time_end:
+        # TRANSITIVE BOOKING: time_start > time_end is allowed (day transition, e.g. 23:00→01:00)
+        # Only reject zero-duration bookings (time_start == time_end)
+        if time_start == time_end:
             logger.info(self.LOGGER_MESSAGES["step_time_reject_inverted"], time_start, time_end)
             return {
                 "ok": False,
@@ -309,5 +311,6 @@ class BaseStepHandler:
                     "time_end": time_end,
                     "day_windows": day_windows,
                     "chosen_date": chosen_date,
+                    "is_transitive": time_start > time_end,  # TRANSITIVE BOOKING flag
                 }
             }

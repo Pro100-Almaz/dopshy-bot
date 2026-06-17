@@ -11,6 +11,17 @@ logger = logging.getLogger(__name__)
 
 _WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+_WEEKDAY_KZ = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+_T = {
+    "no_available_days":    {"ru": "Свободных слотов на ближайшие 7 дней нет.",
+                             "kk": "Келесі 7 күнге бос уақыт жоқ."},
+    "available_days":       {"ru": "Свободные окна на ближайшие 7 дней:",
+                             "kk": "Келесі 7 күнге бос уақыттар:"},
+    "field":                 {"ru": "Поле",
+                             "kk": "Алаң"},
+}
+
 
 def _parse_time(t: str) -> time:
     return datetime.strptime(t, "%H:%M").time()
@@ -77,6 +88,26 @@ def is_range_free(booked: list[dict], date_str: str, time_start: str, time_end: 
         if req_start < b_end and req_end > b_start:
             return False
     return True
+
+
+# TRANSITIVE BOOKING: helpers for day-crossing ranges (e.g. 23:00→01:00)
+def is_transitive_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:
+    """Check availability for a transitive (day-crossing) range.
+    Splits into two checks: date/time_start→23:59 and date+1/00:00→time_end."""
+    next_day = str(datetime.strptime(date_str, "%Y-%m-%d").date() + timedelta(days=1))
+    if not is_range_free(booked, date_str, time_start, "23:59", field_id):
+        return False
+    if not is_range_free(booked, next_day, "00:00", time_end, field_id):
+        return False
+    return True
+
+
+def check_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:
+    """Check if a range is free, automatically handling transitive (day-crossing) ranges.
+    If time_start > time_end, delegates to is_transitive_range_free."""
+    if time_start > time_end:
+        return is_transitive_range_free(booked, date_str, time_start, time_end, field_id)
+    return is_range_free(booked, date_str, time_start, time_end, field_id)
 
 
 def get_free_windows() -> list[dict]:
@@ -149,9 +180,11 @@ def get_free_windows() -> list[dict]:
 # Context formatting for LLM injection
 # ---------------------------------------------------------------------------
 
-def format_availability_context(free_windows: list[dict]) -> str:
+def format_availability_context(free_windows: list[dict], lang: str = "ru") -> str:
     if not free_windows:
-        return "Свободных слотов на ближайшие 7 дней нет."
+        return _T["no_available_days"][lang]
+
+    WEEKDAYS = _WEEKDAY_KZ if lang == 'kk' else _WEEKDAY_RU
 
     by_date: dict[date, dict] = {}
     for w in free_windows:
@@ -159,9 +192,9 @@ def format_availability_context(free_windows: list[dict]) -> str:
                .setdefault((w["field"], w["format"]), []) \
                .append(w)
 
-    lines = ["Свободные окна на ближайшие 7 дней:"]
+    lines = [_T["available_days"][lang]]
     for d in sorted(by_date):
-        day_label = f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}"
+        day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = []
         for (field, fmt) in sorted(by_date[d]):
             windows = sorted(by_date[d][(field, fmt)], key=lambda w: w["time_start"])
@@ -169,7 +202,7 @@ def format_availability_context(free_windows: list[dict]) -> str:
                 f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
                 for w in windows
             )
-            field_lines.append(f"    поле {field} ({fmt}): {range_str}")
+            field_lines.append(f"    {_T["field"][lang]} {field} ({fmt}): {range_str}")
         lines.append(f"  {day_label}:\n" + "\n".join(field_lines))
     return "\n".join(lines)
 

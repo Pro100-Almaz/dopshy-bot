@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import config
 from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
@@ -78,8 +78,24 @@ _T = {
                                 "kk": "Брондау жасау кезінде қате шықты. Қайталап көріңіз.\nҚайталанса — әкімшімен хабарласыңыз."},
     "no_availability":        {"ru": "К сожалению, свободных слотов на ближайшие 7 дней нет. Пожалуйста, свяжитесь с администратором.",
                                 "kk": "Өкінішке орай, келесі 7 күнде бос слот жоқ. Әкімшімен хабарласыңыз."},
-    "booking_pending":        {"ru": "📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 {players} игроков\n👤 {name}\n\n⏳ Статус: ожидает оплаты\n\nДля подтверждения брони оплатите по ссылке:\n{pay_url}\n(⚠️ПРИМЕЧАНИЕ⚠️Возврат денежных средств не производится в случае неявки на игру.)\n\nПосле оплаты отправьте PDF-чек из Kaspi сюда в чат — и мы сразу подтвердим вашу бронь. 🙏\n\n⚠️ Если оплата не поступит в течении 15 минут — бронь будет автоматически отменена.",
-                                "kk": "📋 Брондау тіркелді, бірақ әлі расталмады!\n\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 {players} ойыншы\n👤 {name}\n\n⏳ Күй: төлем күтілуде\n\nБрондауды растау үшін төлем жасаңыз:\n{pay_url}\n(⚠️ЕСКЕРТУ⚠️Ойынға келмей қалған жағдайда төлем қайтарылмайды.)\n\nТөлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n⚠️ 15 минут ішінде төлем келмесе — бронь автоматты түрде жойылады."},
+    "booking_pending":        {"ru": "📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n"
+                                     "📅 {date}\n⏰ {start}–{end}\n"
+                                     "⚽ Поле {field} ({fmt})\n"
+                                     "👥 {players} игроков\n"
+                                     "👤 {name}\n\n⏳ Статус: ожидает оплаты\n\n"
+                                     "Для подтверждения брони оплатите аванс НЕ МЕНЕЕ 10тысяч тг по ссылке:\n{pay_url}\n"
+                                     "(⚠️ПРИМЕЧАНИЕ⚠️Возврат денежных средств не производится в случае неявки на игру.)\n\n"
+                                     "После оплаты отправьте PDF-чек из Kaspi сюда в чат — и мы сразу подтвердим вашу бронь. 🙏\n\n"
+                                     "⚠️ Если оплата не поступит в течении 15 минут — бронь будет автоматически отменена.",
+                                "kk": "📋 Брондау тіркелді, бірақ әлі расталмады!\n\n"
+                                      "📅 {date}\n⏰ {start}–{end}\n"
+                                      "⚽ Алаң {field} ({fmt})\n"
+                                      "👥 {players} ойыншы\n"
+                                      "👤 {name}\n\n⏳ Статус: төлем күтілуде\n\n"
+                                      "Брондауды растау үшін КЕМІНДЕ 10мың тг көлемінде төлем жасаңыз:\n{pay_url}\n"
+                                      "(⚠️ЕСКЕРТУ⚠️Ойынға келмей қалған жағдайда төлем қайтарылмайды.)\n\n"
+                                      "Төлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n"
+                                      "⚠️ 15 минут ішінде төлем келмесе — бронь автоматты түрде жойылады."},
     "field_label":            {"ru": "Поле", "kk": "Алаң"},
 }
 
@@ -372,18 +388,23 @@ class BookingStepHandler(BaseStepHandler):
         time_start, time_end = helper_response["data"]["time_start"], helper_response["data"]["time_end"]
         day_windows = helper_response["data"]["day_windows"]
         chosen_date = helper_response["data"]["chosen_date"]
+        # TRANSITIVE BOOKING: flag from step_time_helper when time_start > time_end
+        is_transitive = helper_response["data"].get("is_transitive", False)
         lang = params.get("lang", "ru")
 
         week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
+        # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+        booked_end = week_end + timedelta(days=1) if is_transitive else week_end
+        booked = booking_logic.get_all_booked(week_start, booked_end)
         logger.info(
             self.LOGGER_MESSAGES["step_time_booked"],
             week_start, week_end, len(booked),
         )
 
+        # TRANSITIVE BOOKING: use check_range_free which handles day-crossing ranges
         free_fields = [
             f for f in config.BOOKING_FIELDS
-            if booking_logic.is_range_free(booked, params["date"], time_start, time_end, f["id"])
+            if booking_logic.check_range_free(booked, params["date"], time_start, time_end, f["id"])
         ]
         logger.info(
             self.LOGGER_MESSAGES["step_time_fields"],

@@ -7,7 +7,9 @@ load_dotenv()
 
 # OpenAI
 OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
-MODEL_NAME: str = "gpt-4o-mini"
+MODEL_NAME: str = "gpt-4.1"
+EXTRACTOR_MODEL: str = "gpt-4.1-mini"
+INTENT_MODEL: str = "gpt-4.1"
 EMBEDDING_MODEL: str = "text-embedding-3-small"
 
 # WhatsApp Cloud API
@@ -100,3 +102,5 @@ CHUNK_OVERLAP: int = 50
 # Conversation
 MAX_HISTORY_MESSAGES: int = 20  # total messages kept per chat (user+assistant)
 CONVERSATION_DB_PATH: str = os.getenv("CONVERSATION_DB_PATH", "./data/conversations.db")
+
+MAX_PLAYERS: int = 200
