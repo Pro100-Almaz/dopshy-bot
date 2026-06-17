@@ -15,7 +15,7 @@ from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 import config
-from integrations import booking_service
+from integrations import repo
 from integrations.receipt_parser import parse_receipt
 from utils import now_almaty
 
@@ -27,7 +27,7 @@ def _reject(code: str, reason: str, parsed: dict) -> dict:
 
 
 def _recipient_matches(parsed: dict) -> bool:
-    for r in booking_service.get_payment_recipients():
+    for r in repo.get_payment_recipients():
         if r["bank"] != parsed["bank"]:
             continue
         if r.get("bin") and parsed.get("bin") and r["bin"] == parsed["bin"]:

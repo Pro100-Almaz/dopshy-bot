@@ -12,4 +12,3 @@ build/
 .idea/
 CLAUDE.md
 secrets/
-*.db

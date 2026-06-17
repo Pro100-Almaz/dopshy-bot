@@ -38,11 +38,8 @@
     <label>Конец</label>
     <input type="time" id="end" step="300">
 
-    <label>Имя клиента</label>
+    <label>Клиент (имя / телефон)</label>
     <input type="text" id="customer">
-
-    <label>Номер клиента</label>
-    <input type="text" id="phone">
 
     <label>Примечание</label>
     <textarea id="notes" rows="2"></textarea>
@@ -74,7 +71,6 @@
           start: document.getElementById('start').value,
           end: document.getElementById('end').value,
           customer: document.getElementById('customer').value,
-          phone: document.getElementById('phone').value,
           notes: document.getElementById('notes').value,
           repeat: document.getElementById('repeat').value,
           endDate: document.getElementById('endDate').value,
@@ -113,6 +109,5 @@
           }
       });
     </script>
-
   </body>
 </html>

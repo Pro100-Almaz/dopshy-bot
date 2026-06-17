@@ -16,6 +16,7 @@ After confirming "да":
   - Kaspi payment link sent
   - Session deleted
 """
+import json
 import logging
 import re
 import threading
@@ -27,7 +28,7 @@ from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
 from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import booking_repo, postgres
-from integrations.sheets.booking_sheets import refresh_all_bookings
+from integrations.sheets.booking_sheets import upsert_booking_row
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,6 @@ _BOT_NAME = config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name']
 
 
 _T = {
-    "ask_booking_date":       {"ru": "На какую дату хотите забронировать?",
-                                "kk": "Қай күнге брондағыңыз келеді?"},
     "ask_date_header":        {"ru": "📅 Выберите дату (введите номер):",
                                 "kk": "📅 Күнді таңдаңыз (нөмірді енгізіңіз):"},
     "ask_date_invalid":       {"ru": "Пожалуйста, введите номер из списка.",
@@ -142,48 +141,20 @@ _NEW_BOOKING_KW = (
 )
 
 
-def start_await_date_flow(chat_id: str, sender_phone: str, lang: str = "ru") -> str:
+def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru") -> str:
     """
-    Ask the user which date they want *before* launching the booking flow.
-
-    Saves a lightweight `step_await_date` session — no draft is created yet, the
-    draft is created only once the date is known (see handle_step_await_date).
-    The user's next message is parsed by the extractor to pull the date out.
-    `lang` is stored so subsequent steps reuse it.
-    """
-    builder = BookingPromptBuilder(_BOT_NAME)
-    handler = BookingStepHandler(_BOT_NAME)
-    handler.save_session(
-        chat_id,
-        "step_await_date",
-        {
-            "sender_phone": sender_phone,
-            "lang": lang,
-        },
-    )
-    logger.info("[BOOKING:await_date] chat_id=%s lang=%s — asking user for a date", chat_id, lang)
-    return builder.data_localization(lang, "ask_booking_date")
-
-
-def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru",
-                       prefill_date: str | None = None) -> str:
-    """
-    Create a new booking session and return the next prompt.
+    Create a new booking session (step_date) and return the date-selection prompt.
     Called from message_handler when the LLM calls the start_booking tool, or
     directly from handle_booking_turn on a deterministic booking-intent match.
     `lang` is stored in the session so every subsequent step reuses it.
-
-    When `prefill_date` (YYYY-MM-DD) is supplied and is an available day, the
-    date-selection step is skipped: the draft is created with that date and the
-    session jumps straight to step_time. Otherwise the usual step_date list is shown.
     """
     builder = BookingPromptBuilder(_BOT_NAME)
     handler = BookingStepHandler(_BOT_NAME)
     free = booking_logic.get_free_windows()
     available_days = sorted({w["date"] for w in free})
     logger.info(
-        "[BOOKING:start_flow] chat_id=%s lang=%s free_windows=%d available_days=%s prefill_date=%s",
-        chat_id, lang, len(free), available_days, prefill_date,
+        "[BOOKING:start_flow] chat_id=%s lang=%s free_windows=%d available_days=%s",
+        chat_id, lang, len(free), available_days,
     )
 
     if not available_days:
@@ -194,28 +165,17 @@ def start_booking_flow(chat_id: str, sender_phone: str, lang: str = "ru",
     draft = postgres.create_draft(bot_name=_BOT_NAME, chat_id=chat_id, phone=sender_phone, client_token=client_token)
     booking_id = draft["data"]["booking_id"]
 
-    params = {
-        "sender_phone": sender_phone,
-        "available_days": [str(d) for d in available_days],
-        "booking_id": booking_id,
-        "client_token": client_token,
-        "lang": lang,
-    }
-
-    # Date already known (extracted upstream) and valid → skip step_date.
-    if prefill_date and prefill_date in params["available_days"]:
-        chosen = date.fromisoformat(prefill_date)
-        day_windows = [w for w in free if w["date"] == chosen]
-        params["date"] = prefill_date
-        postgres.update_draft(_BOT_NAME, booking_id, date=prefill_date)
-        handler.save_session(chat_id, "step_time", params)
-        logger.info(
-            "[BOOKING:start_flow] Draft booking_id=%d created with prefill_date=%s — jumping to step_time",
-            booking_id, prefill_date,
-        )
-        return builder.ask_time(chosen, day_windows, lang)
-
-    handler.save_session(chat_id, "step_date", params)
+    handler.save_session(
+        chat_id,
+        "step_date",
+        {
+            "sender_phone": sender_phone,
+            "available_days": [str(d) for d in available_days],
+            "booking_id": booking_id,
+            "client_token": client_token,
+            "lang": lang,
+        },
+    )
     logger.info(
         "[BOOKING:start_flow] Draft booking_id=%d created — step_date. Showing %d days",
         booking_id, len(available_days),
@@ -260,12 +220,6 @@ def handle_booking_turn(
             logger.info("[BOOKING] Cancel intent detected — session cleared for %s", chat_id)
             return ("Хорошо, бронь отменена. Если передумаете — просто напишите! 🙂\n\n"
                     "Жарайды, брондау тоқтатылды. Қайта қаласаңыз — жазыңыз!")
-
-        # Awaiting-date pre-step has no draft yet (booking_id is created only once
-        # the date is known), so it must be handled before the stale-session guard
-        # below, which assumes every session carries a booking_id.
-        if state == "step_await_date":
-            return handler.handle_step_await_date(chat_id, sender_phone, user_text, params)
 
         # Legacy session from before the state-machine upgrade has no draft booking_id.
         # Discard it and restart the flow cleanly rather than crashing.
@@ -322,40 +276,6 @@ class BookingStepHandler(BaseStepHandler):
 
     def get_free_now(self, days: list | None = None):
         return booking_logic.get_free_windows()
-
-    def handle_step_await_date(self, chat_id: str, sender_phone: str, user_text: str, params: dict) -> str:
-        """
-        Pre-booking step: the user signalled a booking intent but gave no date.
-        Extract the date from their reply via the LLM extractor, then launch the
-        normal booking flow pre-filled with that date (skipping step_date).
-
-        - No date recognised  → re-ask, staying in step_await_date.
-        - Date recognised but with no free slots → restart with the date list.
-        - Valid date          → start_booking_flow positioned straight on step_time.
-        """
-        from handlers.extractor import extract_booking_details
-        from chat.conversation import get_history
-
-        lang = params.get("lang", "ru")
-        extracted = extract_booking_details(get_history(chat_id), user_text)
-        date_str = extracted.get("date")
-        logger.info("[BOOKING:step_await_date] extracted date=%s | user_text=%.80s", date_str, user_text)
-
-        free = booking_logic.get_free_windows()
-        available_days = {str(d) for d in {w["date"] for w in free}}
-
-        if not date_str:
-            return self.builder.data_localization(lang, "ask_booking_date")
-
-        if date_str not in available_days:
-            logger.info(
-                "[BOOKING:step_await_date] date=%s not available — restarting with date list", date_str,
-            )
-            postgres.delete_session(self.builder.bot_name, chat_id)
-            return start_booking_flow(chat_id, sender_phone, lang)
-
-        postgres.delete_session(self.builder.bot_name, chat_id)
-        return start_booking_flow(chat_id, sender_phone, lang, prefill_date=date_str)
 
     def handle_step_name(self, chat_id: str, user_text: str, params: dict) -> str:
         params["customer_name"] = user_text.strip()
@@ -496,9 +416,22 @@ class BookingPromptBuilder(BasePromptBuilder):
 
         logger.info("[BOOKING:confirm] booking_id=%d → awaiting_payment", booking_id)
 
+        booking_row = {
+            "id": booking_id,
+            "field": field,
+            "date": params["date"],
+            "time_start": time_start_str,
+            "time_end": time_end_str,
+            "customer_name": params.get("customer_name", ""),
+            "phone": sender_phone,
+            "players": params.get("players"),
+            "state": "ожидание оплаты",
+            "notes": "",
+        }
+
         def _write_to_sheets():
             try:
-                refresh_all_bookings()
+                upsert_booking_row(booking_row)
             except Exception as e:
                 logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 

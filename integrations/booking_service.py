@@ -50,6 +50,10 @@ def _record_event(cur, booking_id: int, event: str, actor_type: str,
 # ---------------------------------------------------------------------------
 
 
+
+
+
+
 def request_payment(booking_id: int, client_token: str) -> dict:
     """Transition DRAFT → AWAITING_PAYMENT: reserve the slot and start the TTL.
 
@@ -143,15 +147,6 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
     return _ok({"booking_id": booking_id})
 
 
-def get_payments() -> list[dict]:
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM payments WHERE status = 'accepted'",
-            )
-            return [dict(r) for r in cur.fetchall()]
-
-
 def reject_payment(booking_id: int, reason: str, parsed: dict | None = None) -> dict:
     """Log a rejected receipt attempt without changing booking state.
 
@@ -176,6 +171,7 @@ def reject_payment(booking_id: int, reason: str, parsed: dict | None = None) -> 
     return _ok({"booking_id": booking_id})
 
 
+
 def get_payment_recipients() -> list[dict]:
     """Active acceptable payment recipients (for receipt validation)."""
     with _conn() as conn:
@@ -184,6 +180,8 @@ def get_payment_recipients() -> list[dict]:
                 "SELECT bank, bin, name, phone FROM payment_recipients WHERE active = TRUE"
             )
             return [dict(r) for r in cur.fetchall()]
+
+
 
 
 def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
@@ -213,6 +211,8 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
     if not row:
         return _err("NOT_FOUND", "Бронь не найдена.")
     return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+
+
 
 
 # Fields a client may patch via the self-service edit flow.
@@ -397,7 +397,7 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                 f"UPDATE bookings SET {set_clause} WHERE id = %s RETURNING id", vals
             )
             if cur.fetchone():
-                _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
+                _record_event(cur, booking_id, "manager_updated", "manager", actor_id)
                 return _ok({"booking_id": booking_id})
     return _err("NOT_FOUND", "Бронь не найдена.")
 
@@ -408,29 +408,23 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                            notes: str | None = None, price_total=None,
                            actor_id: str | None = None,
                            client_token: str | None = None,
-                           format_: str | None = None, reserved_until: int = 30,
-                           updated_by: str = 'manager') -> dict:
+                           format_: str | None = None) -> dict:
     """Manager-created booking: DRAFT is skipped, goes straight to CONFIRMED."""
     if format_ is None:
         conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
         format_ = conf["format"] if conf else ""
     try:
         dates = list(generate_dates(date, end_date, time_start, time_end, repeat))
-        is_repetitive = repeat != "none"
         group_repetition = str(uuid.uuid4())
         exec_string = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
                           notes, price_total, state, source, client_token, start_at, end_at,
-                          group_repetition, group_transition, repeat, reserved_until)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', %s,
+                          group_repetition, group_transition)
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', 'manager',
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
                                  (%s::date + %s::time) AT TIME ZONE %s,
-                                 %s, %s, %s,
-                                 CASE
-                                     WHEN %s THEN NULL
-                                     ELSE NOW() + make_interval(mins => %s)
-                                     END)
+                                 %s, %s)
                          RETURNING id"""
 
         with _conn() as conn:
@@ -440,15 +434,14 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                     cur.execute(
                         exec_string,
                         (phone, customer, d_str, st, et, int(field), format_,
-                         notes, price_total, updated_by, client_token,
+                         notes, price_total, client_token,
                          d_str, st, config.BOOKING_TIMEZONE,
                          d_str, et, config.BOOKING_TIMEZONE,
-                         group_repetition, group_transition,
-                         is_repetitive, is_repetitive, reserved_until),
+                         group_repetition, group_transition),
                     )
                     client_token = str(uuid.uuid4())
                     booking_id = cur.fetchone()["id"]
-                    _record_event(cur, booking_id, "manager_created", updated_by, actor_id)
+                    _record_event(cur, booking_id, "manager_created", "manager", actor_id)
     except psycopg2.errors.ExclusionViolation:
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     except psycopg2.errors.UniqueViolation:
