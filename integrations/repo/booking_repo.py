@@ -186,3 +186,19 @@ def has_awaiting_payments(phone: str) -> bool:
             """, (phone,))
 
             return cur.rowcount > 0
+
+
+# TRANSITIVE BOOKING: sum price_total across all bookings in the same group_transition
+def get_transitive_total_price(booking_id: int) -> float | None:
+    """For transitive bookings, sum price_total of all bookings in the same group_transition.
+    Returns None if the booking has no group_transition (not a transitive pair)."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT SUM(b2.price_total) AS total_price
+                FROM bookings b1
+                JOIN bookings b2 ON b2.group_transition = b1.group_transition
+                WHERE b1.id = %s AND b1.group_transition IS NOT NULL
+            """, (booking_id,))
+            row = cur.fetchone()
+            return float(row["total_price"]) if row and row["total_price"] else None

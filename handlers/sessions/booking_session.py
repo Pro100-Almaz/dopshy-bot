@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import config
 from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
@@ -372,18 +372,23 @@ class BookingStepHandler(BaseStepHandler):
         time_start, time_end = helper_response["data"]["time_start"], helper_response["data"]["time_end"]
         day_windows = helper_response["data"]["day_windows"]
         chosen_date = helper_response["data"]["chosen_date"]
+        # TRANSITIVE BOOKING: flag from step_time_helper when time_start > time_end
+        is_transitive = helper_response["data"].get("is_transitive", False)
         lang = params.get("lang", "ru")
 
         week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
+        # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+        booked_end = week_end + timedelta(days=1) if is_transitive else week_end
+        booked = booking_logic.get_all_booked(week_start, booked_end)
         logger.info(
             self.LOGGER_MESSAGES["step_time_booked"],
             week_start, week_end, len(booked),
         )
 
+        # TRANSITIVE BOOKING: use check_range_free which handles day-crossing ranges
         free_fields = [
             f for f in config.BOOKING_FIELDS
-            if booking_logic.is_range_free(booked, params["date"], time_start, time_end, f["id"])
+            if booking_logic.check_range_free(booked, params["date"], time_start, time_end, f["id"])
         ]
         logger.info(
             self.LOGGER_MESSAGES["step_time_fields"],

@@ -55,6 +55,12 @@ def request_payment(booking_id: int, client_token: str) -> dict:
 
     The EXCLUDE constraint atomically rejects a slot already held by another
     awaiting_payment/confirmed booking → SLOT_TAKEN.
+
+    TRANSITIVE BOOKING: if time_start > time_end (day transition, e.g. 23:00→01:00),
+    the draft is split into two bookings linked by group_transition UUID:
+      - first:  date, time_start → 23:59:59 (with reserved_until)
+      - second: date+1, 00:00 → original time_end (NO reserved_until)
+    Both are transitioned to awaiting_payment atomically.
     """
     try:
         with _conn() as conn:
@@ -74,17 +80,49 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                 if not (row["date"] and row["time_start"] and row["time_end"] and row["field"]):
                     return _err("INVALID_TIME", "Не все данные брони заполнены.")
 
+                # TRANSITIVE BOOKING: split if time_start > time_end (day transition)
+                is_transitive = row["time_start"] > row["time_end"]
+                if is_transitive:
+                    group_transition = str(uuid.uuid4())
+                    original_time_end = row["time_end"]
+                    next_day = row["date"] + timedelta(days=1)
+
+                    # Update first booking: end at 23:59:59, set group_transition
+                    cur.execute(
+                        "UPDATE bookings SET "
+                        "  time_end = '23:59:59'::time, "
+                        "  group_transition = %s "
+                        "WHERE id = %s",
+                        (group_transition, booking_id),
+                    )
+
+                    # Create second booking: 00:00 → original end, next day, NO reserved_until
+                    cur.execute(
+                        "INSERT INTO bookings "
+                        "  (phone, customer_name, date, time_start, time_end, field, format, "
+                        "   players, notes, state, source, client_token, group_transition) "
+                        "SELECT phone, customer_name, %s, '00:00'::time, %s::time, "
+                        "  field, format, players, notes, 'draft', source, gen_random_uuid(), %s "
+                        "FROM bookings WHERE id = %s",
+                        (str(next_day), str(original_time_end)[:5], group_transition, booking_id),
+                    )
+
+                # Transition to awaiting_payment — handles both normal and transitive
+                # TRANSITIVE BOOKING: CASE skips reserved_until for the latter booking
                 cur.execute(
                     "UPDATE bookings SET "
                     "  state = 'awaiting_payment', "
-                    "  reserved_until = NOW() + make_interval(secs => %s), "
+                    "  reserved_until = CASE "
+                    "    WHEN id = %s THEN NOW() + make_interval(secs => %s) "
+                    "    ELSE reserved_until "
+                    "  END, "
                     "  start_at = (date + time_start) AT TIME ZONE %s, "
                     "  end_at   = (date + time_end)   AT TIME ZONE %s, "
                     "  price_total = (SELECT price_per_hour FROM fields WHERE id = bookings.field) "
                     "                * (EXTRACT(EPOCH FROM ((date + time_end) - (date + time_start))) / 3600.0), "
                     "  updated_at = NOW() "
                     "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
-                    (config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
+                    (booking_id, config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
                      config.BOOKING_TIMEZONE, booking_id, booking_id),
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
@@ -227,6 +265,11 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     Implemented as cancel-old + insert-new in one transaction so the existing
     `bookings_no_overlap` EXCLUDE constraint catches slot clashes atomically.
 
+    TRANSITIVE BOOKING: if the booking is part of a transitive pair (group_transition),
+    both bookings are cancelled and new ones are created. The logical time range is
+    reconstructed from first.time_start + second.time_end. If the new range is also
+    transitive, two new bookings are created; otherwise a single one.
+
     Rules:
       - state ∈ {awaiting_payment, confirmed}                  → else INVALID_STATE
       - start_at > NOW() + 48 hours                            → else EDIT_WINDOW_CLOSED
@@ -234,8 +277,8 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
       - At least one field in `patch` actually changes a value → else NO_CHANGE
       - New (field, time-range) doesn't clash with another     → else SLOT_TAKEN
 
-    On success: old row → state=cancelled + client_edited_at=NOW();
-    new row → state preserved from old (so paid bookings stay paid),
+    On success: old row(s) → state=cancelled + client_edited_at=NOW();
+    new row(s) → state preserved from old (so paid bookings stay paid),
     predecessor_booking_id = old.id, payment rows re-pointed to the new id,
     price_total recomputed from the new (field × duration).
     """
@@ -250,6 +293,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                     "SELECT id, phone, date, time_start, time_end, field, format, "
                     "       players, customer_name, notes, state, price_total, "
                     "       reserved_until, source, predecessor_booking_id, start_at, "
+                    "       group_transition, "
                     "       start_at > NOW() + make_interval(hours => %s) AS in_window "
                     "FROM bookings WHERE id = %s FOR UPDATE",
                     (_CLIENT_EDIT_WINDOW_HOURS, booking_id),
@@ -270,10 +314,29 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "Эту бронь уже один раз меняли. Следующее изменение — через администратора.",
                     )
 
+                # TRANSITIVE BOOKING: if part of a pair, find the partner
+                # and reconstruct the logical time range
+                paired_row = None
+                logical_time_end = str(row["time_end"])[:5]
+                if row["group_transition"]:
+                    cur.execute(
+                        "SELECT id, date, time_start, time_end FROM bookings "
+                        "WHERE group_transition = %s AND id != %s FOR UPDATE",
+                        (row["group_transition"], booking_id),
+                    )
+                    paired_row = cur.fetchone()
+                    if paired_row:
+                        # Second booking (later date) has the actual end time
+                        if row["date"] <= paired_row["date"]:
+                            logical_time_end = str(paired_row["time_end"])[:5]
+                        else:
+                            logical_time_end = str(row["time_end"])[:5]
+
                 # Merge the diff onto the current row to compute the new slot.
                 new_date    = diff.get("date",          str(row["date"]))
                 new_ts      = diff.get("time_start",    str(row["time_start"])[:5])
-                new_te      = diff.get("time_end",      str(row["time_end"])[:5])
+                # TRANSITIVE BOOKING: use logical end time (from second booking) as the base
+                new_te      = diff.get("time_end",      logical_time_end)
                 new_field   = int(diff.get("field",     row["field"]))
                 new_players = diff.get("players",       row["players"])
                 new_name    = diff.get("customer_name", row["customer_name"])
@@ -281,7 +344,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 old_snap = {
                     "date":          str(row["date"]),
                     "time_start":    str(row["time_start"])[:5],
-                    "time_end":      str(row["time_end"])[:5],
+                    "time_end":      logical_time_end,
                     "field":         row["field"],
                     "players":       row["players"],
                     "customer_name": row["customer_name"],
@@ -301,50 +364,113 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 conf = next((f for f in config.BOOKING_FIELDS if f["id"] == new_field), None)
                 new_format = conf["format"] if conf else row["format"]
 
-                # 1) Cancel the old row. This drops it out of the EXCLUDE
-                #    constraint's WHERE clause (which is scoped to
-                #    awaiting_payment + confirmed) so the new INSERT can take
-                #    the same slot — unless a third booking already holds it.
-                cur.execute(
-                    "UPDATE bookings SET state = 'cancelled', "
-                    "  client_edited_at = NOW(), updated_at = NOW() "
-                    "WHERE id = %s",
-                    (booking_id,),
-                )
+                # 1) Cancel old booking(s). Drops them out of the EXCLUDE
+                #    constraint's WHERE clause so new INSERTs can take the same slot.
+                if paired_row:
+                    # TRANSITIVE BOOKING: cancel both halves
+                    cur.execute(
+                        "UPDATE bookings SET state = 'cancelled', "
+                        "  client_edited_at = NOW(), updated_at = NOW() "
+                        "WHERE group_transition = %s",
+                        (row["group_transition"],),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bookings SET state = 'cancelled', "
+                        "  client_edited_at = NOW(), updated_at = NOW() "
+                        "WHERE id = %s",
+                        (booking_id,),
+                    )
                 _record_event(
                     cur, booking_id, "client_edit_cancelled", "whatsapp", actor_id,
                     note=json.dumps({"from": old_snap, "to": new_snap},
                                     ensure_ascii=False, default=str),
                 )
 
-                # 2) Insert the new row with state preserved (confirmed →
-                #    confirmed, awaiting_payment → awaiting_payment with the
-                #    original reserved_until). price_total is recomputed using
-                #    the same formula as request_payment so a field-format
-                #    change is priced correctly.
-                cur.execute(
-                    "INSERT INTO bookings "
-                    "  (phone, customer_name, date, time_start, time_end, field, format, "
-                    "   players, notes, state, source, client_token, predecessor_booking_id, "
-                    "   reserved_until, start_at, end_at, price_total) "
-                    "VALUES "
-                    "  (%s, %s, %s::date, %s::time, %s::time, %s, %s, "
-                    "   %s, %s, %s, %s, gen_random_uuid(), %s, "
-                    "   %s, "
-                    "   (%s::date + %s::time) AT TIME ZONE %s, "
-                    "   (%s::date + %s::time) AT TIME ZONE %s, "
-                    "   (SELECT price_per_hour FROM fields WHERE id = %s) "
-                    "   * (EXTRACT(EPOCH FROM (%s::time - %s::time)) / 3600.0)) "
-                    "RETURNING id",
-                    (row["phone"], new_name, new_date, new_ts, new_te,
-                     new_field, new_format,
-                     new_players, row["notes"], row["state"], row["source"], booking_id,
-                     row["reserved_until"],
-                     new_date, new_ts, config.BOOKING_TIMEZONE,
-                     new_date, new_te, config.BOOKING_TIMEZONE,
-                     new_field, new_te, new_ts),
-                )
-                new_id = cur.fetchone()["id"]
+                # 2) Insert new booking(s) with state preserved.
+                # TRANSITIVE BOOKING: if new range crosses midnight, create two bookings
+                new_is_transitive = new_ts > new_te
+
+                if new_is_transitive:
+                    new_group_transition = str(uuid.uuid4())
+                    next_day = str(datetime.strptime(new_date, "%Y-%m-%d").date() + timedelta(days=1))
+
+                    # First booking: date, time_start → 23:59:59 (with reserved_until)
+                    cur.execute(
+                        "INSERT INTO bookings "
+                        "  (phone, customer_name, date, time_start, time_end, field, format, "
+                        "   players, notes, state, source, client_token, predecessor_booking_id, "
+                        "   reserved_until, start_at, end_at, price_total, group_transition) "
+                        "VALUES "
+                        "  (%s, %s, %s::date, %s::time, '23:59:59'::time, %s, %s, "
+                        "   %s, %s, %s, %s, gen_random_uuid(), %s, "
+                        "   %s, "
+                        "   (%s::date + %s::time) AT TIME ZONE %s, "
+                        "   (%s::date + '23:59:59'::time) AT TIME ZONE %s, "
+                        "   (SELECT price_per_hour FROM fields WHERE id = %s) "
+                        "   * (EXTRACT(EPOCH FROM ('23:59:59'::time - %s::time)) / 3600.0), "
+                        "   %s) "
+                        "RETURNING id",
+                        (row["phone"], new_name, new_date, new_ts,
+                         new_field, new_format,
+                         new_players, row["notes"], row["state"], row["source"], booking_id,
+                         row["reserved_until"],
+                         new_date, new_ts, config.BOOKING_TIMEZONE,
+                         new_date, config.BOOKING_TIMEZONE,
+                         new_field, new_ts,
+                         new_group_transition),
+                    )
+                    new_id = cur.fetchone()["id"]
+
+                    # Second booking: date+1, 00:00 → time_end (NO reserved_until)
+                    cur.execute(
+                        "INSERT INTO bookings "
+                        "  (phone, customer_name, date, time_start, time_end, field, format, "
+                        "   players, notes, state, source, client_token, "
+                        "   start_at, end_at, price_total, group_transition) "
+                        "VALUES "
+                        "  (%s, %s, %s::date, '00:00'::time, %s::time, %s, %s, "
+                        "   %s, %s, %s, %s, gen_random_uuid(), "
+                        "   (%s::date + '00:00'::time) AT TIME ZONE %s, "
+                        "   (%s::date + %s::time) AT TIME ZONE %s, "
+                        "   (SELECT price_per_hour FROM fields WHERE id = %s) "
+                        "   * (EXTRACT(EPOCH FROM (%s::time - '00:00'::time)) / 3600.0), "
+                        "   %s) "
+                        "RETURNING id",
+                        (row["phone"], new_name, next_day, new_te,
+                         new_field, new_format,
+                         new_players, row["notes"], row["state"], row["source"],
+                         next_day, config.BOOKING_TIMEZONE,
+                         next_day, new_te, config.BOOKING_TIMEZONE,
+                         new_field, new_te,
+                         new_group_transition),
+                    )
+                else:
+                    # Non-transitive: single new booking (original logic)
+                    cur.execute(
+                        "INSERT INTO bookings "
+                        "  (phone, customer_name, date, time_start, time_end, field, format, "
+                        "   players, notes, state, source, client_token, predecessor_booking_id, "
+                        "   reserved_until, start_at, end_at, price_total) "
+                        "VALUES "
+                        "  (%s, %s, %s::date, %s::time, %s::time, %s, %s, "
+                        "   %s, %s, %s, %s, gen_random_uuid(), %s, "
+                        "   %s, "
+                        "   (%s::date + %s::time) AT TIME ZONE %s, "
+                        "   (%s::date + %s::time) AT TIME ZONE %s, "
+                        "   (SELECT price_per_hour FROM fields WHERE id = %s) "
+                        "   * (EXTRACT(EPOCH FROM (%s::time - %s::time)) / 3600.0)) "
+                        "RETURNING id",
+                        (row["phone"], new_name, new_date, new_ts, new_te,
+                         new_field, new_format,
+                         new_players, row["notes"], row["state"], row["source"], booking_id,
+                         row["reserved_until"],
+                         new_date, new_ts, config.BOOKING_TIMEZONE,
+                         new_date, new_te, config.BOOKING_TIMEZONE,
+                         new_field, new_te, new_ts),
+                    )
+                    new_id = cur.fetchone()["id"]
+
                 _record_event(
                     cur, new_id, "client_edited", "whatsapp", actor_id,
                     note=json.dumps({"from": old_snap, "to": new_snap,
@@ -352,13 +478,17 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                                     ensure_ascii=False, default=str),
                 )
 
-                # 3) Re-point payment rows onto the new booking so a confirmed
-                #    edit keeps its payment linkage and the receipt UNIQUE
-                #    index still protects against re-use of the same receipt.
+                # 3) Re-point payment rows onto the new primary booking
                 cur.execute(
                     "UPDATE payments SET booking_id = %s WHERE booking_id = %s",
                     (new_id, booking_id),
                 )
+                # TRANSITIVE BOOKING: also re-point payments from the paired booking
+                if paired_row:
+                    cur.execute(
+                        "UPDATE payments SET booking_id = %s WHERE booking_id = %s",
+                        (new_id, paired_row["id"]),
+                    )
 
                 cur.execute(
                     "SELECT id, phone, customer_name, date, time_start, time_end, "
@@ -367,6 +497,9 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                     (new_id,),
                 )
                 new_booking = dict(cur.fetchone())
+                # TRANSITIVE BOOKING: show logical end time in the response, not 23:59:59
+                if new_is_transitive:
+                    new_booking["time_end"] = new_te
 
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] client_edit_booking id=%d — new slot taken", booking_id)
@@ -435,8 +568,10 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
 
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                for d, st, et, group_transition in dates:         # date, start_time, end_time, group_transition
+                for d, st, et, group_transition, is_latter in dates:
                     d_str = datetime.strftime(d, format="%Y-%m-%d")
+                    # TRANSITIVE BOOKING: skip reserved_until for the latter booking
+                    skip_reserved = is_repetitive or is_latter
                     cur.execute(
                         exec_string,
                         (phone, customer, d_str, st, et, int(field), format_,
@@ -444,7 +579,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                          d_str, st, config.BOOKING_TIMEZONE,
                          d_str, et, config.BOOKING_TIMEZONE,
                          group_repetition, group_transition,
-                         is_repetitive, is_repetitive, reserved_until),
+                         is_repetitive, skip_reserved, reserved_until),
                     )
                     client_token = str(uuid.uuid4())
                     booking_id = cur.fetchone()["id"]
@@ -464,6 +599,13 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
 
 
 def generate_dates(start_date, end_date, start_time, end_time, repeat):
+    """Yield (date, start_time, end_time, group_transition, is_latter) tuples.
+
+    TRANSITIVE BOOKING: when start_time > end_time (day transition), yields two
+    entries per iteration — first half (start→23:59:59, is_latter=False) and
+    second half (00:00→end, is_latter=True). The latter booking should not get
+    a reserved_until value since payments are checked on the former.
+    """
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
@@ -471,10 +613,10 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
     while current <= end:
         group_transition = str(uuid.uuid4())
         if transitive:
-            yield current, start_time, "23:59:59", group_transition
-            yield current + timedelta(days=1), "00:00", end_time, group_transition
+            yield current, start_time, "23:59:59", group_transition, False
+            yield current + timedelta(days=1), "00:00", end_time, group_transition, True
         else:
-            yield current, start_time, end_time, group_transition
+            yield current, start_time, end_time, group_transition, False
 
         if repeat == "none":
             break

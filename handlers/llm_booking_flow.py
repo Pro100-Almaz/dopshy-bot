@@ -185,10 +185,13 @@ class LlmBookingFlowHandler:
 
         if date_str and ts and te:
             week_start, week_end = booking_logic.get_week_range()
-            booked = booking_logic.get_all_booked(week_start, week_end)
+            # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+            from datetime import timedelta
+            extend = timedelta(days=1) if ts > te else timedelta(0)
+            booked = booking_logic.get_all_booked(week_start, week_end + extend)
             for f in matching:
-
-                if booking_logic.is_range_free(
+                # TRANSITIVE BOOKING: check_range_free handles day-crossing ranges
+                if booking_logic.check_range_free(
                     booked, date_str, ts, te, f["id"],
                 ):
                     return f["id"]
@@ -382,8 +385,9 @@ class LlmBookingFlowHandler:
 
         has_time = has_ts and has_te
 
-        # ── Validate time order ──
-        if has_time and data["time_start"] >= data["time_end"]:
+        # TRANSITIVE BOOKING: time_start > time_end is allowed (day transition, e.g. 23:00→01:00)
+        # Only reject zero-duration bookings
+        if has_time and data["time_start"] == data["time_end"]:
             return (
                 "Время окончания должно быть позже начала / "
                 "Аяқталу уақыты басталудан кейін болуы керек.\n"
@@ -471,14 +475,18 @@ class LlmBookingFlowHandler:
         field_id = int(data["field"])
 
         week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
+        # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+        from datetime import timedelta
+        extend = timedelta(days=1) if ts > te else timedelta(0)
+        booked = booking_logic.get_all_booked(week_start, week_end + extend)
 
         field_conf = next(
             (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
         )
         fmt = data.get("format") or field_conf.get("format", "?")
 
-        if booking_logic.is_range_free(booked, date_str, ts, te, field_id):
+        # TRANSITIVE BOOKING: check_range_free handles day-crossing ranges
+        if booking_logic.check_range_free(booked, date_str, ts, te, field_id):
             # Slot is free — ask for what's still missing
             missing = self._format_missing_fields(data)
 
@@ -529,16 +537,20 @@ class LlmBookingFlowHandler:
         ts, te = data["time_start"], data["time_end"]
 
         week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
+        # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+        from datetime import timedelta
+        extend = timedelta(days=1) if ts > te else timedelta(0)
+        booked = booking_logic.get_all_booked(week_start, week_end + extend)
         free = booking_logic.get_free_windows()
         dates = sorted({str(w["date"]) for w in free})
 
         # For each date, find fields where the requested range is free
+        # TRANSITIVE BOOKING: check_range_free handles day-crossing ranges
         available: list[dict] = []
         for d in dates:
             free_fields = [
                 f for f in config.BOOKING_FIELDS
-                if booking_logic.is_range_free(booked, d, ts, te, f["id"])
+                if booking_logic.check_range_free(booked, d, ts, te, f["id"])
             ]
             if free_fields:
                 available.append({"date": d, "fields": free_fields})
@@ -631,7 +643,10 @@ class LlmBookingFlowHandler:
         ts, te = data["time_start"], data["time_end"]
 
         week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
+        # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+        from datetime import timedelta
+        extend = timedelta(days=1) if ts > te else timedelta(0)
+        booked = booking_logic.get_all_booked(week_start, week_end + extend)
 
         candidates = config.BOOKING_FIELDS
         if data.get("format"):
@@ -639,9 +654,10 @@ class LlmBookingFlowHandler:
                 f for f in candidates if f["format"] == data["format"]
             ]
 
+        # TRANSITIVE BOOKING: check_range_free handles day-crossing ranges
         free_fields = [
             f for f in candidates
-            if booking_logic.is_range_free(booked, date_str, ts, te, f["id"])
+            if booking_logic.check_range_free(booked, date_str, ts, te, f["id"])
         ]
 
         if not free_fields:
@@ -694,14 +710,18 @@ class LlmBookingFlowHandler:
         field_id = int(data["field"])
 
         week_start, week_end = booking_logic.get_week_range()
-        booked = booking_logic.get_all_booked(week_start, week_end)
+        # TRANSITIVE BOOKING: extend range by 1 day to check next-day availability
+        from datetime import timedelta
+        extend = timedelta(days=1) if ts > te else timedelta(0)
+        booked = booking_logic.get_all_booked(week_start, week_end + extend)
 
         field_conf = next(
             (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
         )
         fmt = data.get("format") or field_conf.get("format", "?")
 
-        if not booking_logic.is_range_free(booked, date_str, ts, te, field_id):
+        # TRANSITIVE BOOKING: check_range_free handles day-crossing ranges
+        if not booking_logic.check_range_free(booked, date_str, ts, te, field_id):
             # Slot taken between data collection and confirmation
             free = booking_logic.get_free_windows()
             day_windows = [w for w in free if str(w["date"]) == date_str]

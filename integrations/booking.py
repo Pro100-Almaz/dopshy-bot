@@ -79,6 +79,26 @@ def is_range_free(booked: list[dict], date_str: str, time_start: str, time_end: 
     return True
 
 
+# TRANSITIVE BOOKING: helpers for day-crossing ranges (e.g. 23:00→01:00)
+def is_transitive_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:
+    """Check availability for a transitive (day-crossing) range.
+    Splits into two checks: date/time_start→23:59 and date+1/00:00→time_end."""
+    next_day = str(datetime.strptime(date_str, "%Y-%m-%d").date() + timedelta(days=1))
+    if not is_range_free(booked, date_str, time_start, "23:59", field_id):
+        return False
+    if not is_range_free(booked, next_day, "00:00", time_end, field_id):
+        return False
+    return True
+
+
+def check_range_free(booked: list[dict], date_str: str, time_start: str, time_end: str, field_id: int) -> bool:
+    """Check if a range is free, automatically handling transitive (day-crossing) ranges.
+    If time_start > time_end, delegates to is_transitive_range_free."""
+    if time_start > time_end:
+        return is_transitive_range_free(booked, date_str, time_start, time_end, field_id)
+    return is_range_free(booked, date_str, time_start, time_end, field_id)
+
+
 def get_free_windows() -> list[dict]:
     """
     Compute exact contiguous free time windows for the next 7 days.

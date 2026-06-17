@@ -432,6 +432,11 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
         )
         return
 
+    # TRANSITIVE BOOKING: use combined price of both bookings for payment validation
+    combined_price = booking_repo.get_transitive_total_price(booking["id"])
+    if combined_price is not None:
+        booking["price_total"] = combined_price
+
     # Download the receipt PDF and validate it before confirming.
     pdf = download_media(phone_number_id, proof_media_id) if proof_media_id else None
     if not pdf:
