@@ -135,9 +135,9 @@ def upsert_booking_row(booking: dict) -> None:
         try:
             idx = col_a.index(target) + 1  # 1-based sheet row
             ws.update(f"A{idx}:{_last_col_letter()}{idx}", [row_values],
-                      value_input_option="USER_ENTERED")
+                      value_input_option="RAW")
         except ValueError:
-            ws.append_row(row_values, value_input_option="USER_ENTERED")
+            ws.append_row(row_values, value_input_option="RAW")
     except Exception as exc:
         logger.error("Sheets upsert_booking_row failed for booking %s: %s",
                      booking.get("id"), exc)
@@ -181,7 +181,7 @@ def refresh_all_bookings() -> None:
         ws.clear()
         data = [_HEADERS] + [_booking_to_row(b) for b in rows]
         ws.update(f"A1:{_last_col_letter()}{len(data)}", data,
-                  value_input_option="USER_ENTERED")
+                  value_input_option="RAW")
         logger.info("Refreshed Bookings sheet — %d rows.", len(rows))
     except Exception as exc:
         logger.error("Sheets refresh_all_bookings failed: %s", exc)
@@ -255,7 +255,7 @@ def _build_weekly_sheet(worksheet) -> None:
         rows.append([slot] + [""] * 7)
 
     worksheet.clear()
-    worksheet.update(f"A1:H{len(rows)}", rows, value_input_option="USER_ENTERED")
+    worksheet.update(f"A1:H{len(rows)}", rows, value_input_option="RAW")
 
     requests = []
     requests.append(_get_paint_background_request(worksheet.id, 0, 49, 0, 8, 1, 1, 1))
