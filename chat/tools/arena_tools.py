@@ -167,10 +167,12 @@ SELECT_INTENT_LLM = {
                     "enum": [
                         "question_price",
                         "question_slots",
+                        "question_location",
                         # "question_field_size",
                         "booking_init",
                         "booking_new",
                         "booking_continue",
+                        "booking_status",
                         "booking_cancel",
                         "other"
                     ],

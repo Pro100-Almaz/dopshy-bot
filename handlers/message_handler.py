@@ -77,6 +77,13 @@ _CANCEL_STATUS = (
     \n\n–––\n\nБрондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"""
 )
 
+_LOCATION_MESSAGE = (
+    "📍 Сыганак 6Ф, напротив ТЦ Mechta и ТЦ Tumar.\n"
+    "Вход и заезд со стороны улицы Тәттімбета.\n\n–––\n\n"
+    "📍 Сығанақ 6Ф, Mechta және Tumar СО қарсы.\n"
+    "Кіру және кіреберіс Тәттімбет көшесі жағынан."
+)
+
 builder = BasePromptBuilder({}, "", (), ())
 
 
@@ -221,6 +228,10 @@ def handle_incoming_message(payload: dict) -> None:
                 send_text_message(phone_number_id, sender_id, process_field_prices())
                 return
 
+            elif intent == 'question_location':
+                send_text_message(phone_number_id, sender_id, _LOCATION_MESSAGE)
+                return
+
             elif intent == 'question_slots':
                 # If the user named a date, show slots for that day only; otherwise
                 # fall back to the full 7-day overview. _check_date_only also handles
@@ -272,6 +283,13 @@ def handle_incoming_message(payload: dict) -> None:
                 append_message(chat_id, "assistant", reply)
                 logger.info("[LLM2] reply: %s", reply)
                 send_text_message(phone_number_id, sender_id, reply)
+                return
+
+            elif intent == 'booking_status':
+                logger.info("[BOOKING] Fetching user's own bookings")
+                bookings = booking_repo.get_user_upcoming_bookings(sender_id)
+                send_text_message(phone_number_id, sender_id,
+                                  booking.format_user_booking_context(bookings))
                 return
 
             elif intent == 'booking_cancel':
