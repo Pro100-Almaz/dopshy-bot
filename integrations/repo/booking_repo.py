@@ -97,7 +97,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, source
+                       phone, notes, state, price_total, source, reserved_until
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
                 ORDER BY date, time_start, field
