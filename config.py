@@ -82,6 +82,7 @@ KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pa
 # Payment receipt validation
 PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
 PAYMENT_RECEIPT_MAX_AGE_HOURS: int = int(os.getenv("PAYMENT_RECEIPT_MAX_AGE_HOURS", "24"))
+PAYMENT_MIN: int = 10000
 
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:
