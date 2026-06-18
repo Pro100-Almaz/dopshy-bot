@@ -95,7 +95,7 @@ def _format_success(result_data: dict) -> str:
         "date":          "Дата",
         "time_start":    "Время начала",
         "time_end":      "Время окончания",
-        "field":         "Поле",
+        "format":        "Размер поля",
         "players":       "Игроков",
         "customer_name": "Имя",
     }
@@ -103,7 +103,7 @@ def _format_success(result_data: dict) -> str:
         "date":          "Күні",
         "time_start":    "Басталу уақыты",
         "time_end":      "Аяқталу уақыты",
-        "field":         "Алаң",
+        "format":        "Алаң өлшемі",
         "players":       "Ойыншылар",
         "customer_name": "Аты",
     }
@@ -121,7 +121,7 @@ def _format_success(result_data: dict) -> str:
         f"✅ Бронь обновлена!\n\n"
         f"📅 {new['date']}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {new['field']} ({new['format']})\n"
+        f"⚽ {new['format']}\n"
         f"👥 Игроков: {new.get('players', '?')}\n"
         f"👤 Имя: {new.get('customer_name', '')}\n\n"
         f"Что изменилось:\n" + "\n".join(diff_lines_ru)
@@ -130,7 +130,7 @@ def _format_success(result_data: dict) -> str:
         f"✅ Брон жаңартылды!\n\n"
         f"📅 {new['date']}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Алаң {new['field']} ({new['format']})\n"
+        f"⚽ {new['format']}\n"
         f"👥 Ойыншылар: {new.get('players', '?')}\n"
         f"👤 Аты: {new.get('customer_name', '')}\n\n"
         f"Не өзгерді:\n" + "\n".join(diff_lines_kk)

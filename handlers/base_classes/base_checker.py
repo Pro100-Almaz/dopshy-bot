@@ -113,20 +113,8 @@ class BaseChecker:
         if not available:
             return self.asker.localize(lang, "no_fields_time", ts=ts, te=te)
 
-        field_label = self.asker.localize(lang, "field_label")
-        lines = [self.asker.localize(lang, "time_available", ts=ts, te=te) + "\n"]
-
-        for item in available:
-            d_label = self.formatter.fmt_date(item["date"], lang)
-            fields = ", ".join(
-                f"{field_label} {f['id']} ({f['format']})"
-                for f in item["fields"]
-            )
-            lines.append(f"  📅 {d_label}: {fields}")
-
-        lines.append("\n" + self.asker.localize(lang, "which_date"))
-
-        return "\n".join(lines)
+        return (self.asker.localize(lang, "time_available", ts=ts, te=te)
+                 + "\n\n" + self.asker.localize(lang, "which_date"))
 
     def check_date_and_field(self, data: dict) -> str:
         """Date + field known, time unknown. Show free time ranges."""
@@ -135,15 +123,16 @@ class BaseChecker:
         field_id = int(data["field"])
         free = booking_logic.get_free_windows()
 
-        windows = [
-            w for w in free
-            if str(w["date"]) == date_str and w["field"] == field_id
-        ]
-
         field_conf = next(
             (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
         )
         fmt = field_conf.get("format", "?")
+
+        matching_ids = {f["id"] for f in config.BOOKING_FIELDS if f["format"] == fmt}
+        windows = [
+            w for w in free
+            if str(w["date"]) == date_str and w["field"] in matching_ids
+        ]
 
         if not windows:
             day_windows = [w for w in free if str(w["date"]) == date_str]
@@ -155,9 +144,11 @@ class BaseChecker:
                     + "\n\n" + self.asker.localize(lang, "other_options") + "\n" + alt_text
             )
 
+        intervals = [(w["time_start"], w["time_end"]) for w in windows]
+        merged = booking_logic.merge_time_intervals(intervals)
         times_str = ", ".join(
-            f"{self.formatter.fmt_time(w['time_start'])}–{self.formatter.fmt_time(w['time_end'])}"
-            for w in sorted(windows, key=lambda w: w["time_start"])
+            f"{self.formatter.fmt_time(s)}–{self.formatter.fmt_time(e)}"
+            for s, e in merged
         )
         return (
                 self.asker.localize(lang, "field_schedule",
@@ -167,16 +158,18 @@ class BaseChecker:
         )
 
     def check_field_only(self, data: dict) -> str:
-        """Rule 3: show available dates and time ranges for the given field."""
+        """Rule 3: show available dates and time ranges for the given format."""
         lang = data.get("lang", "ru")
         field_id = int(data["field"])
         free = booking_logic.get_free_windows()
-        field_windows = [w for w in free if w["field"] == field_id]
 
         field_conf = next(
             (f for f in config.BOOKING_FIELDS if f["id"] == field_id), {},
         )
         fmt = field_conf.get("format", "?")
+
+        matching_ids = {f["id"] for f in config.BOOKING_FIELDS if f["format"] == fmt}
+        field_windows = [w for w in free if w["field"] in matching_ids]
 
         if not field_windows:
             return self.asker.localize(lang, "field_full_week", fid=field_id, fmt=fmt)
@@ -220,8 +213,9 @@ class BaseChecker:
                     + "\n\n" + self.asker.localize(lang, "available_time") + "\n" + alt_text
             )
 
-        # Single field available — auto-select it and continue
-        if len(free_fields) == 1:
+        # Auto-select if only one format is available
+        free_formats = sorted({f["format"] for f in free_fields})
+        if len(free_formats) == 1:
             f = free_fields[0]
             data["field"] = f["id"]
             data["format"] = f["format"]
@@ -238,14 +232,10 @@ class BaseChecker:
                     + "\n\n" + next_ask
             )
 
-        # Multiple fields — let user pick with buttons
-        field_label = self.asker.localize(lang, "field_label")
+        # Multiple formats — let user pick by size
         btn_text = self.asker.localize(lang, "choose_field",
                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
-        buttons_list = [
-            f"{field_label} {f['id']} ({f['format']})" for f in free_fields[:3]
-        ]
-        return self.buttons.get_buttons(btn_text, buttons_list)
+        return self.buttons.get_buttons(btn_text, free_formats)
 
     def check_and_confirm(self, data: dict) -> str:
         """
@@ -278,12 +268,11 @@ class BaseChecker:
                     + "\n\n" + self.asker.localize(lang, "alternatives") + "\n" + alt_text
             )
 
-        field_label = self.asker.localize(lang, "field_label")
         summary = (
             f"{self.asker.localize(lang, 'confirm_header')}\n"
             f"📅 {self.formatter.fmt_date(date_str, lang)}\n"
             f"⏰ {ts}–{te}\n"
-            f"⚽ {field_label} {field_id} ({fmt})\n"
+            f"⚽ {fmt}\n"
             f"👥 {data['players']}\n"
             f"👤 {data['customer_name']}\n\n"
             f"{self.asker.localize(lang, 'confirm_question')}"

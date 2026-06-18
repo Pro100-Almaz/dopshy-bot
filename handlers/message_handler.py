@@ -259,7 +259,7 @@ def handle_incoming_message(payload: dict) -> None:
                     send_text_message(phone_number_id, sender_id,
                                       'Вы не можете создать новую бронь пока не оплатите предыдущую! \n'
                                       '\n----\n'
-                                      'Осығын дейінгі брондарыңызды төлемей жаңа брондар өоя алмайсыз! \n')
+                                      'Осығын дейінгі брондарыңызды төлемей жаңа брондар қоя алмайсыз! \n')
                     clear_history(chat_id)
                     return
                 extracted_data = extract_booking_details(history, user_text)
@@ -351,16 +351,7 @@ def handle_incoming_message(payload: dict) -> None:
         # 5. LLM may have asked us to launch a deterministic sub-flow.
         if tool_call:
             handle_reply = reply
-            if tool_call["name"] in "start_booking":
-                lang = builder.detect_lang(user_text)
-                logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
-                handle_reply = start_booking_flow(chat_id, sender_id, lang)
-
-            elif tool_call["name"] == "edit_booking":
-                logger.info("[EDIT] LLM called edit_booking tool — diff=%s", tool_call["args"])
-                handle_reply = handle_edit_booking_request(chat_id, sender_id, tool_call["args"])
-
-            elif tool_call["name"] == "start_trial":
+            if tool_call["name"] == "start_trial":
                 lang = builder.detect_lang(user_text)
                 logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
                 handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
@@ -499,12 +490,12 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
         f"✅ Оплата получена! Бронь подтверждена.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {booking['field']} ({booking['format']})\n\n"
+        f"⚽ {booking['format']}\n\n"
         f"Ждём вас! 🙌\n\n"
         f"— — —\n"
         f"✅ Төлем қабылданды! Брондау расталды.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {booking['field']} ({booking['format']})\n\n"
+        f"⚽ {booking['format']}\n\n"
         f"Сізді күтеміз! 🙌",
     )

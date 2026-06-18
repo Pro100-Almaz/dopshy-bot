@@ -60,6 +60,7 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
     """Generate every possible booking slot for the given date range."""
     open_time = _parse_time(config.BOOKING_OPEN_TIME)
     close_time = _parse_time(config.BOOKING_CLOSE_TIME)
+    print("open_time", open_time)
     duration = timedelta(minutes=config.BOOKING_SLOT_DURATION)
 
     slots = []
@@ -79,6 +80,20 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
             current_dt += duration
         current_date += timedelta(days=1)
     return slots
+
+
+def merge_time_intervals(intervals: list[tuple]) -> list[tuple]:
+    """Merge overlapping or adjacent time intervals. Each interval is (start, end)."""
+    if not intervals:
+        return []
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [list(sorted_intervals[0])]
+    for start, end in sorted_intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
 
 
 def floor_time_to_30_minutes(t: time) -> str:
@@ -211,20 +226,20 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
     by_date: dict[date, dict] = {}
     for w in free_windows:
         by_date.setdefault(w["date"], {}) \
-               .setdefault((w["field"], w["format"]), []) \
+               .setdefault(w["format"], []) \
                .append(w)
 
     lines = [_T["available_days"][lang]]
     for d in sorted(by_date):
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = []
-        for (field, fmt) in sorted(by_date[d]):
-            windows = sorted(by_date[d][(field, fmt)], key=lambda w: w["time_start"])
+        for fmt in sorted(by_date[d]):
+            intervals = [(w["time_start"], w["time_end"]) for w in by_date[d][fmt]]
+            merged = merge_time_intervals(intervals)
             range_str = ", ".join(
-                f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
-                for w in windows
+                f"{s.strftime('%H:%M')}–{e.strftime('%H:%M')}" for s, e in merged
             )
-            field_lines.append(f"    {_T["field"][lang]} {field} ({fmt}): {range_str}")
+            field_lines.append(f"    {fmt}: {range_str}")
         lines.append(f"  {day_label}:\n" + "\n".join(field_lines))
     return "\n".join(lines)
 
@@ -244,7 +259,7 @@ def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         status_str = _T.get(b.get("state", ""))[lang] if _T.get(b.get("state", "")) else b.get("state", "")
         lines.append(
-            f"  {day_label} {ts}–{te} | {_T['field'][lang]} {b['field']} ({b['format']}) | "
+            f"  {day_label} {ts}–{te} | {b['format']} | "
             f"{b.get('players', '?')} {_T['players'][lang]}. | {status_str}"
         )
     return "\n".join(lines)

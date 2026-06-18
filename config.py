@@ -7,10 +7,10 @@ load_dotenv()
 
 # OpenAI
 OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
-MODEL_NAME: str = "gpt-4.1"
-EXTRACTOR_MODEL: str = "gpt-4.1-mini"
+MODEL_NAME: str = "gpt-5.2"
+EXTRACTOR_MODEL: str = "gpt-4.1"
 INTENT_MODEL: str = "gpt-4.1"
-EMBEDDING_MODEL: str = "text-embedding-3-small"
+EMBEDDING_MODEL: str = "text-embedding-3-large"
 
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]

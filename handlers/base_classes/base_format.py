@@ -11,32 +11,33 @@ class BaseFormat:
         self.asker = asker
 
     def format_windows_by_field(self, windows: list[dict], lang: str = "ru") -> str:
-        """Group free windows by field, format as multiline text."""
+        """Group free windows by format, merge intervals, format as multiline text."""
         if not windows:
             return self.asker.localize(lang, "no_slots_empty")
 
-        field_label = self.asker.localize(lang, "field_label")
-        by_field: dict[tuple, list] = {}
+        from integrations.booking import merge_time_intervals
+
+        by_format: dict[str, list] = {}
         for w in windows:
-            key = (w["field"], w.get("format", "?"))
-            by_field.setdefault(key, []).append(w)
+            by_format.setdefault(w.get("format", "?"), []).append(w)
 
         lines = []
-        for (fid, fmt) in sorted(by_field):
-            sorted_w = sorted(by_field[(fid, fmt)], key=lambda x: x["time_start"])
+        for fmt in sorted(by_format):
+            intervals = [(w["time_start"], w["time_end"]) for w in by_format[fmt]]
+            merged = merge_time_intervals(intervals)
             times = ", ".join(
-                f"{self.fmt_time(w['time_start'])}"
-                f"–{self.fmt_time(w['time_end'])}"
-                for w in sorted_w
+                f"{self.fmt_time(s)}–{self.fmt_time(e)}" for s, e in merged
             )
-            lines.append(f"  ⚽ {field_label} {fid} ({fmt}): {times}")
+            lines.append(f"  ⚽ {fmt}: {times}")
 
         return "\n".join(lines)
 
     def format_windows_by_date(self, windows: list[dict], lang: str = "ru") -> str:
-        """Group free windows by date, format as multiline text."""
+        """Group free windows by date, merge intervals, format as multiline text."""
         if not windows:
             return self.asker.localize(lang, "no_slots_empty")
+
+        from integrations.booking import merge_time_intervals
 
         by_date: dict[str, list] = {}
         for w in windows:
@@ -44,12 +45,11 @@ class BaseFormat:
 
         lines = []
         for d in sorted(by_date):
-            sorted_w = sorted(by_date[d], key=lambda x: x["time_start"])
+            intervals = [(w["time_start"], w["time_end"]) for w in by_date[d]]
+            merged = merge_time_intervals(intervals)
             d_label = self.fmt_date(d, lang)
             times = ", ".join(
-                f"{self.fmt_time(w['time_start'])}"
-                f"–{self.fmt_time(w['time_end'])}"
-                for w in sorted_w
+                f"{self.fmt_time(s)}–{self.fmt_time(e)}" for s, e in merged
             )
             lines.append(f"  📅 {d_label}: {times}")
 

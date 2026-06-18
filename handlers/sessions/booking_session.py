@@ -42,8 +42,8 @@ _T = {
                                 "kk": "📅 Күнді таңдаңыз (нөмірді енгізіңіз):"},
     "ask_date_invalid":       {"ru": "Пожалуйста, введите номер из списка.",
                                 "kk": "Тізімдегі нөмірді енгізіңіз."},
-    "ask_time_header":        {"ru": "Свободное время по полям:",
-                                "kk": "Алаңдардың бос уақыты:"},
+    "ask_time_header":        {"ru": "Свободное время:",
+                                "kk": "Бос уақыт:"},
     "ask_time_prompt":        {"ru": "Введите время начала и окончания:",
                                 "kk": "Басталу және аяқталу уақытын енгізіңіз:"},
     "ask_time_example":       {"ru": "Например: *10:00 до 12:00* или *10:20-11:45*",
@@ -54,12 +54,12 @@ _T = {
                                 "kk": "Аяқталу уақыты басталу уақытынан кейін болуы керек. Мысалы: *10:00 - 12:00*"},
     "no_free_fields":         {"ru": "К сожалению, нет свободных полей с {start} до {end}. Выберите другое время.",
                                 "kk": "Өкінішке орай, {start}–{end} аралығында бос алаң жоқ. Басқа уақыт таңдаңыз."},
-    "ask_field_header":       {"ru": "Выберите поле:",
-                                "kk": "Алаңды таңдаңыз:"},
-    "ask_field_invalid":      {"ru": "Пожалуйста, введите номер поля.",
-                                "kk": "Алаң нөмірін енгізіңіз."},
-    "field_free_advance":     {"ru": "Поле {id} ({fmt}) — свободно ✅\n\nСколько игроков будет?",
-                                "kk": "Алаң {id} ({fmt}) — бос ✅\n\nҚанша ойыншы болады?"},
+    "ask_field_header":       {"ru": "Выберите размер поля:",
+                                "kk": "Алаң өлшемін таңдаңыз:"},
+    "ask_field_invalid":      {"ru": "Пожалуйста, выберите размер поля.",
+                                "kk": "Алаң өлшемін таңдаңыз."},
+    "field_free_advance":     {"ru": "{fmt} — свободно ✅\n\nСколько игроков будет?",
+                                "kk": "{fmt} — бос ✅\n\nҚанша ойыншы болады?"},
     "ask_players":            {"ru": "Сколько игроков будет?",
                                 "kk": "Қанша ойыншы болады?"},
     "ask_players_invalid":    {"ru": "Пожалуйста, введите количество игроков (например: *8*).",
@@ -68,8 +68,8 @@ _T = {
                                 "kk": f"Макс. ойыншы саны: {config.MAX_PLAYERS}"},
     "ask_name":               {"ru": "Укажите ваше имя:",
                                 "kk": "Атыңызды жазыңыз:"},
-    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ Поле {field} ({fmt})\n👥 Игроков: {players}\n👤 Имя: {name}\n\nПодтвердить? Ответьте *да* или *нет*.",
-                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Игроков: {players}\n👤 Имя: {name}\n\nПодтвердить? Ответьте *да* или *нет*.",
+                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "confirm_reshow":         {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
                                 "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "declined":               {"ru": "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂",
@@ -82,7 +82,7 @@ _T = {
                                 "kk": "Өкінішке орай, келесі 7 күнде бос слот жоқ. Әкімшімен хабарласыңыз."},
     "booking_pending":        {"ru": "📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n"
                                      "📅 {date}\n⏰ {start}–{end}\n"
-                                     "⚽ Поле {field} ({fmt})\n"
+                                     "⚽ {fmt}\n"
                                      "👥 {players} игроков\n"
                                      "👤 {name}\n\n⏳ Статус: ожидает оплаты\n\n"
                                      "Для подтверждения брони оплатите аванс НЕ МЕНЕЕ 10тысяч тг по ссылке:\n{pay_url}\n"
@@ -91,7 +91,7 @@ _T = {
                                      "⚠️ Если оплата не поступит в течении 15 минут — бронь будет автоматически отменена.",
                                 "kk": "📋 Брондау тіркелді, бірақ әлі расталмады!\n\n"
                                       "📅 {date}\n⏰ {start}–{end}\n"
-                                      "⚽ Алаң {field} ({fmt})\n"
+                                      "⚽ {fmt}\n"
                                       "👥 {players} ойыншы\n"
                                       "👤 {name}\n\n⏳ Статус: төлем күтілуде\n\n"
                                       "Брондауды растау үшін КЕМІНДЕ 10мың тг көлемінде төлем жасаңыз:\n{pay_url}\n"
@@ -426,11 +426,13 @@ class BookingStepHandler(BaseStepHandler):
         params["time_start"] = time_start
         params["time_end"] = time_end
 
-        if len(free_fields) == 1:
+        free_formats = sorted({f["format"] for f in free_fields})
+
+        if len(free_formats) == 1:
             f = free_fields[0]
             params["field"] = f["id"]
             params["format"] = f["format"]
-            logger.info("[BOOKING:step_time] single free field=%d — advancing to step_players", f["id"])
+            logger.info("[BOOKING:step_time] single free format=%s (field=%d) — advancing to step_players", f["format"], f["id"])
             postgres.update_draft(
                 _BOT_NAME, params["booking_id"], time_start=time_start, time_end=time_end,
                 field=f["id"], format=f["format"],
@@ -454,14 +456,12 @@ class BookingStepHandler(BaseStepHandler):
         ]
 
         chosen_field = None
-        m = re.search(r"\b(\d+)\b", user_text)
-        if m:
-            num = int(m.group(1))
-            # Match by field id first, then by 1-based list position
-            chosen_field = (
-                    next((f for f in free_fields if f["id"] == num), None)
-                    or (free_fields[num - 1] if 1 <= num <= len(free_fields) else None)
-            )
+        fmt_match = re.search(r'\b(\d+x\d+)\b', user_text)
+        if fmt_match:
+            fmt = fmt_match.group(1)
+            matching = [f for f in free_fields if f["format"] == fmt]
+            if matching:
+                chosen_field = matching[0]
 
         if not chosen_field:
             return self.builder.ask_field(free_fields, lang, "\n\n" + self.builder.data_localization(lang, "ask_field_invalid"))
@@ -550,27 +550,24 @@ class BookingPromptBuilder(BasePromptBuilder):
 
     def ask_field(self, free_fields: list[dict], lang: str = "ru", append_messages: str | None = None) -> str:
         append_messages = append_messages or ""
-        field_label = self.data_localization(lang, "field_label")
-        buttons = [f"{f['id']}. {field_label} {f['id']} ({f['format']})" for f in free_fields]
-        return self.get_buttons(self.data_localization(lang, "ask_field_header") + append_messages, buttons)
+        formats = sorted({f["format"] for f in free_fields})
+        return self.get_buttons(self.data_localization(lang, "ask_field_header") + append_messages, formats)
 
 
     def ask_time(self, chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
-        field_label = self.data_localization(lang, "field_label")
-
         lines = self.format_ask_time(chosen_date, lang)
 
-        by_field: dict = {}
+        by_format: dict = {}
         for w in day_windows:
-            by_field.setdefault((w["field"], w["format"]), []).append(w)
+            by_format.setdefault(w["format"], []).append(w)
 
-        for (field_id, fmt) in sorted(by_field):
-            windows = sorted(by_field[(field_id, fmt)], key=lambda w: w["time_start"])
+        for fmt in sorted(by_format):
+            intervals = [(w["time_start"], w["time_end"]) for w in by_format[fmt]]
+            merged = booking_logic.merge_time_intervals(intervals)
             range_str = ", ".join(
-                f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
-                for w in windows
+                f"{s.strftime('%H:%M')}–{e.strftime('%H:%M')}" for s, e in merged
             )
-            lines.append(f"  {field_label} {field_id} ({fmt}): {range_str}")
+            lines.append(f"  {fmt}: {range_str}")
 
         lines.append("\n" + self.data_localization(lang, "ask_time_prompt"))
         lines.append(self.data_localization(lang, "ask_time_example"))
