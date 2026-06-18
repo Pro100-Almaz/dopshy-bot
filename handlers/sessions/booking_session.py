@@ -27,7 +27,7 @@ from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
 from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import booking_repo, postgres
-from integrations.sheets.booking_sheets import refresh_all_bookings
+from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ _T = {
                                       "Төлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n"
                                       "⚠️ 15 минут ішінде төлем келмесе — бронь автоматты түрде жойылады."},
     "field_label":            {"ru": "Поле", "kk": "Алаң"},
+    "time_in_past":           {"ru": "⏰ Это время уже прошло. Укажите будущее время.",
+                                "kk": "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз."},
 }
 
 
@@ -526,6 +528,7 @@ class BookingPromptBuilder(BasePromptBuilder):
         def _write_to_sheets():
             try:
                 refresh_all_bookings()
+                refresh_week_sheet()
             except Exception as e:
                 logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 

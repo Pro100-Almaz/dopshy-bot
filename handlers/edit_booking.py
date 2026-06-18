@@ -16,7 +16,7 @@ import config
 from integrations import booking_service
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo
-from integrations.sheets.booking_sheets import refresh_all_bookings
+from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,10 @@ _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
     "SLOT_TAKEN": (
         "❌ Это время уже занято. Выберите другое время или поле.",
         "❌ Бұл уақыт алынған. Басқа уақыт немесе алаң таңдаңыз.",
+    ),
+    "TIME_IN_PAST": (
+        "⏰ Это время уже прошло. Укажите будущее время.",
+        "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз.",
     ),
     "NO_CHANGE": (
         "Я не понял, что именно изменить. Напишите новое время, дату, "
@@ -194,6 +198,7 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
     def _run():
         try:
             refresh_all_bookings()
+            refresh_week_sheet()
         except Exception as exc:  # noqa: BLE001
             logger.error("[EDIT] Sheets sync failed for bookings: %s", exc)
 

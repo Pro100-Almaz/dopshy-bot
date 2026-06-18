@@ -18,6 +18,8 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta
+
+from utils import is_past_booking_time
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
@@ -79,6 +81,8 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     return _err("BOOKING_WRONG_STATE", "Эту бронь уже нельзя подтвердить.")
                 if not (row["date"] and row["time_start"] and row["time_end"] and row["field"]):
                     return _err("INVALID_TIME", "Не все данные брони заполнены.")
+                if is_past_booking_time(str(row["date"]), str(row["time_start"])[:5]):
+                    return _err("TIME_IN_PAST", "Указанное время уже прошло.")
 
                 # TRANSITIVE BOOKING: split if time_start > time_end (day transition)
                 is_transitive = row["time_start"] > row["time_end"]
@@ -340,6 +344,9 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 new_field   = int(diff.get("field",     row["field"]))
                 new_players = diff.get("players",       row["players"])
                 new_name    = diff.get("customer_name", row["customer_name"])
+
+                if is_past_booking_time(new_date, new_ts):
+                    return _err("TIME_IN_PAST", "Указанное время уже прошло.")
 
                 old_snap = {
                     "date":          str(row["date"]),
