@@ -12,9 +12,11 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
+import config
 from integrations import booking_service
+from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo
-from integrations.sheets import booking_sheets as sheets
+from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,10 @@ _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
         "❌ Это время уже занято. Выберите другое время или поле.",
         "❌ Бұл уақыт алынған. Басқа уақыт немесе алаң таңдаңыз.",
     ),
+    "TIME_IN_PAST": (
+        "⏰ Это время уже прошло. Укажите будущее время.",
+        "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз.",
+    ),
     "NO_CHANGE": (
         "Я не понял, что именно изменить. Напишите новое время, дату, "
         "поле или количество игроков.",
@@ -57,6 +63,10 @@ _EDIT_REJECT_MESSAGES: dict[str, tuple[str, str]] = {
         "❌ Бронь не найдена.",
         "❌ Брон табылмады.",
     ),
+    "PLAYERS_OVERFLOW": (
+        f"Макс. количество игроков: {config.MAX_PLAYERS}",
+        f"Макс. ойыншы саны: {config.MAX_PLAYERS}"
+    )
 }
 
 _REJECT_FALLBACK = (
@@ -186,11 +196,11 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
     ]
 
     def _run():
-        for r in rows:
-            try:
-                sheets.upsert_booking_row(r)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[EDIT] Sheets sync failed for booking %s: %s", r["id"], exc)
+        try:
+            refresh_all_bookings()
+            refresh_week_sheet()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[EDIT] Sheets sync failed for bookings: %s", exc)
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -202,6 +212,11 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
 def handle_edit_request(chat_id: str, sender_phone: str, diff: dict) -> str:
     """Process a single edit_booking tool-call payload from the LLM."""
     diff = {k: v for k, v in (diff or {}).items() if v not in (None, "")}
+    for key in ("time_start", "time_end"):
+        if key in diff:
+            diff[key] = floor_time_to_30_minutes(
+                datetime.strptime(diff[key], "%H:%M").time()
+            )
     logger.info("[EDIT] chat_id=%s phone=%s diff=%s", chat_id, sender_phone, diff)
 
     bookings = booking_repo.get_user_editable_bookings(sender_phone)
@@ -213,6 +228,10 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict) -> str:
     if not diff:
         logger.info("[EDIT] booking_id=%d — empty diff, asking user", target["id"])
         return _format_reject("NO_CHANGE")
+
+    if diff.get('players', 0) > config.MAX_PLAYERS:
+        logger.info("[EDIT] booking_id=%d — too many players: %s players", diff["players"])
+        return _format_reject("PLAYERS_OVERFLOW")
 
     result = booking_service.client_edit_booking(
         target["id"], actor_id=chat_id, **diff

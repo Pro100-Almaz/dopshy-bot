@@ -4,8 +4,9 @@ import re
 from datetime import date, datetime, time
 
 from chat.conversation import clear_history
+from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import postgres
-from utils import today_almaty
+from utils import today_almaty, is_past_booking_time
 
 logger = logging.getLogger(__name__)
 
@@ -293,15 +294,27 @@ class BaseStepHandler:
         time_start, time_end = m.group(1), m.group(2)
         time_start = self.builder.pad_time(time_start)
         time_end = self.builder.pad_time(time_end)
+        time_start = floor_time_to_30_minutes(datetime.strptime(time_start, "%H:%M").time())
+        time_end = floor_time_to_30_minutes(datetime.strptime(time_end, "%H:%M").time())
         logger.info(self.LOGGER_MESSAGES["step_time_parse"], time_start, time_end)
 
-        if time_start >= time_end:
+        # TRANSITIVE BOOKING: time_start > time_end is allowed (day transition, e.g. 23:00→01:00)
+        # Only reject zero-duration bookings (time_start == time_end)
+        if time_start == time_end:
             logger.info(self.LOGGER_MESSAGES["step_time_reject_inverted"], time_start, time_end)
             return {
                 "ok": False,
                 "response": f"{self.builder.data_localization(lang, "time_inverted")}\n\n" +
                                 f"{self.builder.ask_time(chosen_date, day_windows, lang)}"
             }
+
+        if is_past_booking_time(params["date"], time_start):
+            return {
+                "ok": False,
+                "response": f"{self.builder.data_localization(lang, 'time_in_past')}\n\n"
+                            f"{self.builder.ask_time(chosen_date, day_windows, lang)}"
+            }
+
         return {
                 "ok": True,
                 "data": {
@@ -309,5 +322,6 @@ class BaseStepHandler:
                     "time_end": time_end,
                     "day_windows": day_windows,
                     "chosen_date": chosen_date,
+                    "is_transitive": time_start > time_end,  # TRANSITIVE BOOKING flag
                 }
             }

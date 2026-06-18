@@ -9,9 +9,10 @@ from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
 from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices
+from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.repo.booking_repo import has_awaiting_payments
-from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings
+from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
@@ -77,6 +78,16 @@ _CANCEL_STATUS = (
     \n\n–––\n\nБрондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"""
 )
 
+_LOCATION_MESSAGE = (
+    "📍 Сыганак 6Ф, напротив ТЦ Mechta и ТЦ Tumar.\n"
+    "Вход и заезд со стороны улицы Тәттімбета.\n"
+    "Ссылка на 2GIS: https://2gis.kz/astana/geo/70000001074875383\n\n"
+    "–––\n\n"
+    "📍 Сығанақ 6Ф, Mechta және Tumar СО қарсы.\n"
+    "Кіру және кіреберіс Тәттімбет көшесі жағынан.\n"
+    "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
+)
+
 builder = BasePromptBuilder({}, "", (), ())
 
 
@@ -140,7 +151,8 @@ def handle_incoming_message(payload: dict) -> None:
             send_text_message(
                 phone_number_id,
                 sender_id,
-                "Пожалуйста, отправьте текстовое сообщение. / Мәтіндік хабарлама жіберіңіз.",
+                "Извините, я ассистент-бот и могу распознавать только текст, не могли бы вы отправлять только текстовые сообщения, пожалуйста. "
+                "/ Кешіріңіз, мен бот-ассистентпін, тек қана мәтіндік хабарламаны оқи аламын. Өтініш, мәтіндік хабарлама жіберіңіз.",
             )
             return
 
@@ -193,11 +205,6 @@ def handle_incoming_message(payload: dict) -> None:
         if bot_config["name"] == "dopsy_bot":
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
 
-            free = booking.get_free_windows()
-            availability_ctx = booking.format_availability_context(free)
-            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
-            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
-
             _session = _pg.get_active_session("dopsy_bot", chat_id)
 
             if _session:
@@ -214,18 +221,36 @@ def handle_incoming_message(payload: dict) -> None:
                     send_text_message(phone_number_id, sender_id, booking_reply)
                     return
 
-            intent = route_incoming_message(history, user_text)
-            logger.info("[BOOKING] Intent detection replied, Intent is %s", intent)
+            intent, lang = route_incoming_message(history, user_text)
+            logger.info("[BOOKING] Intent detection replied, Intent is %s, lang=%s", intent, lang)
+
+            free = booking.get_free_windows()
+            availability_ctx = booking.format_availability_context(free, lang)
+            logger.info("[BOOKING] Injecting availability context (%d free windows) into LLM call", len(free))
+            context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
+
             if intent == 'question_price':
                 send_text_message(phone_number_id, sender_id, process_field_prices())
                 return
 
+            elif intent == 'question_location':
+                send_text_message(phone_number_id, sender_id, _LOCATION_MESSAGE)
+                return
+
             elif intent == 'question_slots':
-                response = f"""Давайте забронируем! Вот доступные слоты:\n\n{availability_ctx}\n\n
-                            Укажите дату, время, или номер поля.\n\n
-                            — — —\n\n
-                            Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n
-                            Күнді, уақытты немесе алаң нөмірін жазыңыз."""
+                # If the user named a date, show slots for that day only; otherwise
+                # fall back to the full 7-day overview. _check_date_only also handles
+                # the "no free slots on that date" case (lists alternative dates).
+                slots_date = extract_booking_details(history, user_text).get("date")
+                logger.info("[BOOKING] question_slots — extracted date=%s", slots_date)
+                if slots_date:
+                    response = check_slots({"date": slots_date, "lang": lang})
+                else:
+                    response = (f"Давайте забронируем! Вот доступные слоты\n–––––\n"
+                                f"Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n"
+                                f"Укажите дату, время, или номер поля.\n–––––\n"
+                                f"Күнді, уақытты немесе алаң нөмірін жазыңыз.")
+
                 send_text_message(phone_number_id, sender_id, response)
                 return
 
@@ -240,11 +265,44 @@ def handle_incoming_message(payload: dict) -> None:
                 extracted_data = extract_booking_details(history, user_text)
                 logger.info("[BOOKING] Data Extracted: %s", extracted_data)
                 handler = LlmBookingFlowHandler()
-                reply = handler.handle(extracted_data, chat_id, user_text, sender_id)
+                reply = handler.handle(extracted_data, chat_id, user_text, sender_id, lang)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", reply)
                 logger.info("[LLM2] reply: %s", reply)
                 send_text_message(phone_number_id, sender_id, reply)
+                return
+
+            elif intent == 'booking_edit':
+                logger.info("[EDIT] Intent booking_edit detected for %s", sender_id)
+                extracted = extract_booking_details(history, user_text)
+                diff = {}
+                if extracted.get("date"):
+                    diff["date"] = extracted["date"]
+                if extracted.get("time_start"):
+                    diff["time_start"] = extracted["time_start"]
+                if extracted.get("time_end"):
+                    diff["time_end"] = extracted["time_end"]
+                if extracted.get("field"):
+                    format_str = extracted["field"]
+                    diff["format"] = format_str
+                    diff["field"] = None
+                    if format_str:
+                        diff["field"] = LlmBookingFlowHandler()._resolve_field_id(format_str, diff)
+                if extracted.get("players"):
+                    diff["players"] = extracted["players"]
+                if extracted.get("name"):
+                    diff["customer_name"] = extracted["name"]
+                reply = handle_edit_booking_request(chat_id, sender_id, diff)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", reply)
+                send_text_message(phone_number_id, sender_id, reply)
+                return
+
+            elif intent == 'booking_status':
+                logger.info("[BOOKING] Fetching user's own bookings")
+                bookings = booking_repo.get_user_upcoming_bookings(sender_id)
+                send_text_message(phone_number_id, sender_id,
+                                  booking.format_user_booking_context(bookings, lang))
                 return
 
             elif intent == 'booking_cancel':
@@ -252,6 +310,7 @@ def handle_incoming_message(payload: dict) -> None:
                 cancelled = booking_repo.cancel_draft_awaiting_payment(sender_id)
                 clear_history(chat_id)
                 refresh_all_bookings()
+                refresh_week_sheet()
                 send_text_message(phone_number_id, sender_id, _CANCEL_STATUS[cancelled])
                 return
 
@@ -386,6 +445,11 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
             "Оплата принята! Спасибо. ✅\nТөлем қабылданды! Рахмет. ✅",
         )
         return
+
+    # TRANSITIVE BOOKING: use combined price of both bookings for payment validation
+    combined_price = booking_repo.get_transitive_total_price(booking["id"])
+    if combined_price is not None:
+        booking["price_total"] = combined_price
 
     # Download the receipt PDF and validate it before confirming.
     pdf = download_media(phone_number_id, proof_media_id) if proof_media_id else None

@@ -33,7 +33,7 @@ def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Di
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=config.EXTRACTOR_MODEL,
             temperature=0,
             messages=messages,
             tools=[EXTRACT_DATA_LLM],

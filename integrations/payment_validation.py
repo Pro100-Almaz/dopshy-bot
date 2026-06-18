@@ -52,7 +52,7 @@ def validate_receipt(booking: dict, pdf_bytes: bytes) -> dict:
 
     price_total = booking.get("price_total")
     if price_total is not None:
-        min_required = float(price_total) * config.PAYMENT_MIN_FRACTION
+        min_required = config.PAYMENT_MIN
         if parsed["amount"] + 0.01 < min_required:
             return _reject(
                 "amount",

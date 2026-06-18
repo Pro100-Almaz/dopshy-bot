@@ -1,4 +1,4 @@
-"""OpenAI GPT-4o-mini integration."""
+"""OpenAI GPT-4.1 integration."""
 import config
 import json
 import logging
@@ -117,42 +117,37 @@ def get_booking_reply(
     return response.choices[0].message.content.strip()
 
 
-def route_incoming_message(history: list, user_message: str) -> str:
-    """Classify the intent of the latest user message given full conversation context.
-
-    Args:
-        chat_history: Prior turns as either an array of dicts (preferred) or a single string.
+def route_incoming_message(history: list, user_message: str) -> tuple[str, str]:
+    """Classify the intent and language of the latest user message.
 
     Returns:
-        One of the strict enum intents; "other" on any failure.
+        (intent, lang) — intent is one of the strict enum values ("other" on failure),
+        lang is "ru" or "kk".
     """
-    # Accept either a structured message array or a raw string; normalize to messages
-    # so role structure (and therefore flow context) is preserved for the model.
     messages = [{"role": "system", "content": INTENT_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
     try:
         response = _client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0,  # deterministic classification
+            model=config.INTENT_MODEL,
+            temperature=0,
             messages=messages,
             tools=[SELECT_INTENT_LLM],
             tool_choice={"type": "function", "function": {"name": "route_message"}}
         )
 
-        # Safely reach into the tool call; any missing link defaults to "other".
         tool_calls = response.choices[0].message.tool_calls
         if not tool_calls:
-            return "other"
+            return "other", "ru"
 
         raw_args = tool_calls[0].function.arguments
         if not raw_args:
-            return "other"
+            return "other", "ru"
 
         data = json.loads(raw_args)
-        return data.get("type", "other")
+        return data.get("type", "other"), data.get("lang", "ru")
 
     except Exception as err:
         logging.error(f"route_incoming_message failed: {err}")
-        return "other"
+        return "other", "ru"

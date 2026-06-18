@@ -7,7 +7,9 @@ load_dotenv()
 
 # OpenAI
 OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
-MODEL_NAME: str = "gpt-4o-mini"
+MODEL_NAME: str = "gpt-4.1"
+EXTRACTOR_MODEL: str = "gpt-4.1-mini"
+INTENT_MODEL: str = "gpt-4.1"
 EMBEDDING_MODEL: str = "text-embedding-3-small"
 
 # WhatsApp Cloud API
@@ -64,12 +66,12 @@ GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Bookings")
 # ---------------------------------------------------------------------------
 # Booking (Bot 1 — Dopshy field rental only)
 # ---------------------------------------------------------------------------
-BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "09:00")
-BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:00")
+BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "00:00")
+BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:59")
 BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
 BOOKING_FIELDS: list = _json.loads(
-    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"5x5"},'
-                                '{"id":2,"format":"6x6"},'
+    os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"6x6"},'
+                                '{"id":2,"format":"5x5"},'
                                 '{"id":3,"format":"5x5"}]')
 )
 BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
@@ -80,6 +82,7 @@ KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pa
 # Payment receipt validation
 PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
 PAYMENT_RECEIPT_MAX_AGE_HOURS: int = int(os.getenv("PAYMENT_RECEIPT_MAX_AGE_HOURS", "24"))
+PAYMENT_MIN: int = 10000
 
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:
@@ -100,3 +103,5 @@ CHUNK_OVERLAP: int = 50
 # Conversation
 MAX_HISTORY_MESSAGES: int = 20  # total messages kept per chat (user+assistant)
 CONVERSATION_DB_PATH: str = os.getenv("CONVERSATION_DB_PATH", "./data/conversations.db")
+
+MAX_PLAYERS: int = 200
