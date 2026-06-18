@@ -563,7 +563,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         exec_string = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
                           notes, price_total, state, source, client_token, start_at, end_at,
-                          group_repetition, group_transition, repeat, reserved_until)
+                          group_repetition, group_transition, repeat, reserved_until,)
                          VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', %s,
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
