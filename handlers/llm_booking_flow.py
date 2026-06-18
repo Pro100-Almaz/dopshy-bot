@@ -40,7 +40,8 @@ from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
-from integrations.sheets.booking_sheets import refresh_all_bookings
+from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
+from utils import is_past_booking_time
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,8 @@ T = {
                              "kk": "Күнді, уақытты немесе алаңды жазыңыз."},
     "no_slots_empty":       {"ru": "  (нет свободных слотов)",
                              "kk": "  (бос слот жоқ)"},
+    "time_in_past":         {"ru": "⏰ Это время уже прошло. Укажите будущее время.",
+                             "kk": "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз."},
     "field_label":          {"ru": "Поле",
                              "kk": "Алаң"},
 }
@@ -348,6 +351,7 @@ class LlmBookingFlowHandler:
         logger.info("[LLM_FLOW] Booking id=%d → awaiting_payment", booking_id)
         clear_history(chat_id)
         refresh_all_bookings()
+        refresh_week_sheet()
 
         return self.asker.localize(lang, "booking_done",
                   date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
@@ -390,6 +394,12 @@ class LlmBookingFlowHandler:
 
         if has_time and data["time_start"] == data["time_end"]:
             return self.asker.localize(lang, "time_equal")
+
+        # ── Reject past date/time ──
+        if has_date and is_past_booking_time(
+            data["date"], data["time_start"] if has_time else None,
+        ):
+            return self.asker.localize(lang, "time_in_past")
 
         # ── Validate format string ──
         if data.get("format"):

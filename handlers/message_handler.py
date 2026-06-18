@@ -12,7 +12,7 @@ from handlers.payment.pricing import process_field_prices
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.repo.booking_repo import has_awaiting_payments
-from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings
+from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
@@ -310,6 +310,7 @@ def handle_incoming_message(payload: dict) -> None:
                 cancelled = booking_repo.cancel_draft_awaiting_payment(sender_id)
                 clear_history(chat_id)
                 refresh_all_bookings()
+                refresh_week_sheet()
                 send_text_message(phone_number_id, sender_id, _CANCEL_STATUS[cancelled])
                 return
 
