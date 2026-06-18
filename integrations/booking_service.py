@@ -558,6 +558,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         dates = list(generate_dates(date, end_date, time_start, time_end, repeat))
         is_repetitive = repeat != "none"
         group_repetition = str(uuid.uuid4())
+
         exec_string = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
                           notes, price_total, state, source, client_token, start_at, end_at,
