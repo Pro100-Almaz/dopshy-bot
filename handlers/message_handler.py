@@ -82,11 +82,13 @@ _CANCEL_STATUS = (
 _LOCATION_MESSAGE = (
     "📍 Сыганак 6Ф, напротив ТЦ Mechta и ТЦ Tumar.\n"
     "Вход и заезд со стороны улицы Тәттімбета.\n"
+    "Оттуда же въезд на парковку\n"
     "Ссылка на 2GIS: https://2gis.kz/astana/geo/70000001074875383\n\n"
     "–––\n\n"
     "📍 Сығанақ 6Ф, Mechta және Tumar СО қарсы.\n"
     "Кіру және кіреберіс Тәттімбет көшесі жағынан.\n"
-    "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
+    "Көлік тұрағы да сол жерде\n"
+    "2GIS сілтемесі: https://2gis.kz/astana/geo/700000010748\n"
 )
 
 builder = BasePromptBuilder({}, "", (), ())

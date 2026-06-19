@@ -1,9 +1,12 @@
-
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
+from zoneinfo import ZoneInfo
 
 from integrations.repo.postgres import _conn
+
+
+ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
@@ -88,7 +91,14 @@ def get_bookings_for_sheet() -> list[dict]:
                 WHERE state IN ('awaiting_payment', 'confirmed')
                 ORDER BY date, time_start, field
             """)
-            return [dict(r) for r in cur.fetchall()]
+            result = [dict(r) for r in cur.fetchall()]
+            for r in result:
+                if r["reserved_until"]:
+                    r["reserved_until"] = r["reserved_until"].astimezone(ALMATY_TZ)
+
+                if r["updated_at"]:
+                    r["updated_at"] = r["updated_at"].astimezone(ALMATY_TZ)
+            return result
 
 
 def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed")) -> list[dict]:
