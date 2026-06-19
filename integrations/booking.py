@@ -244,23 +244,53 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
     return "\n".join(lines)
 
 
+def _merge_transitive(bookings: list[dict]) -> list[dict]:
+    """Merge transitive (midnight-crossing) booking pairs into single entries."""
+    seen = set()
+    merged = []
+    by_gt = {}
+    for b in bookings:
+        gt = b.get("group_transition")
+        if gt:
+            by_gt.setdefault(gt, []).append(b)
+
+    for b in bookings:
+        gt = b.get("group_transition")
+        if gt:
+            if gt in seen:
+                continue
+            seen.add(gt)
+            pair = by_gt[gt]
+            if len(pair) == 2:
+                first, second = sorted(pair, key=lambda x: (x["date"], x["time_start"]))
+                m = dict(first)
+                m["time_end"] = second["time_end"]
+                m["price_total"] = float(first.get("price_total") or 0) + float(second.get("price_total") or 0)
+                merged.append(m)
+                continue
+        merged.append(b)
+    return merged
+
+
 def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
     if not bookings:
         return _T["no_bookings"][lang]
 
     WEEKDAYS = _WEEKDAY_RU if lang == 'ru' else _WEEKDAY_KZ
 
+    display = _merge_transitive(bookings)
     lines = [_T["my_bookings"][lang]]
-    for b in bookings:
+    for b in display:
         d = b["date"] if isinstance(b["date"], date) else \
             datetime.strptime(str(b["date"]), "%Y-%m-%d").date()
         ts = str(b["time_start"])[:5]
         te = str(b["time_end"])[:5]
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         status_str = _T.get(b.get("state", ""))[lang] if _T.get(b.get("state", "")) else b.get("state", "")
+        price = f" | {int(b['price_total']):,} тг".replace(",", " ") if b.get("price_total") else ""
         lines.append(
             f"  {day_label} {ts}–{te} | {b['format']} | "
-            f"{b.get('players', '?')} {_T['players'][lang]}. | {status_str}"
+            f"{b.get('players', '?')} {_T['players'][lang]}.{price} | {status_str}"
         )
     return "\n".join(lines)
 

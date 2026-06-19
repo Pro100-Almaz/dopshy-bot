@@ -1,6 +1,7 @@
 import config
 from handlers.base_classes.base_button import BaseButton
 from handlers.base_classes.base_draft_handler import BaseDraftHandler
+from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from integrations import booking as booking_logic
 from handlers.base_classes.base_asker import BaseAsker
 from handlers.base_classes.base_format import BaseFormat
@@ -268,13 +269,15 @@ class BaseChecker:
                     + "\n\n" + self.asker.localize(lang, "alternatives") + "\n" + alt_text
             )
 
+        total = calculate_full_booking_price(fmt, date_str, ts, te)
         summary = (
             f"{self.asker.localize(lang, 'confirm_header')}\n"
             f"📅 {self.formatter.fmt_date(date_str, lang)}\n"
             f"⏰ {ts}–{te}\n"
             f"⚽ {fmt}\n"
             f"👥 {data['players']}\n"
-            f"👤 {data['customer_name']}\n\n"
+            f"👤 {data['customer_name']}\n"
+            f"💰 {fmt_price(total)}\n\n"
             f"{self.asker.localize(lang, 'confirm_question')}"
         )
         return self.buttons.get_buttons(summary, [

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 import config
 from handlers.payment.pricing_repo import get_total_field_prices, get_prices_for_format
@@ -75,6 +75,25 @@ def calculate_booking_price(format_name: str, booking_date,
             total += (overlap / 60.0) * prices.get(period_type, 0)
 
     return round(total, 2)
+
+
+def calculate_full_booking_price(format_name: str, booking_date,
+                                  time_start, time_end) -> float:
+    """Total price for a logical booking, including both halves of a
+    midnight-crossing (transitive) booking."""
+    start_min = _to_minutes(time_start)
+    end_min = _to_minutes(time_end)
+    if start_min >= end_min and end_min != 0:
+        d = _to_date(booking_date)
+        p1 = calculate_booking_price(format_name, d, time_start, "23:59:59")
+        p2 = calculate_booking_price(format_name, d + timedelta(days=1),
+                                     "00:00", time_end)
+        return round(p1 + p2, 2)
+    return calculate_booking_price(format_name, booking_date, time_start, time_end)
+
+
+def fmt_price(amount) -> str:
+    return f"{int(amount):,} тг".replace(",", " ")
 
 
 def process_field_prices() -> str:

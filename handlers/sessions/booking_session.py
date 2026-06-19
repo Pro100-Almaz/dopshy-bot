@@ -23,6 +23,7 @@ import uuid
 from datetime import date, timedelta
 
 import config
+from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
 from integrations import booking as booking_logic
 from integrations import booking_service
@@ -68,8 +69,8 @@ _T = {
                                 "kk": f"Макс. ойыншы саны: {config.MAX_PLAYERS}"},
     "ask_name":               {"ru": "Укажите ваше имя:",
                                 "kk": "Атыңызды жазыңыз:"},
-    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Игроков: {players}\n👤 Имя: {name}\n\nПодтвердить? Ответьте *да* или *нет*.",
-                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Игроков: {players}\n👤 Имя: {name}\n💰 {price}\n\nПодтвердить? Ответьте *да* или *нет*.",
+                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n💰 {price}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "confirm_reshow":         {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
                                 "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "declined":               {"ru": "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂",
@@ -84,7 +85,8 @@ _T = {
                                      "📅 {date}\n⏰ {start}–{end}\n"
                                      "⚽ {fmt}\n"
                                      "👥 {players} игроков\n"
-                                     "👤 {name}\n\n⏳ Статус: ожидает оплаты\n\n"
+                                     "👤 {name}\n"
+                                     "💰 {price}\n\n⏳ Статус: ожидает оплаты\n\n"
                                      "Для подтверждения брони оплатите аванс НЕ МЕНЕЕ 10тысяч тг по ссылке:\n{pay_url}\n"
                                      "(⚠️ПРИМЕЧАНИЕ⚠️Возврат денежных средств не производится в случае неявки на игру.)\n\n"
                                      "После оплаты отправьте PDF-чек из Kaspi сюда в чат — и мы сразу подтвердим вашу бронь. 🙏\n\n"
@@ -93,7 +95,8 @@ _T = {
                                       "📅 {date}\n⏰ {start}–{end}\n"
                                       "⚽ {fmt}\n"
                                       "👥 {players} ойыншы\n"
-                                      "👤 {name}\n\n⏳ Статус: төлем күтілуде\n\n"
+                                      "👤 {name}\n"
+                                      "💰 {price}\n\n⏳ Статус: төлем күтілуде\n\n"
                                       "Брондауды растау үшін КЕМІНДЕ 10мың тг көлемінде төлем жасаңыз:\n{pay_url}\n"
                                       "(⚠️ЕСКЕРТУ⚠️Ойынға келмей қалған жағдайда төлем қайтарылмайды.)\n\n"
                                       "Төлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n"
@@ -535,6 +538,9 @@ class BookingPromptBuilder(BasePromptBuilder):
         threading.Thread(target=_write_to_sheets, daemon=True).start()
         postgres.delete_session(self.bot_name, chat_id)
 
+        total = calculate_full_booking_price(
+            params["format"], params["date"], time_start_str, time_end_str)
+
         return self.data_localization(
             lang,
             "booking_pending",
@@ -545,6 +551,7 @@ class BookingPromptBuilder(BasePromptBuilder):
             fmt=params["format"],
             players=params.get("players"),
             name=params.get("customer_name", ""),
+            price=fmt_price(total),
             pay_url=config.KASPI_PAYMENT_URL,
         )
 
@@ -576,6 +583,12 @@ class BookingPromptBuilder(BasePromptBuilder):
     def format_summary(self, params: dict, append_message : str | None = None) -> str:
         append_message = append_message or ""
         lang = params.get("lang", "ru")
+        total = calculate_full_booking_price(
+            params.get("format", ""),
+            params.get("date", ""),
+            params.get("time_start", "00:00"),
+            params.get("time_end", "00:00"),
+        )
         formatted_response = self.data_localization(
             lang,
             "summary",
@@ -586,6 +599,7 @@ class BookingPromptBuilder(BasePromptBuilder):
             fmt=params.get("format", "?"),
             players=params.get("players", "?"),
             name=params.get("customer_name", "?"),
+            price=fmt_price(total),
         )
         return self.get_buttons(
             formatted_response + append_message,

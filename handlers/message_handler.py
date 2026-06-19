@@ -8,7 +8,7 @@ import threading
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
 from handlers.extractor import extract_booking_details
-from handlers.payment.pricing import process_field_prices
+from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.repo.booking_repo import has_awaiting_payments
@@ -244,7 +244,8 @@ def handle_incoming_message(payload: dict) -> None:
                 slots_date = extract_booking_details(history, user_text).get("date")
                 logger.info("[BOOKING] question_slots — extracted date=%s", slots_date)
                 if slots_date:
-                    response = check_slots({"date": slots_date, "lang": lang})
+                    response = check_slots({"date": slots_date, "lang": lang},
+                                           chat_id, user_text, sender_id, lang)
                 else:
                     response = (f"Давайте забронируем! Вот доступные слоты\n–––––\n"
                                 f"Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n"
@@ -484,18 +485,21 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     booking_date = booking["date"]
     ts = str(booking["time_start"])[:5]
     te = str(booking["time_end"])[:5]
+    price_line = fmt_price(booking["price_total"]) if booking.get("price_total") else ""
     send_text_message(
         phone_number_id,
         sender_phone,
         f"✅ Оплата получена! Бронь подтверждена.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ {booking['format']}\n\n"
+        f"⚽ {booking['format']}\n"
+        f"💰 {price_line}\n\n"
         f"Ждём вас! 🙌\n\n"
         f"— — —\n"
         f"✅ Төлем қабылданды! Брондау расталды.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ {booking['format']}\n\n"
+        f"⚽ {booking['format']}\n"
+        f"💰 {price_line}\n\n"
         f"Сізді күтеміз! 🙌",
     )

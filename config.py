@@ -105,7 +105,7 @@ CHUNK_OVERLAP: int = 50
 MAX_HISTORY_MESSAGES: int = 20  # total messages kept per chat (user+assistant)
 CONVERSATION_DB_PATH: str = os.getenv("CONVERSATION_DB_PATH", "./data/conversations.db")
 
-MAX_PLAYERS: int = 200
+MAX_PLAYERS: int = 100
 
 # ---------------------------------------------------------------------------
 # Holidays (dates that use weekend_holiday pricing)

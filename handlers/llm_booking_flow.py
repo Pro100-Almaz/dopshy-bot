@@ -30,6 +30,7 @@ from datetime import datetime
 
 import config
 from chat.conversation import clear_history
+from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from handlers.base_classes.base_asker import BaseAsker
 from handlers.base_classes.base_button import BaseButton
 from handlers.base_classes.base_checker import BaseChecker
@@ -130,7 +131,8 @@ T = {
                                     "⏰ {ts}–{te}\n"
                                     "⚽ {fmt}\n"
                                     "👥 Игроков: {players}\n"
-                                    "👤 Имя: {name}\n\n"
+                                    "👤 Имя: {name}\n"
+                                    "💰 {price}\n\n"
                                     "Оплатите аванс на сумму не менее 10тысяч тг:\n{pay_url}\n"
                                     "⚠️ Возврат при неявке не производится\n\n"
                                     "Отправьте PDF-чек сюда 🙏\n⚠️ 15 мин без оплаты — бронь отменится."),
@@ -139,7 +141,8 @@ T = {
                                     "⏰ {ts}–{te}\n"
                                     "⚽ {fmt}\n"
                                     "👥 Ойыншылар: {players}\n"
-                                    "👤 Аты: {name}\n\n"
+                                    "👤 Аты: {name}\n"
+                                    "💰 {price}\n\n"
                                     "Аванс ретінде кемінде 10мың тг төлем жасаңыз:\n{pay_url}\n"
                                     "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
                                     "PDF-чек жіберіңіз 🙏\n⚠️ 15 мин төлемсіз — брондау жойылады.")},
@@ -155,6 +158,7 @@ T = {
                              "kk": "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз."},
     "field_label":          {"ru": "Поле",
                              "kk": "Алаң"},
+
 }
 
 
@@ -348,7 +352,7 @@ class LlmBookingFlowHandler:
                     + self._show_general_availability(lang)
                 )
             logger.error("[LLM_FLOW] request_payment failed: %s", result)
-            return self.asker.localize(lang, "error")
+            return result.get("message", "Ошибка. Попробуйте ещё раз.")
 
         d = str(draft["date"])
         ts = str(draft["time_start"])[:5]
@@ -363,10 +367,13 @@ class LlmBookingFlowHandler:
         refresh_all_bookings()
         refresh_week_sheet()
 
+        total = calculate_full_booking_price(fmt, d, ts, te)
+
         return self.asker.localize(lang, "booking_done",
                   date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
                   fid=field_id, fmt=fmt, players=players,
-                  name=name, pay_url=config.KASPI_PAYMENT_URL)
+                  name=name, price=fmt_price(total),
+                  pay_url=config.KASPI_PAYMENT_URL)
 
     def _cancel_draft(self, draft: dict, chat_id: str, lang: str = "ru") -> str:
         """Cancel the draft and return user-facing confirmation."""
