@@ -175,12 +175,8 @@ class BaseChecker:
         if not field_windows:
             return self.asker.localize(lang, "field_full_week", fid=field_id, fmt=fmt)
 
-        windows_text = self.formatter.format_windows_by_date(field_windows, lang)
-        return (
-                self.asker.localize(lang, "field_slots", fid=field_id, fmt=fmt)
-                + "\n\n" + windows_text
-                + "\n\n" + self.asker.localize(lang, "which_date")
-        )
+        return (self.asker.localize(lang, "field_slots", fid=field_id, fmt=fmt)
+                + "\n\n" + self.asker.localize(lang, "which_date"))
 
     def check_date_and_time(self, data: dict) -> str:
         """Rule 5: date + time are known but field is not. Show available fields."""

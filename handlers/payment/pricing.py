@@ -3,12 +3,34 @@ from datetime import date, datetime, time, timedelta
 import config
 from handlers.payment.pricing_repo import get_total_field_prices, get_prices_for_format
 
-PRICING_TYPE_RU = {
-    "morning_day": "Утро / день",
-    "evening": "Вечер",
-    "late_night": "Поздний вечер",
-    "after_midnight": "После полуночи",
-    "weekend_holiday": "Выходные / праздники",
+PRICING_TYPE_LABELS = {
+    "ru": {
+        "morning_day": "Утро / день",
+        "evening": "Вечер",
+        "late_night": "Поздний вечер",
+        "after_midnight": "После полуночи",
+        "weekend_holiday": "Выходные / праздники",
+    },
+    "kk": {
+        "morning_day": "Таңғы / күндізгі",
+        "evening": "Кешкі",
+        "late_night": "Кеш түнгі",
+        "after_midnight": "Түн ортасынан кейін",
+        "weekend_holiday": "Демалыс / мереке",
+    },
+}
+
+PRICING_TYPE_RU = PRICING_TYPE_LABELS["ru"]
+
+PRICING_TIME_RANGE = {
+    "morning_day": "07:00 – 18:30",
+    "evening": "18:30 – 22:00",
+    "late_night": "22:00 – 00:00",
+    "after_midnight": "00:00 – 07:00",
+    "weekend_holiday": {
+        "ru": "весь день",
+        "kk": "күні бойы",
+    },
 }
 
 # (pricing_type, start_minute, end_minute) — covers the full 24 h
@@ -96,11 +118,28 @@ def fmt_price(amount) -> str:
     return f"{int(amount):,} тг".replace(",", " ")
 
 
-def process_field_prices() -> str:
+_PRICES_I18N = {
+    "ru": {
+        "empty": "Пока цены не указаны.",
+        "header": "💰 Наши тарифы:",
+        "per_hour": "тг/час",
+    },
+    "kk": {
+        "empty": "Әзірге бағалар көрсетілмеген.",
+        "header": "💰 Біздің тарифтер:",
+        "per_hour": "тг/сағ",
+    },
+}
+
+
+def process_field_prices(lang: str = "ru") -> str:
     all_prices = get_total_field_prices()
     if not all_prices:
-        return 'Пока цены не указаны.'
-    message = '💰 Наши тарифы:\n\n'
+        return _PRICES_I18N[lang]["empty"]
+
+    labels = PRICING_TYPE_LABELS.get(lang, PRICING_TYPE_LABELS["ru"])
+    strings = _PRICES_I18N.get(lang, _PRICES_I18N["ru"])
+    message = f'{strings["header"]}\n\n'
     price_elems = {}
 
     for price_elem in all_prices:
@@ -113,10 +152,15 @@ def process_field_prices() -> str:
         price_elems[format_name][pricing_type] = price_per_hour
 
     for format_name, prices in price_elems.items():
-        message += f"⚽ {format_name}:\n"
+        message += f"⚽ *{format_name}*\n"
 
         for pricing_type, price in prices.items():
-            message += f"  • {PRICING_TYPE_RU[pricing_type]}: {price:,} тг/час\n".replace(",", " ")
+            label = labels[pricing_type]
+            time_range = PRICING_TIME_RANGE[pricing_type]
+            if isinstance(time_range, dict):
+                time_range = time_range.get(lang, time_range["ru"])
+            formatted_price = f"{price:,.0f}".replace(",", " ")
+            message += f"▸ {label} ({time_range}) — *{formatted_price} {strings['per_hour']}*\n"
 
         message += "\n"
 

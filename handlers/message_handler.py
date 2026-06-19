@@ -11,7 +11,8 @@ from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from integrations.repo.booking_repo import has_awaiting_payments
+from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
+from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
@@ -172,6 +173,14 @@ def handle_incoming_message(payload: dict) -> None:
 
         # Handle reset command
         if user_text.lower() in RESET_COMMANDS:
+            logger.info("[RESET] Reset command by user %s: command -> %s", sender_id, user_text)
+            if bot_config["name"] == "dopsy_bot":
+                draft = get_existing_draft(sender_id)
+                if draft:
+                    cancel_booking_trial(bot_config["name"], draft["id"])
+                refresh_week_sheet()
+                refresh_all_bookings()
+
             clear_history(chat_id)
             send_text_message(
                 phone_number_id,
@@ -230,7 +239,7 @@ def handle_incoming_message(payload: dict) -> None:
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
             if intent == 'question_price':
-                send_text_message(phone_number_id, sender_id, process_field_prices())
+                send_text_message(phone_number_id, sender_id, process_field_prices(lang))
                 return
 
             elif intent == 'question_location':
@@ -249,8 +258,8 @@ def handle_incoming_message(payload: dict) -> None:
                 else:
                     response = (f"Давайте забронируем! Вот доступные слоты\n–––––\n"
                                 f"Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n"
-                                f"Укажите дату, время, или номер поля.\n–––––\n"
-                                f"Күнді, уақытты немесе алаң нөмірін жазыңыз.")
+                                f"Укажите дату, время, или размер поля.\n–––––\n"
+                                f"Күнді, уақытты немесе алаң өлшемін жазыңыз.")
 
                 send_text_message(phone_number_id, sender_id, response)
                 return
@@ -276,6 +285,14 @@ def handle_incoming_message(payload: dict) -> None:
             elif intent == 'booking_edit':
                 logger.info("[EDIT] Intent booking_edit detected for %s", sender_id)
                 extracted = extract_booking_details(history, user_text)
+
+                target = get_existing_draft(sender_id)
+                if target:
+                    handler = LlmBookingFlowHandler()
+                    reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
+                    send_text_message(phone_number_id, sender_id, reply)
+                    return
+
                 diff = {}
                 if extracted.get("date"):
                     diff["date"] = extracted["date"]
