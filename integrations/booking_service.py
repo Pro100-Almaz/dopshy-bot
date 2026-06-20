@@ -7,7 +7,8 @@ Every function returns a typed result envelope:
 human-friendly RU text the bot echoes to the user.
 
 State machine: draft → awaiting_payment → confirmed
-                            ├→ cancelled (TTL expired / user cancelled)
+                            ├→ cancelled (user cancelled)
+                            ├→ unpaid    (TTL expired without payment)
                             └→ failed    (payment rejected)
 
 Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
@@ -253,7 +254,7 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
                 "(bookings.id = target.id "
                 "OR bookings.group_repetition = target.group_repetition "
                 "OR bookings.group_transition = target.group_transition) "
-                "AND bookings.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed') "
+                "AND bookings.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed', 'unpaid') "
                 "RETURNING bookings.id",
                 (booking_id,),
             )
@@ -530,7 +531,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source",}
+_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash"}
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:

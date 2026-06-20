@@ -505,6 +505,13 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     ts = str(booking["time_start"])[:5]
     te = str(booking["time_end"])[:5]
     price_line = fmt_price(booking["price_total"]) if booking.get("price_total") else ""
+
+    paid = float(result["parsed"].get("amount") or 0)
+    total = float(booking.get("price_total") or 0)
+    remainder = max(0, total - paid)
+    remainder_ru = f"\n💳 Остаток к оплате: {fmt_price(remainder)} — при желании можно оплатить заранее." if remainder > 0 else ""
+    remainder_kk = f"\n💳 Төлем қалдығы: {fmt_price(remainder)} — қаласаңыз алдын ала төлей аласыз." if remainder > 0 else ""
+
     send_text_message(
         phone_number_id,
         sender_phone,
@@ -512,13 +519,15 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
         f"⚽ {booking['format']}\n"
-        f"💰 {price_line}\n\n"
+        f"💰 {price_line}"
+        f"{remainder_ru}\n\n"
         f"Ждём вас! 🙌\n\n"
         f"— — —\n"
         f"✅ Төлем қабылданды! Брондау расталды.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
         f"⚽ {booking['format']}\n"
-        f"💰 {price_line}\n\n"
+        f"💰 {price_line}"
+        f"{remainder_kk}\n\n"
         f"Сізді күтеміз! 🙌",
     )

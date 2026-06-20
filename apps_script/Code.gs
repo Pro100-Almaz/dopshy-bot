@@ -15,12 +15,14 @@
 
 var COL = {
   BOOKING_ID: 1, FIELD: 2, DATE: 3, START: 4, END: 5,
-  CUSTOMER: 6, NOTES: 7, STATUS: 8, LAST_SYNCED: 9
+  CUSTOMER: 6, PHONE: 7, NOTES: 8, STATUS: 9, LAST_SYNCED: 10, UPDATED_BY: 11, RESERVED_UNTIL: 12,
+  PRICE_TOTAL: 13, PAYMENT_CURRENT: 14, REMAINDER: 15, RECEIPT_DATE: 16, KASPI_QR: 17, CASH: 18
 };
 var GROUP_COL = {
   GROUP_ID: 1, GROUP_NAME: 2, MAX_CAP : 3, CURR_CAP: 4,
   TRAINGING_DAY: 5, START_TIME: 6, END_TIME: 7
 }
+const user = Session.getActiveUser();
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -59,15 +61,22 @@ function onEditManual() {
 
   if (!groupSheets.includes(sheetName)){
 
-    if (col !== COL.CUSTOMER && col !== COL.NOTES) return;
+    var editableCols = [COL.CUSTOMER, COL.NOTES, COL.KASPI_QR, COL.CASH];
+    if (!editableCols.includes(col)) return;
 
     var bookingId = sheet.getRange(row, COL.BOOKING_ID).getValue();
     if (!bookingId) return; // unsynced row being typed manually
 
-    var field = col === COL.CUSTOMER ? 'customer' : 'notes';
+    var colFieldMap = {};
+    colFieldMap[COL.CUSTOMER] = 'customer';
+    colFieldMap[COL.NOTES] = 'notes';
+    colFieldMap[COL.KASPI_QR] = 'paid_kaspi_qr';
+    colFieldMap[COL.CASH] = 'paid_cash';
+    var field = colFieldMap[col];
 
     var patch = {};
     patch[field] = sheet.getRange(row, col).getValue();
+    patch["source"] = user.getEmail();
 
     try {
       apiPatch(bookingId, patch);
@@ -107,7 +116,7 @@ function onEditManual() {
 
         apiRefreshGroupTables();
         return;
-      }else{
+      } else{
         field = 'max_cap';
       }
     }

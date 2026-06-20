@@ -25,7 +25,8 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 _HEADERS = ["Номер брони", "Поле", "Дата", "Начало", "Конец",
             "Имя клиента", "Телефон", "Заметки", "Статус", "Посл. обновлено",
-            "Менеджер", "Резерв до", "Сумма", "Оплачено"]
+            "Менеджер", "Резерв до", "Сумма", "Оплачено", "Остаток суммы",
+            "Дата чека", "Kaspi QR", "Наличные"]
 _COL_COUNT = len(_HEADERS)  # 9
 
 # DB state → sheet status label (uppercase, matches Apps Script dropdown).
@@ -35,6 +36,7 @@ _STATE_DISPLAY = {
     "confirmed":        "CONFIRMED",
     "cancelled":        "CANCELLED",
     "failed":           "FAILED",
+    "unpaid":           "UNPAID",
 }
 
 _STATES_RUSSIAN = {
@@ -43,6 +45,7 @@ _STATES_RUSSIAN = {
     "confirmed":        "ПОДТВЕРЖДЕНО",
     "cancelled":        "ОТМЕНЕНО",
     "failed":           "ПРОВАЛИЛОСЬ",
+    "unpaid":           "НЕ ОПЛАЧЕНО",
 }
 
 
@@ -59,9 +62,13 @@ _ws_lock = threading.Lock()
 def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> list[dict]:
     for booking in bookings:
         booking.setdefault("payment_current", 0)
+        booking.setdefault("last_receipt_date", None)
         for payment in payments:
             if payment['booking_id'] == booking["id"]:
                 booking["payment_current"] += payment.get("amount", 0)
+                rd = payment.get("receipt_date")
+                if rd and (booking["last_receipt_date"] is None or rd > booking["last_receipt_date"]):
+                    booking["last_receipt_date"] = rd
     return bookings
 
 
@@ -111,7 +118,11 @@ def _booking_to_row(b: dict) -> list:
         b.get("source", ""),
         b.get("reserved_until").strftime("%Y-%m-%d %H:%M") if b.get("reserved_until") else "",
         float(b.get("price_total", 0)),
-        b.get("payment_current", 0),
+        float(b.get("payment_current", 0)),
+        max(0, float(b.get("price_total", 0)) - float(b.get("payment_current", 0))),
+        b["last_receipt_date"].strftime("%Y-%m-%d %H:%M") if b.get("last_receipt_date") else "",
+        float(b.get("paid_kaspi_qr", 0)),
+        float(b.get("paid_cash", 0)),
     ]
 
 
@@ -150,19 +161,27 @@ def update_booking_row(booking_id: int, fields: dict) -> None:
     col_for = {"field": 2, "date": 3, "time_start": 4, "time_end": 5,
                "customer_name": 6, "phone": 7, "notes": 8, "state": 9,
                "source": 11, "reserved_until": 12, "price_total": 13,
-               "payment_current": 14}
+               "payment_current": 14, "paid_kaspi_qr": 17, "paid_cash": 18}
     try:
         ws = _get_worksheet()
         col_a = ws.col_values(1)
         idx = col_a.index(str(booking_id)) + 1
+        batch = []
         for key, value in fields.items():
             col = col_for.get(key)
             if not col:
                 continue
             if key == "state":
                 value = _STATES_RUSSIAN.get(value, value)
-            ws.update_cell(idx, col, value)
-        ws.update_cell(idx, 10, now_almaty().strftime("%Y-%m-%d %H:%M"))
+            cell = chr(ord("A") + col - 1) + str(idx)
+            batch.append({"range": cell, "values": [[value]]})
+        batch.append({"range": f"J{idx}", "values": [[now_almaty().strftime("%Y-%m-%d %H:%M")]]})
+        if "price_total" in fields or "payment_current" in fields:
+            row = ws.row_values(idx)
+            price = float(row[12]) if len(row) > 12 and row[12] else 0
+            paid = float(row[13]) if len(row) > 13 and row[13] else 0
+            batch.append({"range": f"O{idx}", "values": [[max(0, price - paid)]]})
+        ws.batch_update(batch, value_input_option="RAW")
     except ValueError:
         logger.warning("Sheets update_booking_row: booking %s not found", booking_id)
     except Exception as exc:
@@ -317,7 +336,7 @@ def _floor_time_to_30_minutes(t: datetime.time) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
-def _paint_confirmed_booking(worksheet, booking, requests) -> None:
+def _paint_confirmed_booking(worksheet, booking, requests, cell_updates) -> None:
     booking_date = booking['date']
     booking_start_time = _floor_time_to_30_minutes(booking['time_start'])
     booking_end_time = _floor_time_to_30_minutes(booking['time_end'])
@@ -335,7 +354,8 @@ def _paint_confirmed_booking(worksheet, booking, requests) -> None:
         f"{booking.get('notes') or ''}"
     ).strip()
 
-    worksheet.update_cell(sheet_row, col, cell_text)
+    col_letter = col_index_to_letter(col - 1)
+    cell_updates.append({"range": f"{col_letter}{sheet_row}", "values": [[cell_text]]})
 
     note_text = (
         f"Booking ID: {booking.get('id')}\n"
@@ -392,9 +412,12 @@ def _paint_confirmed_booking(worksheet, booking, requests) -> None:
 
 def _paint_weekly_bookings(worksheet, bookings):
     requests = []
+    cell_updates = []
     for booking in bookings:
-        _paint_confirmed_booking(worksheet, booking, requests)
+        _paint_confirmed_booking(worksheet, booking, requests, cell_updates)
 
+    if cell_updates:
+        worksheet.batch_update(cell_updates, value_input_option="RAW")
     if requests:
         worksheet.spreadsheet.batch_update({"requests": requests})
 
@@ -458,8 +481,11 @@ def _single_table_write(booking):
     worksheet = _get_week_worksheet(field)
 
     requests = []
-    _paint_confirmed_booking(worksheet, booking, requests)
+    cell_updates = []
+    _paint_confirmed_booking(worksheet, booking, requests, cell_updates)
 
+    if cell_updates:
+        worksheet.batch_update(cell_updates, value_input_option="RAW")
     if requests:
         worksheet.spreadsheet.batch_update({'requests': requests})
 

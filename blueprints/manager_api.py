@@ -78,9 +78,13 @@ def _authenticate():
 def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> list[dict]:
     for booking in bookings:
         booking.setdefault("payment_current", 0)
+        booking.setdefault("last_receipt_date", None)
         for payment in payments:
             if payment['booking_id'] == booking["id"]:
                 booking["payment_current"] += payment.get("amount", 0)
+                rd = payment.get("receipt_date")
+                if rd and (booking["last_receipt_date"] is None or rd > booking["last_receipt_date"]):
+                    booking["last_receipt_date"] = rd
     return bookings
 
 
@@ -98,7 +102,7 @@ def list_bookings():
     start = request.args.get("from", str(today))
     end = request.args.get("to", str(today + timedelta(days=30)))
     rows = repo.get_bookings_in_range(
-        start, end, states=("draft", "awaiting_payment", "confirmed")
+        start, end, states=("draft", "awaiting_payment", "confirmed", "unpaid")
     )
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)
@@ -161,6 +165,10 @@ def patch_booking(booking_id: int):
         patch["price_total"] = body["price_total"]
     if "status" in body:
         patch["state"] = body["status"]
+    if "paid_kaspi_qr" in body:
+        patch["paid_kaspi_qr"] = body["paid_kaspi_qr"]
+    if "paid_cash" in body:
+        patch["paid_cash"] = body["paid_cash"]
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
     if res["ok"]:
