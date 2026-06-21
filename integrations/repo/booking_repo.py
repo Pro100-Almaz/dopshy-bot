@@ -1,9 +1,12 @@
-
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
+from zoneinfo import ZoneInfo
 
 from integrations.repo.postgres import _conn
+
+
+ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
@@ -28,7 +31,7 @@ def get_user_upcoming_bookings(phone: str) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, date, time_start, time_end, field, format, players,
-                       customer_name, state, notes
+                       customer_name, state, notes, price_total, group_transition
                 FROM bookings
                 WHERE phone = %s
                   AND date >= CURRENT_DATE
@@ -78,17 +81,25 @@ def get_awaiting_payment_booking(phone: str) -> dict | None:
 
 
 def get_bookings_for_sheet() -> list[dict]:
-    """All slot-holding bookings (awaiting_payment + confirmed) for the flat Sheet view."""
+    """All slot-holding bookings (awaiting_payment + confirmed + unpaid) for the flat Sheet view."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, reserved_until, source, updated_at
+                       phone, notes, state, price_total, reserved_until, source, updated_at,
+                       paid_kaspi_qr, paid_cash
                 FROM bookings
-                WHERE state IN ('awaiting_payment', 'confirmed')
+                WHERE state IN ('awaiting_payment', 'confirmed', 'unpaid')
                 ORDER BY date, time_start, field
             """)
-            return [dict(r) for r in cur.fetchall()]
+            result = [dict(r) for r in cur.fetchall()]
+            for r in result:
+                if r["reserved_until"]:
+                    r["reserved_until"] = r["reserved_until"].astimezone(ALMATY_TZ)
+
+                if r["updated_at"]:
+                    r["updated_at"] = r["updated_at"].astimezone(ALMATY_TZ)
+            return result
 
 
 def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed")) -> list[dict]:
@@ -97,7 +108,8 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, source, reserved_until
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
                 ORDER BY date, time_start, field
@@ -170,8 +182,8 @@ def cancel_draft_awaiting_payment(phone: str) -> bool:
             """, (phone,))
 
             cnt = cur.rowcount > 0
-            print("COUNT cancelled", cnt)
             return cnt
+
 
 def has_awaiting_payments(phone: str) -> bool:
     """Return upcoming (today or later) non-cancelled bookings for a phone number."""

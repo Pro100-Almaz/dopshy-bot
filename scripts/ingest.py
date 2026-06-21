@@ -13,6 +13,7 @@ import os
 # Allow imports from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from rag.retriever import invalidate_cache
 from rag.vector_store import ingest_documents
 import config
 
@@ -24,6 +25,7 @@ def main():
     print("-" * 40)
 
     count = ingest_documents(config.DOCUMENTS_PATH)
+    invalidate_cache()
     print(f"\nDone. {count} chunks stored in ChromaDB.")
 
 

@@ -97,7 +97,8 @@ def update_draft(bot_name: str, object_id: int, state: str = 'draft', **patch) -
 
 
 def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whatsapp",
-                   actor_id: str | None = None, reason: str | None = None) -> dict:
+                   actor_id: str | None = None, reason: str | None = None,
+                   target_state: str = "cancelled") -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
     table_name = "bookings" if bot_name == "dopsy_bot" else "academy_trials"
@@ -115,16 +116,16 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whats
                 """
                 params = (object_id, object_id)
             cur.execute(
-                f"UPDATE {table_name} SET state = 'cancelled', updated_at = NOW() "
+                f"UPDATE {table_name} SET state = %s, updated_at = NOW() "
                 f"WHERE (id = %s ) {extra}"
-                "AND state NOT IN ('cancelled', 'failed') RETURNING id",
-                params,
+                "AND state NOT IN ('cancelled', 'failed', 'unpaid') RETURNING id",
+                (target_state,) + params,
             )
             if cur.fetchone():
                 table_del = "trial_sessions"
                 types_string = "trial"
                 if bot_name == "dopsy_bot":
-                    _record_event(cur, object_id, "cancelled", actor_type, actor_id, reason)
+                    _record_event(cur, object_id, target_state, actor_type, actor_id, reason)
                     table_del = "booking_sessions"
                     types_string = "booking"
 

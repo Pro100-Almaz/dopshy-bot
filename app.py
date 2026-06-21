@@ -48,6 +48,7 @@ def _scheduled_sheet_refresh():
     try:
         from integrations.sheets.booking_sheets import refresh_all_bookings
         refresh_all_bookings()
+        refresh_week_sheet()
         logger.info("Scheduled sheet refresh complete.")
     except Exception as exc:
         logger.error("Scheduled sheet refresh failed: %s", exc)
@@ -67,10 +68,11 @@ def _cancel_expired_bookings():
         if not expired:
             return
 
-        # Cancel each through the service layer so every transition is audited.
         for b in expired:
+            target = "unpaid" if b["state"] == "awaiting_payment" else "cancelled"
             postgres.cancel_booking_trial(
-                config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name'], b["id"], actor_type="system", reason="ttl_expired"
+                config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name'], b["id"],
+                actor_type="system", reason="ttl_expired", target_state=target,
             )
 
         # Only awaiting_payment expiries are user-facing (drafts never reserved a slot).
@@ -83,6 +85,7 @@ def _cancel_expired_bookings():
         if to_notify:
             try:
                 sheets.refresh_all_bookings()
+                sheets.refresh_week_sheet()
             except Exception as exc:
                 logger.error("[PAYMENT] Sheet refresh failed: %s", exc)
 
@@ -93,11 +96,11 @@ def _cancel_expired_bookings():
                 send_text_message(
                     config.WHATSAPP_PHONE_NUMBER_ID_BOT_1,
                     b["phone"],
-                    f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, Поле {b['field']}) "
-                    f"была отменена — оплата не поступила в течении 15 минут.\n"
+                    f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
+                    f"была отменена — оплата не поступила в течении 20 минут.\n"
                     f"Хотите забронировать снова? Просто напишите нам!\n\n"
-                    f"Өкінішке орай, брондауыңыз {b['date']} ({ts}–{te}, Поле {b['field']}) "
-                    f"15 минут ішінде төленбегендіктен жойылды.\n"
+                    f"Өкінішке орай, брондауыңыз {b['date']} ({ts}–{te}, {b.get('format', '')}) "
+                    f"20 минут ішінде төленбегендіктен жойылды.\n"
                     f"Қайта брондау үшін жазыңыз!",
                 )
             except Exception as exc:

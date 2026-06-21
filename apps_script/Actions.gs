@@ -55,11 +55,13 @@ function getKeyByValue(obj, value) {
   return Object.keys(obj).find(key => obj[key] === value);
 }
 
-STATUS_NAMES = {
-  'awaiting_payment': 'ОЖИДАНИЕ ОПЛАТЫ',
-  'cancelled': 'ОТМЕНЕН',
+const STATUS_NAMES = {
+  'awaiting_payment': 'ОЖИДАЕТ ОПЛАТЫ',
+  'cancelled': 'ОТМЕНЕНО',
   'confirmed': 'ПОДТВЕРЖДЕНО',
-  'failed': 'ПРОВАЛ'
+  'failed': 'ПРОВАЛ',
+  'draft': 'ЧЕРНОВИК',
+  'unpaid': 'НЕ ОПЛАЧЕНО',
 }
 
 function showCancelDialog() {
@@ -71,7 +73,7 @@ function showCancelDialog() {
 
   var bookingId = sheet.getRange(row, COL.BOOKING_ID).getValue();
   var status = getKeyByValue(STATUS_NAMES, sheet.getRange(row, COL.STATUS).getValue());
-  if (!bookingId) { spreadsheet.toast('В этой строке нет booking_id'); return; }
+  if (!bookingId) { spreadsheet.toast('В этой строке нет номера брони'); return; }
   if (!status) { spreadsheet.toast('В этой строке неправильный статус'); return; }
 
 
@@ -97,7 +99,7 @@ function changeStatusSelected(bookingId, status) {
   );
   if (resp !== ui.Button.YES) return;
 
-  var patch = {"status": status}
+  var patch = {"status": status, "source": user.getEmail()}
   try {
     apiPatch(bookingId, patch);
 
@@ -116,6 +118,12 @@ function changeStatusSelected(bookingId, status) {
   refreshFromServer();
 }
 
+function formatDate(dateStr) {
+  if (!dateStr) return "";
+  var tz = Session.getScriptTimeZone();
+  return Utilities.formatDate(new Date(dateStr), tz, 'yyyy-MM-dd HH:mm');
+}
+
 /** Overwrite the sheet with the backend's current view for the next ~60 days. */
 function refreshFromServer() {
   var sheet = _bookingsSheet();
@@ -128,15 +136,21 @@ function refreshFromServer() {
   var res = apiListBookings(from, toStr);
   if (!res.ok) { SpreadsheetApp.getUi().alert('Ошибка: ' + res.message); return; }
 
-  var header = ['booking_id', 'field', 'date', 'start', 'end',
-                'customer', 'notes', 'status', 'last_synced'];
+  var header = ['Номер брони', 'Поле', 'Дата', 'Начало', 'Конец',
+                'Имя клиента', 'Телефон', 'Заметки', 'Статус', 'Посл. обновление',
+                'Менеджер', 'Резерв до', 'Сумма', 'Оплачено', 'Остаток суммы',
+                'Дата чека', 'Kaspi QR', 'Наличные'];
   var rows = [header];
   var nowStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
   res.data.forEach(function (b) {
+    var price = Number(b.price_total) || 0;
+    var paid = Number(b.payment_current) || 0;
     rows.push([
       b.id, b.field, b.date,
       String(b.time_start).slice(0, 5), String(b.time_end).slice(0, 5),
-      b.customer_name || '', b.notes || '', String(STATUS_NAMES[b.state]), nowStr
+      b.customer_name || '', b.phone, b.notes || '', String(STATUS_NAMES[b.state]), nowStr,
+      b.source, formatDate(b.reserved_until), price, paid, Math.max(0, price - paid),
+      formatDate(b.last_receipt_date), Number(b.paid_kaspi_qr) || 0, Number(b.paid_cash) || 0
     ]);
   });
 

@@ -8,10 +8,11 @@ import threading
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
 from handlers.extractor import extract_booking_details
-from handlers.payment.pricing import process_field_prices
+from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from integrations.repo.booking_repo import has_awaiting_payments
+from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
+from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
@@ -81,11 +82,13 @@ _CANCEL_STATUS = (
 _LOCATION_MESSAGE = (
     "📍 Сыганак 6Ф, напротив ТЦ Mechta и ТЦ Tumar.\n"
     "Вход и заезд со стороны улицы Тәттімбета.\n"
+    "Оттуда же въезд на парковку\n"
     "Ссылка на 2GIS: https://2gis.kz/astana/geo/70000001074875383\n\n"
     "–––\n\n"
     "📍 Сығанақ 6Ф, Mechta және Tumar СО қарсы.\n"
     "Кіру және кіреберіс Тәттімбет көшесі жағынан.\n"
-    "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
+    "Көлік тұрағы да сол жерде\n"
+    "2GIS сілтемесі: https://2gis.kz/astana/geo/700000010748\n"
 )
 
 builder = BasePromptBuilder({}, "", (), ())
@@ -172,6 +175,14 @@ def handle_incoming_message(payload: dict) -> None:
 
         # Handle reset command
         if user_text.lower() in RESET_COMMANDS:
+            logger.info("[RESET] Reset command by user %s: command -> %s", sender_id, user_text)
+            if bot_config["name"] == "dopsy_bot":
+                draft = get_existing_draft(sender_id)
+                if draft:
+                    cancel_booking_trial(bot_config["name"], draft["id"])
+                refresh_week_sheet()
+                refresh_all_bookings()
+
             clear_history(chat_id)
             send_text_message(
                 phone_number_id,
@@ -230,7 +241,7 @@ def handle_incoming_message(payload: dict) -> None:
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
             if intent == 'question_price':
-                send_text_message(phone_number_id, sender_id, process_field_prices())
+                send_text_message(phone_number_id, sender_id, process_field_prices(lang))
                 return
 
             elif intent == 'question_location':
@@ -244,12 +255,13 @@ def handle_incoming_message(payload: dict) -> None:
                 slots_date = extract_booking_details(history, user_text).get("date")
                 logger.info("[BOOKING] question_slots — extracted date=%s", slots_date)
                 if slots_date:
-                    response = check_slots({"date": slots_date, "lang": lang})
+                    response = check_slots({"date": slots_date, "lang": lang},
+                                           chat_id, user_text, sender_id, lang)
                 else:
                     response = (f"Давайте забронируем! Вот доступные слоты\n–––––\n"
                                 f"Брондайық! Бос слоттар:\n\n{availability_ctx}\n\n"
-                                f"Укажите дату, время, или номер поля.\n–––––\n"
-                                f"Күнді, уақытты немесе алаң нөмірін жазыңыз.")
+                                f"Укажите дату, время, или размер поля.\n–––––\n"
+                                f"Күнді, уақытты немесе алаң өлшемін жазыңыз.")
 
                 send_text_message(phone_number_id, sender_id, response)
                 return
@@ -259,7 +271,7 @@ def handle_incoming_message(payload: dict) -> None:
                     send_text_message(phone_number_id, sender_id,
                                       'Вы не можете создать новую бронь пока не оплатите предыдущую! \n'
                                       '\n----\n'
-                                      'Осығын дейінгі брондарыңызды төлемей жаңа брондар өоя алмайсыз! \n')
+                                      'Осығын дейінгі брондарыңызды төлемей жаңа брондар қоя алмайсыз! \n')
                     clear_history(chat_id)
                     return
                 extracted_data = extract_booking_details(history, user_text)
@@ -275,6 +287,14 @@ def handle_incoming_message(payload: dict) -> None:
             elif intent == 'booking_edit':
                 logger.info("[EDIT] Intent booking_edit detected for %s", sender_id)
                 extracted = extract_booking_details(history, user_text)
+
+                target = get_existing_draft(sender_id)
+                if target:
+                    handler = LlmBookingFlowHandler()
+                    reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
+                    send_text_message(phone_number_id, sender_id, reply)
+                    return
+
                 diff = {}
                 if extracted.get("date"):
                     diff["date"] = extracted["date"]
@@ -351,16 +371,7 @@ def handle_incoming_message(payload: dict) -> None:
         # 5. LLM may have asked us to launch a deterministic sub-flow.
         if tool_call:
             handle_reply = reply
-            if tool_call["name"] in "start_booking":
-                lang = builder.detect_lang(user_text)
-                logger.info("[BOOKING] LLM called start_booking tool — starting booking flow (lang=%s)", lang)
-                handle_reply = start_booking_flow(chat_id, sender_id, lang)
-
-            elif tool_call["name"] == "edit_booking":
-                logger.info("[EDIT] LLM called edit_booking tool — diff=%s", tool_call["args"])
-                handle_reply = handle_edit_booking_request(chat_id, sender_id, tool_call["args"])
-
-            elif tool_call["name"] == "start_trial":
+            if tool_call["name"] == "start_trial":
                 lang = builder.detect_lang(user_text)
                 logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
                 handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
@@ -493,18 +504,30 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     booking_date = booking["date"]
     ts = str(booking["time_start"])[:5]
     te = str(booking["time_end"])[:5]
+    price_line = fmt_price(booking["price_total"]) if booking.get("price_total") else ""
+
+    paid = float(result["parsed"].get("amount") or 0)
+    total = float(booking.get("price_total") or 0)
+    remainder = max(0, total - paid)
+    remainder_ru = f"\n💳 Остаток к оплате: {fmt_price(remainder)} — при желании можно оплатить заранее." if remainder > 0 else ""
+    remainder_kk = f"\n💳 Төлем қалдығы: {fmt_price(remainder)} — қаласаңыз алдын ала төлей аласыз." if remainder > 0 else ""
+
     send_text_message(
         phone_number_id,
         sender_phone,
         f"✅ Оплата получена! Бронь подтверждена.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {booking['field']} ({booking['format']})\n\n"
+        f"⚽ {booking['format']}\n"
+        f"💰 {price_line}"
+        f"{remainder_ru}\n\n"
         f"Ждём вас! 🙌\n\n"
         f"— — —\n"
         f"✅ Төлем қабылданды! Брондау расталды.\n\n"
         f"📅 {booking_date}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {booking['field']} ({booking['format']})\n\n"
+        f"⚽ {booking['format']}\n"
+        f"💰 {price_line}"
+        f"{remainder_kk}\n\n"
         f"Сізді күтеміз! 🙌",
     )
