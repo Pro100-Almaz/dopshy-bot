@@ -81,8 +81,6 @@ def get_awaiting_payment_booking(phone: str) -> dict | None:
 
 
 def get_bookings_for_sheet() -> list[dict]:
-    """Slot-holding bookings (awaiting_payment + confirmed + unpaid) for the flat Sheet view,
-    windowed from yesterday through 7 days from today."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
