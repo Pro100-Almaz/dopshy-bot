@@ -91,8 +91,7 @@ def get_bookings_for_sheet() -> list[dict]:
                        paid_kaspi_qr, paid_cash
                 FROM bookings
                 WHERE state IN ('awaiting_payment', 'confirmed', 'unpaid')
-                  AND date BETWEEN CURRENT_DATE - INTERVAL '1 day'
-                              AND CURRENT_DATE + INTERVAL '7 days'
+                  AND date >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY date, time_start, field
             """)
             result = [dict(r) for r in cur.fetchall()]
