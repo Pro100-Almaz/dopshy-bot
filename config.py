@@ -11,7 +11,7 @@ OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
 MODEL_NAME: str = "gpt-5.2"
 EXTRACTOR_MODEL: str = "gpt-4.1"
 INTENT_MODEL: str = "gpt-4.1"
-EMBEDDING_MODEL: str = "text-embedding-3-large"
+EMBEDDING_MODEL: str = "text-embedding-3-small"
 
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]
@@ -20,11 +20,16 @@ WHATSAPP_PHONE_NUMBER_ID_BOT_2: str = os.environ["WHATSAPP_PHONE_NUMBER_ID_BOT_2
 WHATSAPP_PHONE_NUMBER_ID_BOT_3: str = os.environ["WHATSAPP_PHONE_NUMBER_ID_BOT_3"]
 WHATSAPP_VERIFY_TOKEN: str = os.environ["WHATSAPP_VERIFY_TOKEN"]
 
+YCLOUD_API_KEY: str = os.environ["YCLOUD_API_KEY"]
+YCLOUD_FROM_BOT_1: str = os.environ["YCLOUD_FROM_BOT_1"]
+
 BOT_CONFIGS = {
     WHATSAPP_PHONE_NUMBER_ID_BOT_1: {
         "name": "dopsy_bot",
         "access_token": WHATSAPP_TOKEN,
         "phone_number_id": WHATSAPP_PHONE_NUMBER_ID_BOT_1,
+        "ycloud_api_key": YCLOUD_API_KEY,
+        "ycloud_from": YCLOUD_FROM_BOT_1,
         "system_prompt": sp_1.SYSTEM_PROMPT,
     },
     WHATSAPP_PHONE_NUMBER_ID_BOT_2: {
@@ -88,6 +93,12 @@ PAYMENT_MIN: int = 10000
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:
     return f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
+
+def get_ycloud_api_url() -> str:
+    return "https://api.ycloud.com/v2/whatsapp/messages"
+
+def get_ycloud_mark_as_read_url(message_id: str) -> str:
+    return f"https://api.ycloud.com/v2/whatsapp/inboundMessages/{message_id}/markAsRead"
 
 # ChromaDB
 CHROMA_DB_PATH: str = os.getenv("CHROMA_DB_PATH", "./chroma_db")

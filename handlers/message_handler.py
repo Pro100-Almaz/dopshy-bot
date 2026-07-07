@@ -4,6 +4,7 @@ Core message processing pipeline:
 """
 import logging
 import threading
+from typing import Union
 
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
@@ -11,6 +12,7 @@ from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
+from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
@@ -111,48 +113,55 @@ def _format_payment_reject_message(
     )
 
 
-def handle_incoming_message(payload: dict) -> None:
+def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
     """
     Parse a WhatsApp Cloud API webhook payload and respond.
     Supports both individual and group messages.
     """
     sender_id = ""
-
+    # channel = None
     try:
-        entry = payload.get("entry", [{}])[0]
-        changes = entry.get("changes", [{}])[0]
-        value = changes.get("value", {})
+        # if type(payload) is IncomingWhatsAppMessage and payload.provider == 'ycloud':
+        #     phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
+        # elif type(payload) is dict and payload.get('provider') == 'ycloud':
+        #     phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
+        # else:
+        #     phone_number_id = payload.business.phone_number_id
 
-        phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+        if payload.provider == 'ycloud':
+            phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
+        else:
+            phone_number_id = payload.business.phone_number_id
+
         bot_config = config.get_bot_config(phone_number_id)
+
+        channel = OutboundChannel(
+            provider=payload.provider,
+            phone_number_id=phone_number_id
+        )
 
         if not bot_config:
             logger.warning("Unknown phone_number_id from webhook: %s", phone_number_id)
             return
 
-        messages = value.get("messages", [])
-        if not messages:
-            return  # Delivery status update — ignore
 
-        message = messages[0]
-        msg_type = message.get("type")
-        message_id = message.get("id", "")
-        sender_id = message.get("from", "")  # sender phone number
+        msg_type = payload.message_type
+        message_id = payload.whatsapp_message_id
+        sender_id = payload.customer.phone  # sender phone number
 
         # Mark as read immediately
         if message_id:
-            mark_as_read(phone_number_id, message_id)
+            mark_as_read(channel, message_id)
 
         # Document = payment receipt — confirm the booking
         if msg_type == "document":
-            media_id = message.get("document", {}).get("id")
-            _handle_payment_receipt(phone_number_id, sender_id, media_id)
+            _handle_payment_receipt(channel, phone_number_id, sender_id, payload.media)
             return
 
         # Only handle text messages
         if msg_type not in ["text", "interactive"]:
             send_text_message(
-                phone_number_id,
+                channel,
                 sender_id,
                 "Извините, я ассистент-бот и могу распознавать только текст, не могли бы вы отправлять только текстовые сообщения, пожалуйста. "
                 "/ Кешіріңіз, мен бот-ассистентпін, тек қана мәтіндік хабарламаны оқи аламын. Өтініш, мәтіндік хабарлама жіберіңіз.",
@@ -160,18 +169,18 @@ def handle_incoming_message(payload: dict) -> None:
             return
 
         user_text = ""
-        if msg_type == "interactive" and message["interactive"]["type"] == 'button_reply':
-            button_reply = message["interactive"]["button_reply"]
-            user_text = button_reply.get("title")
+        if msg_type == "interactive" and payload.interactive and payload.interactive.type == 'button_reply':
+            user_text = str(payload.interactive.button_reply.title)
 
         if msg_type == "text":
-            user_text = message["text"]["body"].strip()
+            user_text = str(payload.text)
 
         # Determine chat context key.
         # For group messages Meta Cloud API includes a "context" object; we use
         # sender_id so each person in a group gets a shared thread identified by
         # their own number (simplest approach — change to group JID if needed).
         chat_id = f"{phone_number_id}:{sender_id}"
+
 
         # Handle reset command
         if user_text.lower() in RESET_COMMANDS:
@@ -185,7 +194,7 @@ def handle_incoming_message(payload: dict) -> None:
 
             clear_history(chat_id)
             send_text_message(
-                phone_number_id,
+                channel,
                 sender_id,
                 "История разговора сброшена. Начнём заново! 🔄\n"
                 "Сөйлесу тарихы тазаланды. Қайтадан бастайық! 🔄",
@@ -229,7 +238,7 @@ def handle_incoming_message(payload: dict) -> None:
                     )
                     append_message(chat_id, "user", user_text)
                     append_message(chat_id, "assistant", booking_reply)
-                    send_text_message(phone_number_id, sender_id, booking_reply)
+                    send_text_message(channel, sender_id, booking_reply)
                     return
 
             intent, lang = route_incoming_message(history, user_text)
@@ -241,11 +250,11 @@ def handle_incoming_message(payload: dict) -> None:
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
             if intent == 'question_price':
-                send_text_message(phone_number_id, sender_id, process_field_prices(lang))
+                send_text_message(channel, sender_id, process_field_prices(lang))
                 return
 
             elif intent == 'question_location':
-                send_text_message(phone_number_id, sender_id, _LOCATION_MESSAGE)
+                send_text_message(channel, sender_id, _LOCATION_MESSAGE)
                 return
 
             elif intent == 'question_slots':
@@ -263,12 +272,12 @@ def handle_incoming_message(payload: dict) -> None:
                                 f"Укажите дату, время, или размер поля.\n–––––\n"
                                 f"Күнді, уақытты немесе алаң өлшемін жазыңыз.")
 
-                send_text_message(phone_number_id, sender_id, response)
+                send_text_message(channel, sender_id, response)
                 return
 
             elif intent in ['booking_new', 'booking_continue']:
                 if has_awaiting_payments(sender_id):
-                    send_text_message(phone_number_id, sender_id,
+                    send_text_message(channel, sender_id,
                                       'Вы не можете создать новую бронь пока не оплатите предыдущую! \n'
                                       '\n----\n'
                                       'Осығын дейінгі брондарыңызды төлемей жаңа брондар қоя алмайсыз! \n')
@@ -281,7 +290,7 @@ def handle_incoming_message(payload: dict) -> None:
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", reply)
                 logger.info("[LLM2] reply: %s", reply)
-                send_text_message(phone_number_id, sender_id, reply)
+                send_text_message(channel, sender_id, reply)
                 return
 
             elif intent == 'booking_edit':
@@ -292,7 +301,7 @@ def handle_incoming_message(payload: dict) -> None:
                 if target:
                     handler = LlmBookingFlowHandler()
                     reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
-                    send_text_message(phone_number_id, sender_id, reply)
+                    send_text_message(channel, sender_id, reply)
                     return
 
                 diff = {}
@@ -315,13 +324,13 @@ def handle_incoming_message(payload: dict) -> None:
                 reply = handle_edit_booking_request(chat_id, sender_id, diff)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", reply)
-                send_text_message(phone_number_id, sender_id, reply)
+                send_text_message(channel, sender_id, reply)
                 return
 
             elif intent == 'booking_status':
                 logger.info("[BOOKING] Fetching user's own bookings")
                 bookings = booking_repo.get_user_upcoming_bookings(sender_id)
-                send_text_message(phone_number_id, sender_id,
+                send_text_message(channel, sender_id,
                                   booking.format_user_booking_context(bookings, lang))
                 return
 
@@ -331,7 +340,7 @@ def handle_incoming_message(payload: dict) -> None:
                 clear_history(chat_id)
                 refresh_all_bookings()
                 refresh_week_sheet()
-                send_text_message(phone_number_id, sender_id, _CANCEL_STATUS[cancelled])
+                send_text_message(channel, sender_id, _CANCEL_STATUS[cancelled])
                 return
 
             # (c) Neither handled the message → fall through to RAG/LLM
@@ -349,7 +358,7 @@ def handle_incoming_message(payload: dict) -> None:
                 )
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", trial_reply)
-                send_text_message(phone_number_id, sender_id, trial_reply)
+                send_text_message(channel, sender_id, trial_reply)
                 return
             logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
@@ -391,23 +400,23 @@ def handle_incoming_message(payload: dict) -> None:
         append_message(chat_id, "assistant", reply)
 
         # 7. Send reply
-        send_text_message(phone_number_id, sender_id, reply)
+        send_text_message(channel, sender_id, reply)
         logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
         logger.exception("Error handling message: %s", exc)
         # Best-effort fallback reply
         try:
-            entry = payload.get("entry", [{}])[0]
-            changes = entry.get("changes", [{}])[0]
-            value = changes.get("value", {})
+            if payload.provider == 'ycloud':
+                phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
+            else:
+                phone_number_id = payload.business.phone_number_id
 
-            phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
             bot_config = config.get_bot_config(phone_number_id)
 
             if sender_id and bot_config:
                 send_text_message(
-                    phone_number_id,
+                    channel,
                     sender_id,
                     "Произошла ошибка. Попробуйте позже или свяжитесь с администратором.\n"
                     "Қате орын алды. Кейінірек немесе әкімшімен хабарласыңыз.",
@@ -439,7 +448,7 @@ def _refresh_booking_sheet(booking: dict, state: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
+def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, sender_phone: str,
                             proof_media_id: str | None = None) -> None:
     """
     Called when a user sends a document (assumed to be a payment receipt).
@@ -451,7 +460,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     if not booking:
         logger.info("[PAYMENT] Document from %s — no awaiting_payment booking found", sender_phone)
         send_text_message(
-            phone_number_id,
+            channel,
             sender_phone,
             "Оплата принята! Спасибо. ✅\nТөлем қабылданды! Рахмет. ✅",
         )
@@ -467,7 +476,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     if not pdf:
         logger.warning("[PAYMENT] Could not download media for booking id=%d", booking["id"])
         send_text_message(
-            phone_number_id, sender_phone,
+            channel, sender_phone,
             "Не удалось загрузить чек. Пожалуйста, отправьте PDF-чек ещё раз.\n"
             "Чекті жүктеу мүмкін болмады. PDF-чекті қайта жіберіңіз.",
         )
@@ -479,7 +488,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
         booking_service.reject_payment(booking["id"], result["reason"], result["parsed"])
         logger.info("[PAYMENT] Booking id=%d receipt rejected: %s", booking["id"], result["code"])
         send_text_message(
-            phone_number_id, sender_phone,
+            channel, sender_phone,
             _format_payment_reject_message(result["code"], result["parsed"], booking),
         )
         return
@@ -494,7 +503,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
                else "Не удалось подтвердить оплату. Свяжитесь с администратором.\n"
                     "Төлемді растау мүмкін болмады. Әкімшімен хабарласыңыз.")
         logger.error("[PAYMENT] submit_payment_proof failed for id=%d: %s", booking["id"], res)
-        send_text_message(phone_number_id, sender_phone, msg)
+        send_text_message(channel, sender_phone, msg)
         return
 
     logger.info("[PAYMENT] Booking id=%d confirmed for phone=%s", booking["id"], sender_phone)
@@ -513,7 +522,7 @@ def _handle_payment_receipt(phone_number_id: str, sender_phone: str,
     remainder_kk = f"\n💳 Төлем қалдығы: {fmt_price(remainder)} — қаласаңыз алдын ала төлей аласыз." if remainder > 0 else ""
 
     send_text_message(
-        phone_number_id,
+        channel,
         sender_phone,
         f"✅ Оплата получена! Бронь подтверждена.\n\n"
         f"📅 {booking_date}\n"

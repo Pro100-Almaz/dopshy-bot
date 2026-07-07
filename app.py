@@ -15,6 +15,8 @@ from flask import Flask, request, jsonify, abort
 
 import config
 from handlers.message_handler import handle_incoming_message
+from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
+from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
 from integrations.sheets.booking_sheets import refresh_week_sheet
 
@@ -155,6 +157,9 @@ def verify_webhook():
 
 @app.post("/webhook")
 def receive_message():
+
+
+    # return jsonify({"status": "ok"}), 200
     """
     Receive WhatsApp message events from Meta.
     Process each message in a background thread so we return 200 fast
@@ -168,10 +173,53 @@ def receive_message():
     if payload.get("object") != "whatsapp_business_account":
         return jsonify({"status": "ignored"}), 200
 
+    try:
+        data = parse_meta(payload)
+    except WhatsappPayloadParserError:
+        logger.error({'Failed to parse Meta webhook'})
+        return jsonify({"status": "ignored"}), 200
+
+    if data is None:
+        return jsonify({"status": "ignored"}), 200
+
     # Process in background so the webhook response is immediate
     thread = threading.Thread(
         target=handle_incoming_message,
-        args=(payload,),
+        args=(data,),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"status": "ok"}), 200
+
+@app.post("/webhook/ycloud")
+def receive_ycloud_message():
+    """
+    Receive WhatsApp message events from YCloud Provider.
+    Process each message in a background thread so we return 200 fast
+    (Meta requires a 200 response within 20 seconds or it retries).
+    """
+    payload = request.get_json(silent=True)
+    if not payload:
+        abort(400)
+
+    # Confirm this is a WhatsApp Business Account event
+    if payload.get("type") != "whatsapp.inbound_message.received":
+        return jsonify({"status": "ignored"}), 200
+
+    try:
+        data = parser_ycloud(payload)
+    except WhatsappPayloadParserError:
+        logger.error({'Failed to parse YCloud webhook'})
+        return jsonify({"status": "ignored"}), 200
+
+    if data is None:
+        return jsonify({"status": "ignored"}), 200
+
+    # Process in background so the webhook response is immediate
+    thread = threading.Thread(
+        target=handle_incoming_message,
+        args=(data,),
         daemon=True,
     )
     thread.start()
