@@ -36,9 +36,21 @@ if config.POSTGRES_DSN:
 
 app = Flask(__name__)
 
+# CORS: allow the browser frontend (Vite dev server by default) to call /api/* routes.
+# supports_credentials=True so cookie/session or Authorization headers are permitted
+# once auth tokens are added; origins must be explicit (cannot be "*") when credentials are on.
+from flask_cors import CORS  # noqa: E402
+CORS(
+    app,
+    resources={r"/api/*": {"origins": config.CORS_ORIGINS}},
+    supports_credentials=True,
+)
+
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402
+from auth.api.base import auth_api
 app.register_blueprint(manager_api)
+app.register_blueprint(auth_api)
 
 # ---------------------------------------------------------------------------
 # Scheduler: refresh Google Sheet every Monday 06:00 Almaty time

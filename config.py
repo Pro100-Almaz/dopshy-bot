@@ -63,6 +63,14 @@ MANAGER_API_KEY: str = os.getenv("MANAGER_API_KEY", "")
 MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
 
 # ---------------------------------------------------------------------------
+# CORS (browser frontend → backend)
+# ---------------------------------------------------------------------------
+# Comma-separated list of allowed origins. Defaults to the Vite dev server.
+CORS_ORIGINS: list = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if o.strip()
+]
+
+# ---------------------------------------------------------------------------
 # Google Sheets
 # ---------------------------------------------------------------------------
 GOOGLE_CREDENTIALS_PATH: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "./secrets/google_credentials.json")
