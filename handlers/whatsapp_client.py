@@ -94,6 +94,14 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+        try:
+            payload["interactive"] = json.loads(text)
+            payload["type"] = "interactive"
+            payload.pop("text")
+        except Exception:
+            pass
+
         url = config.get_ycloud_api_url()
 
     response = requests.post(
