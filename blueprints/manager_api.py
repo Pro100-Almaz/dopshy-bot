@@ -96,6 +96,14 @@ def _api_key_actor() -> str:
 # Routes
 # ---------------------------------------------------------------------------
 
+@manager_api.get("/api/manager/bookings/all")
+def list_all_bookings():
+    rows = repo.get_all_bookings()
+    payments = booking_service.get_payments()
+    rows = _combine_bookings_payments(rows, payments)
+    return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
+
+
 @manager_api.get("/api/manager/bookings")
 def list_bookings():
     today = date.today()

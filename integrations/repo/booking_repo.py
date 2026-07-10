@@ -8,6 +8,17 @@ from integrations.repo.postgres import _conn
 
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
+def get_all_bookings() -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, field, customer_name, phone, time_start, time_end, price_total, state,
+                        source, notes, created_at, updated_at, date
+                FROM bookings
+                ORDER BY date, time_start, field
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
     """Return slot-holding bookings (awaiting_payment + confirmed) in a date range."""
