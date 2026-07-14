@@ -228,6 +228,8 @@ def patch_booking(booking_id: int):
         patch["source"] = body["source"]
     if "customer" in body:
         patch["customer_name"] = body["customer"]
+    if "customer_name" in body:
+        patch["customer_name"] = body["customer_name"]
     if "notes" in body:
         patch["notes"] = body["notes"]
     if "price_total" in body:
@@ -238,6 +240,19 @@ def patch_booking(booking_id: int):
         patch["paid_kaspi_qr"] = body["paid_kaspi_qr"]
     if "paid_cash" in body:
         patch["paid_cash"] = body["paid_cash"]
+    if "time_start" in body:
+        patch["time_start"] = body["time_start"]
+    if "time_end" in body:
+        patch["time_end"] = body["time_end"]
+    if "date" in body:
+        patch["date"] = body["date"]
+    if "end_date" in body:
+        patch["end_date"] = body["end_date"]
+    if "field_id" in body:
+        patch["field"] = body["field_id"]
+    if "updated_by" in body:
+        patch["updated_by"] = body["updated_by"]
+
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
     if res["ok"]:

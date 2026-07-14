@@ -532,23 +532,60 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
 
 
 _MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash"}
+_MANAGER_SLOT_FIELDS = ("field", "date", "time_start", "time_end")
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
-    """Manager edit of free-edit fields (customer_name, notes, price_total)."""
+    """Manager edit of free-edit fields (customer_name, notes, price_total, state, …)
+    and slot fields (field, date, time_start, time_end).
+
+    Rescheduling (any slot field) recomputes start_at/end_at from the effective
+    new-or-existing values so the bookings_no_overlap EXCLUDE constraint stays
+    consistent; a clashing slot returns SLOT_TAKEN. `end_date` is not a
+    single-booking column and is ignored here (it only affects repeat generation
+    at create time).
+    """
     patch = {k: v for k, v in fields.items() if k in _MANAGER_PATCH_FIELDS}
-    if not patch:
+    slot = {k: fields[k] for k in _MANAGER_SLOT_FIELDS if k in fields}
+    if not patch and not slot:
         return _ok({"booking_id": booking_id})
-    set_clause = ", ".join(f"{k} = %s" for k in patch) + ", updated_at = NOW()"
-    vals = list(patch.values()) + [booking_id]
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
-            )
-            if cur.fetchone():
-                _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
-                return _ok({"booking_id": booking_id})
+
+    # Reject unknown field numbers up front: an invalid field would otherwise
+    # commit to the DB and then crash the downstream sheet sync (KeyError).
+    if slot.get("field") is not None:
+        valid_fields = {int(f["id"]) for f in config.BOOKING_FIELDS}
+        if int(slot["field"]) not in valid_fields:
+            return _err("INVALID_FIELD", "Такого поля не существует.")
+
+    set_parts = [f"{k} = %s" for k in patch]
+    vals = list(patch.values())
+
+    if slot:
+        # SET expressions read the row's OLD values, so COALESCE(param, column)
+        # keeps unchanged slot fields at their current value.
+        for k in _MANAGER_SLOT_FIELDS:
+            set_parts.append(f"{k} = COALESCE(%s, {k})")
+            vals.append(slot.get(k))
+        set_parts.append("start_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_start)) AT TIME ZONE %s")
+        vals += [slot.get("date"), slot.get("time_start"), config.BOOKING_TIMEZONE]
+        set_parts.append("end_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_end)) AT TIME ZONE %s")
+        vals += [slot.get("date"), slot.get("time_end"), config.BOOKING_TIMEZONE]
+
+    set_clause = ", ".join(set_parts) + ", updated_at = NOW()"
+    vals.append(booking_id)
+
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
+                )
+                if cur.fetchone():
+                    _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
+                    return _ok({"booking_id": booking_id})
+    except psycopg2.errors.ExclusionViolation:
+        logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
+        return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     return _err("NOT_FOUND", "Бронь не найдена.")
 
 

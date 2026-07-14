@@ -12,10 +12,16 @@ def get_all_bookings() -> list[dict]:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, field, customer_name, phone, time_start, time_end, price_total, state,
-                        source, notes, created_at, updated_at, date
-                FROM bookings
-                ORDER BY date, time_start, field
+                SELECT 
+                    b.id, b.field, b.customer_name, b.phone, b.time_start, b.time_end, b.price_total, b.state, b.source,
+                    b.notes, b.created_at, b.updated_at, b.date, p.amount
+                FROM bookings AS b
+                LEFT JOIN payments AS p
+                    ON p.booking_id = b.id
+                ORDER BY
+                    b.date,
+                    b.time_start,
+                    b.field;
             """)
             return [dict(r) for r in cur.fetchall()]
 
