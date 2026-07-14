@@ -18,7 +18,7 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from utils import is_past_booking_time
 from dateutil.relativedelta import relativedelta
@@ -626,14 +626,22 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
     entries per iteration — first half (start→23:59:59, is_latter=False) and
     second half (00:00→end, is_latter=True). The latter booking should not get
     a reserved_until value since payments are checked on the former.
+
+    A booking ending exactly at midnight (end_time == "00:00") has no next-day
+    portion, so it yields only the first half (start→23:59:59) as a single
+    same-day segment — no zero-length 00:00→00:00 tail.
     """
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
-    transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
+    ends_at_midnight = (datetime.strptime(end_time, "%H:%M").time() == time(0, 0))
+    transitive = (not ends_at_midnight
+                  and datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
     while current <= end:
         group_transition = str(uuid.uuid4())
-        if transitive:
+        if ends_at_midnight:
+            yield current, start_time, "23:59:59", group_transition, False
+        elif transitive:
             yield current, start_time, "23:59:59", group_transition, False
             yield current + timedelta(days=1), "00:00", end_time, group_transition, True
         else:
@@ -649,3 +657,75 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
             current += relativedelta(months=1)
         else:
             raise ValueError("Unknown repeat type")
+
+
+def _merge_slots(slots: list[dict]) -> list[tuple]:
+    """Merge overlapping/adjacent slots per field into absolute datetime intervals.
+    Returns a list of (field, start_dt, end_dt) tuples, sorted by field/start.
+    """
+    by_field: dict[int, list[list]] = {}
+    for s in slots:
+        field = int(s["field"])
+        d = str(s["date"])[:10]
+        ts = str(s["time_start"])[:5]
+        te = str(s["time_end"])[:5]
+        start_dt = datetime.strptime(f"{d} {ts}", "%Y-%m-%d %H:%M")
+        end_dt = datetime.strptime(f"{d} {te}", "%Y-%m-%d %H:%M")
+        if end_dt <= start_dt:  # crosses midnight (e.g. 23:00-00:00 or 23:00-01:00)
+            end_dt += timedelta(days=1)
+        by_field.setdefault(field, []).append([start_dt, end_dt])
+
+    out: list[tuple] = []
+    for field in sorted(by_field):
+        intervals = sorted(by_field[field], key=lambda x: x[0])
+        merged = [intervals[0]]
+        for start_dt, end_dt in intervals[1:]:
+            if start_dt <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end_dt)
+            else:
+                merged.append([start_dt, end_dt])
+        out.extend((field, s, e) for s, e in merged)
+    return out
+
+
+def _split_day_segments(start_dt: datetime, end_dt: datetime):
+    #Only used for the exotic case of a block spanning 2+ midnights
+
+    cur = start_dt
+    while cur < end_dt:
+        next_midnight = datetime.combine(cur.date() + timedelta(days=1), time(0, 0))
+        seg_end = min(end_dt, next_midnight)
+        ts = cur.strftime("%H:%M")
+        te = "23:59" if seg_end == next_midnight else seg_end.strftime("%H:%M")
+        if ts != te:
+            yield cur.strftime("%Y-%m-%d"), ts, te
+        cur = next_midnight
+
+
+def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
+                                  notes: str | None = None, price_total=None, actor_id: str | None = None,
+                                  reserved_until: int = 30, updated_by: str = 'manager'
+                                  ) -> dict:
+
+    results: list[dict] = []
+    for field, start_dt, end_dt in _merge_slots(slots):
+        if end_dt.date() <= start_dt.date() + timedelta(days=1):
+            segments = [(start_dt.strftime("%Y-%m-%d"),
+                         start_dt.strftime("%H:%M"),
+                         end_dt.strftime("%H:%M"))]
+        else:
+            segments = list(_split_day_segments(start_dt, end_dt))
+        for d, ts, te in segments:
+            results.append(manager_create_booking(
+                field=field, date=d, time_start=ts, time_end=te,
+                end_date=d, repeat="none",
+                customer=customer, phone=phone, notes=notes,
+                price_total=price_total, actor_id=actor_id,
+                reserved_until=reserved_until, updated_by=updated_by,
+            ))
+    if not results:
+        return _err("INVALID", "Не удалось сформировать ни одной брони из слотов.")
+    ok = all(r["ok"] for r in results)
+    data = {"created": results}
+    return _ok(data) if ok else {"ok": False, "code": "PARTIAL",
+                                  "message": "Часть броней не создана.", "data": data}
