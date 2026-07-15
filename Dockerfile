@@ -8,37 +8,23 @@ ENV POETRY_VERSION=1.8.5 \
     PYTHONUNBUFFERED=1 \
     TIKTOKEN_CACHE_DIR=/root/.tiktoken
 
-# Give network operations more room before giving up.
-ENV POETRY_REQUESTS_TIMEOUT=60 \
-    PIP_DEFAULT_TIMEOUT=60 \
-    PIP_RETRIES=10
-
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir "poetry==$POETRY_VERSION"
 
 WORKDIR /app
 
-# Install deps first (layer cached unless pyproject/lock changes).
-# Retry with increasing backoff so a flaky network doesn't fail the build.
+# Install deps first (layer cached unless pyproject/lock changes)
 COPY pyproject.toml poetry.lock* ./
-RUN n=0; until poetry install --no-root --only main; do \
-        n=$((n+1)); \
-        if [ "$n" -ge 5 ]; then echo "poetry install failed after $n attempts"; exit 1; fi; \
-        echo "poetry install failed (attempt $n) — retrying in $((n*15))s..."; \
-        sleep $((n*15)); \
-    done
+RUN poetry install --no-root --only main
 
 COPY . .
 
-# Pre-download tiktoken cl100k_base encoding with retries (no retry logic in tiktoken itself).
-# Non-fatal: if the download can't complete during the build (e.g. blocked/slow
-# network), tiktoken will fetch it lazily at runtime instead of failing the image.
+# Pre-download tiktoken cl100k_base encoding with retries (no retry logic in tiktoken itself)
 RUN mkdir -p $TIKTOKEN_CACHE_DIR && \
-    curl --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 300 -fL \
+    curl --retry 5 --retry-delay 3 --retry-all-errors -fL \
     "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken" \
-    -o "$TIKTOKEN_CACHE_DIR/$(python3 -c "import hashlib; print(hashlib.sha1(b'https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken').hexdigest())")" \
-    || echo "WARN: tiktoken pre-download failed during build — it will be fetched at runtime."
+    -o "$TIKTOKEN_CACHE_DIR/$(python3 -c "import hashlib; print(hashlib.sha1(b'https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken').hexdigest())")"
 
 EXPOSE 5000
 
