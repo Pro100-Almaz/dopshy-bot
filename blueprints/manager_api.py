@@ -26,7 +26,8 @@ from integrations.repo.academy_repo import deactivate_group_repo, setting_traini
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
     upsert_booking_row
 from integrations.repo import booking_repo as repo, postgres
-from integrations.repo.bot_pause_repo import get_statuses, set_bot_paused
+from integrations.repo.bot_pause_repo import get_statuses, normalize_phone, set_bot_paused
+from chat.conversation import list_contacts as _list_conversation_contacts
 from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
 
 logger = logging.getLogger(__name__)
@@ -420,4 +421,73 @@ def bot_pause(phone: str):
 def bot_resume(phone: str):
     set_bot_paused(phone, False, reason="manual", paused_by=_api_key_actor())
     return jsonify({"phone": phone, "paused": False}), 200
+
+
+# ------------CONTACTS (unified customer list — WhatsApp texters + bookers)
+
+@manager_api.get("/api/manager/contacts")
+def list_contacts():
+    """Every customer the bot knows, deduped by normalized phone.
+
+    Merges two sources so the manager UI can see WhatsApp texters who have not
+    booked yet (the primary case) alongside booking customers:
+      - conversations (SQLite): anyone who has messaged the bot
+      - bookings (Postgres): anyone with a booking on record
+    Each contact carries its live pause status so the UI can render the toggle
+    without a second round trip.
+    """
+    contacts: dict[str, dict] = {}
+
+    def _touch(phone: str) -> dict | None:
+        key = normalize_phone(phone)
+        if not key:
+            return None
+        entry = contacts.get(key)
+        if entry is None:
+            entry = {
+                "phone": key,
+                "name": "",
+                "texted": False,
+                "has_booking": False,
+                "last_activity": None,
+            }
+            contacts[key] = entry
+        return entry
+
+    def _bump_activity(entry: dict, ts) -> None:
+        if not ts:
+            return
+        ts = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        if entry["last_activity"] is None or ts > entry["last_activity"]:
+            entry["last_activity"] = ts
+
+    # WhatsApp texters — sender phone is the part after the last ':' in chat_id.
+    for row in _list_conversation_contacts():
+        sender = str(row.get("chat_id", "")).rsplit(":", 1)[-1]
+        entry = _touch(sender)
+        if entry is None:
+            continue
+        entry["texted"] = True
+        _bump_activity(entry, row.get("updated_at"))
+
+    # Booking customers.
+    for row in repo.get_booking_customers():
+        entry = _touch(row.get("phone"))
+        if entry is None:
+            continue
+        entry["has_booking"] = True
+        if not entry["name"] and row.get("customer_name"):
+            entry["name"] = row["customer_name"]
+        _bump_activity(entry, row.get("last_at"))
+
+    statuses = get_statuses(list(contacts.keys()))
+    result = []
+    for key, entry in contacts.items():
+        status = statuses.get(key, {"paused": False, "paused_reason": None})
+        entry["paused"] = status["paused"]
+        entry["paused_reason"] = status["paused_reason"]
+        result.append(entry)
+
+    result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
+    return jsonify({"ok": True, "contacts": result}), 200
 

@@ -26,6 +26,26 @@ def get_all_bookings() -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+def get_booking_customers() -> list[dict]:
+    """Distinct customers seen in bookings, with their latest booking activity.
+
+    One row per phone (the DB keeps phones as bare digits); used to merge
+    booking customers into the unified contact list alongside WhatsApp texters.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    phone,
+                    MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
+                    MAX(GREATEST(created_at, COALESCE(updated_at, created_at))) AS last_at
+                FROM bookings
+                WHERE phone IS NOT NULL AND phone <> ''
+                GROUP BY phone
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
     """Return slot-holding bookings (awaiting_payment + confirmed) in a date range."""
     with _conn() as conn:
