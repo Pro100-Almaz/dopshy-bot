@@ -357,6 +357,9 @@ def _paint_confirmed_booking(worksheet, booking, requests, cell_updates) -> None
     col_letter = col_index_to_letter(col - 1)
     cell_updates.append({"range": f"{col_letter}{sheet_row}", "values": [[cell_text]]})
 
+    # Unmerge the target range before (re)merging.
+    requests.append(_get_unmerge_request(worksheet.id, start_slot_index + 1, end_slot_index + 1, col - 1, col))
+
     note_text = (
         f"Booking ID: {booking.get('id')}\n"
         f"Клиент: {booking.get('customer_name') or 'No customer name'}\n"
@@ -477,17 +480,27 @@ def col_index_to_letter(index):
 
 
 def _single_table_write(booking):
-    field = booking.get('field')
-    worksheet = _get_week_worksheet(field)
+    try:
+        field = booking.get('field')
+        worksheet = _get_week_worksheet(field)
 
-    requests = []
-    cell_updates = []
-    _paint_confirmed_booking(worksheet, booking, requests, cell_updates)
+        requests = []
+        cell_updates = []
+        _paint_confirmed_booking(worksheet, booking, requests, cell_updates)
 
-    if cell_updates:
-        worksheet.batch_update(cell_updates, value_input_option="RAW")
-    if requests:
-        worksheet.spreadsheet.batch_update({'requests': requests})
+        if cell_updates:
+            worksheet.batch_update(cell_updates, value_input_option="RAW")
+        if requests:
+            worksheet.spreadsheet.batch_update({'requests': requests})
+    except Exception as exc:
+        logger.warning(
+            "[SHEET] _single_table_write failed for booking %s (%s); rebuilding week sheet",
+            booking.get('id'), exc,
+        )
+        try:
+            refresh_week_sheet()
+        except Exception as exc2:
+            logger.error("[SHEET] week-sheet rebuild fallback also failed: %s", exc2)
 
 
 def _single_table_erase(booking) -> None:

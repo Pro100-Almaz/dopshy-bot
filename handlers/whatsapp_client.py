@@ -82,19 +82,17 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
         url = config.get_whatsapp_api_url(channel.phone_number_id)
 
     else:
-        payload = {
-            "from": bot_config["ycloud_from"],
-            "to": to,
-            "type": "text",
-            "text": {"body": text},
-        }
-
         headers = {
             "X-API-Key": bot_config['ycloud_api_key'],
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-
+        payload = {
+            "from": bot_config["ycloud_from"],
+            "to": to,
+            "type": "text",
+            "text": {"preview_url": False, "body": text},
+        }
         try:
             payload["interactive"] = json.loads(text)
             payload["type"] = "interactive"

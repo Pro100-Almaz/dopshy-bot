@@ -628,7 +628,7 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
     a reserved_until value since payments are checked on the former.
     """
     current = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
+    end = max(datetime.strptime(end_date, "%Y-%m-%d"), current)
     transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
     while current <= end:
