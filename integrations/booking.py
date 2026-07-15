@@ -223,18 +223,24 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
 
     WEEKDAYS = _WEEKDAY_KZ if lang == 'kk' else _WEEKDAY_RU
 
+    # Group per individual field (not per format) so two fields of the same
+    # format (e.g. two "5x5") are shown as separate lines. The line is labeled
+    # by format only; the field id is tracked internally elsewhere.
     by_date: dict[date, dict] = {}
     for w in free_windows:
         by_date.setdefault(w["date"], {}) \
-               .setdefault(w["format"], []) \
+               .setdefault(w["field"], []) \
                .append(w)
 
     lines = [_T["available_days"][lang]]
     for d in sorted(by_date):
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = []
-        for fmt in sorted(by_date[d]):
-            intervals = [(w["time_start"], w["time_end"]) for w in by_date[d][fmt]]
+        fields = by_date[d]
+        for field_id in sorted(fields, key=lambda fid: (fields[fid][0]["format"], fid)):
+            windows = fields[field_id]
+            fmt = windows[0]["format"]
+            intervals = [(w["time_start"], w["time_end"]) for w in windows]
             merged = merge_time_intervals(intervals)
             range_str = ", ".join(
                 f"{s.strftime('%H:%M')}–{e.strftime('%H:%M')}" for s, e in merged

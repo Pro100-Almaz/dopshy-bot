@@ -271,7 +271,6 @@ class BaseChecker:
             f"📅 {self.formatter.fmt_date(date_str, lang)}\n"
             f"⏰ {ts}–{te}\n"
             f"⚽ {fmt}\n"
-            f"👥 {data['players']}\n"
             f"👤 {data['customer_name']}\n"
             f"💰 {fmt_price(total)}\n\n"
             f"{self.asker.localize(lang, 'confirm_question')}"

@@ -108,6 +108,13 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
         headers=headers,
         timeout=10
     )
+    if not response.ok:
+        # Surface Meta's error body — it carries the OAuthException code/subcode
+        # that explains a 403 (expired token, wrong WABA, missing permission, …).
+        logger.error(
+            "send_text_message failed: %s %s → %s",
+            response.status_code, url, response.text,
+        )
     response.raise_for_status()
     return response.json()
 
