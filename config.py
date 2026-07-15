@@ -11,7 +11,7 @@ OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
 MODEL_NAME: str = "gpt-5.2"
 EXTRACTOR_MODEL: str = "gpt-4.1"
 INTENT_MODEL: str = "gpt-4.1"
-EMBEDDING_MODEL: str = "text-embedding-3-small"
+EMBEDDING_MODEL: str = "text-embedding-3-large"
 
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]
@@ -22,6 +22,10 @@ WHATSAPP_VERIFY_TOKEN: str = os.environ["WHATSAPP_VERIFY_TOKEN"]
 
 YCLOUD_API_KEY: str = os.environ["YCLOUD_API_KEY"]
 YCLOUD_FROM_BOT_1: str = os.environ["YCLOUD_FROM_BOT_1"]
+
+MESSAGE_BATCH_WINDOW_SECONDS: float = float(
+    os.getenv("MESSAGE_BATCH_WINDOW_SECONDS", "4")
+)
 
 BOT_CONFIGS = {
     WHATSAPP_PHONE_NUMBER_ID_BOT_1: {
@@ -55,6 +59,11 @@ def get_bot_config(phone_number_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 POSTGRES_DSN: str = os.getenv("POSTGRES_DSN", "")
 POSTGRES_MAX_CONN: int = int(os.getenv("POSTGRES_MAX_CONN", "10"))
+
+# ---------------------------------------------------------------------------
+# Redis — shared message-batch buffer (survives across gunicorn workers).
+# ---------------------------------------------------------------------------
+REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ---------------------------------------------------------------------------
 # Manager API (Google Apps Script → backend)

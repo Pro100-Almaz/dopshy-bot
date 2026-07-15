@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 manager_api = Blueprint("manager_api", __name__)
 
+# States in which a booking no longer occupies a slot on the week sheet.
+_TERMINAL_BOOKING_STATES = {"cancelled", "unpaid", "failed"}
+
 _rate_lock = threading.Lock()
 _rate_hits: dict[str, list[float]] = {}
 
@@ -175,8 +178,18 @@ def patch_booking(booking_id: int):
         booking_row = repo.get_booking(booking_id)
         if booking_row:
             upsert_booking_row(booking_row)
-
-        _single_table_write(booking_row)
+            # Sheet is a best-effort view; never fail the committed DB mutation on it.
+            try:
+                if booking_row.get("state") in _TERMINAL_BOOKING_STATES:
+                    # Booking left the board. Rebuild the week sheet so this row —
+                    # and any transitive partner the DB trigger moved to the same
+                    # state — disappear, rather than repainting it as an active slot
+                    # (which would also leave a stale merge behind).
+                    refresh_week_sheet()
+                else:
+                    _single_table_write(booking_row)
+            except Exception as exc:
+                logger.error("[MANAGER_API] sheet sync failed for booking %s: %s", booking_id, exc)
 
     return jsonify(res), (200 if res["ok"] else 404)
 

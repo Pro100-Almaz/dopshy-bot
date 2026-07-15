@@ -12,7 +12,7 @@ from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel
+from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
@@ -155,7 +155,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
         # Document = payment receipt — confirm the booking
         if msg_type == "document":
-            _handle_payment_receipt(channel, phone_number_id, sender_id, payload.media)
+            _handle_payment_receipt(channel, sender_id, payload.media)
             return
 
         # Only handle text messages
@@ -169,7 +169,9 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             return
 
         user_text = ""
-        if msg_type == "interactive" and payload.interactive and payload.interactive.type == 'button_reply':
+        if (msg_type == "interactive" and payload.interactive
+                and payload.interactive.button_reply
+                and payload.interactive.button_reply.title):
             user_text = str(payload.interactive.button_reply.title)
 
         if msg_type == "text":
@@ -448,8 +450,8 @@ def _refresh_booking_sheet(booking: dict, state: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, sender_phone: str,
-                            proof_media_id: str | None = None) -> None:
+def _handle_payment_receipt(channel: OutboundChannel, sender_phone: str,
+                            media: WhatsAppMedia | None = None) -> None:
     """
     Called when a user sends a document (assumed to be a payment receipt).
     Finds their most recent awaiting_payment booking, confirms it via the
@@ -472,7 +474,7 @@ def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, send
         booking["price_total"] = combined_price
 
     # Download the receipt PDF and validate it before confirming.
-    pdf = download_media(phone_number_id, proof_media_id) if proof_media_id else None
+    pdf = download_media(channel, media) if media else None
     if not pdf:
         logger.warning("[PAYMENT] Could not download media for booking id=%d", booking["id"])
         send_text_message(
@@ -494,7 +496,7 @@ def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, send
         return
 
     res = booking_service.submit_payment_proof(
-        booking["id"], parsed=result["parsed"], proof_media_id=proof_media_id
+        booking["id"], parsed=result["parsed"], proof_media_id=media.id
     )
     if not res["ok"]:
         msg = ("Этот чек уже был использован. Свяжитесь с администратором.\n"

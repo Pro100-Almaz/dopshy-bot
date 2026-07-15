@@ -8,13 +8,12 @@ Endpoints:
 """
 
 import logging
-import threading
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
 
 import config
-from handlers.message_handler import handle_incoming_message
+from handlers.message_batcher import enqueue_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
 from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
@@ -182,13 +181,9 @@ def receive_message():
     if data is None:
         return jsonify({"status": "ignored"}), 200
 
-    # Process in background so the webhook response is immediate
-    thread = threading.Thread(
-        target=handle_incoming_message,
-        args=(data,),
-        daemon=True,
-    )
-    thread.start()
+    # Buffer + debounce: fragments sent in quick succession are combined into a
+    # single message before hitting the pipeline. Non-blocking — returns at once.
+    enqueue_incoming_message(data)
 
     return jsonify({"status": "ok"}), 200
 
@@ -200,6 +195,7 @@ def receive_ycloud_message():
     (Meta requires a 200 response within 20 seconds or it retries).
     """
     payload = request.get_json(silent=True)
+    logger.info({'INCOMING MESSAGE'})
     if not payload:
         abort(400)
 
@@ -209,6 +205,10 @@ def receive_ycloud_message():
 
     try:
         data = parser_ycloud(payload)
+        # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
+        #     logger.info({f'IGNORED phone number {data.customer.phone}'})
+        #     return jsonify({"status": "ignored"}), 200
+
     except WhatsappPayloadParserError:
         logger.error({'Failed to parse YCloud webhook'})
         return jsonify({"status": "ignored"}), 200
@@ -216,13 +216,9 @@ def receive_ycloud_message():
     if data is None:
         return jsonify({"status": "ignored"}), 200
 
-    # Process in background so the webhook response is immediate
-    thread = threading.Thread(
-        target=handle_incoming_message,
-        args=(data,),
-        daemon=True,
-    )
-    thread.start()
+    # Buffer + debounce: fragments sent in quick succession are combined into a
+    # single message before hitting the pipeline. Non-blocking — returns at once.
+    enqueue_incoming_message(data)
 
     return jsonify({"status": "ok"}), 200
 
