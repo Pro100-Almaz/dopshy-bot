@@ -19,6 +19,7 @@ from handlers.message_handler import handle_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
 from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
+from integrations.repo.bot_pause_repo import set_bot_paused
 from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
@@ -214,6 +215,19 @@ def receive_ycloud_message():
     payload = request.get_json(silent=True)
     if not payload:
         abort(400)
+
+    # A human agent replied from the WhatsApp Business app — YCloud echoes it
+    # back here. Auto-pause the bot for that customer so it stops replying
+    # until a manager turns it back on from the UI.
+    if payload.get("type") == "whatsapp.smb.message.echoes":
+        customer_phone = (payload.get("whatsappMessage") or {}).get("to")
+        if customer_phone:
+            try:
+                set_bot_paused(customer_phone, True, reason="auto")
+                logger.info("[AUTO-PAUSE] Manager replied to %s — bot paused", customer_phone)
+            except Exception:
+                logger.exception("Failed to auto-pause bot for %s", customer_phone)
+        return jsonify({"status": "ok"}), 200
 
     # Confirm this is a WhatsApp Business Account event
     if payload.get("type") != "whatsapp.inbound_message.received":

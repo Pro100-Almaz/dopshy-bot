@@ -26,6 +26,7 @@ from integrations.repo.academy_repo import deactivate_group_repo, setting_traini
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
     upsert_booking_row
 from integrations.repo import booking_repo as repo, postgres
+from integrations.repo.bot_pause_repo import get_statuses, set_bot_paused
 from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
 
 logger = logging.getLogger(__name__)
@@ -389,4 +390,34 @@ def delete_academy_group(group_id: int):
 def refresh_academy_trials():
     refresh_all_trials()
     return jsonify({"ok": True}), 200
+
+
+# ------------BOT PAUSE (per-contact on/off switch)
+
+@manager_api.get("/api/manager/bot_status/<string:phone>")
+def bot_status(phone: str):
+    status = get_statuses([phone])[phone]
+    return jsonify({"phone": phone, **status}), 200
+
+
+@manager_api.post("/api/manager/bot_status/batch")
+def bot_status_batch():
+    body = request.get_json(silent=True) or {}
+    phones = body.get("phones")
+    if not isinstance(phones, list):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "phones must be a list."}), 400
+    return jsonify({"statuses": get_statuses(phones)}), 200
+
+
+@manager_api.post("/api/manager/bot_status/<string:phone>/pause")
+def bot_pause(phone: str):
+    set_bot_paused(phone, True, reason="manual", paused_by=_api_key_actor())
+    return jsonify({"phone": phone, "paused": True}), 200
+
+
+@manager_api.post("/api/manager/bot_status/<string:phone>/resume")
+def bot_resume(phone: str):
+    set_bot_paused(phone, False, reason="manual", paused_by=_api_key_actor())
+    return jsonify({"phone": phone, "paused": False}), 200
 
