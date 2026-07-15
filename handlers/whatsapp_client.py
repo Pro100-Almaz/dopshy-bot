@@ -11,6 +11,47 @@ logger = logging.getLogger(__name__)
 _GRAPH = "https://graph.facebook.com/v22.0"
 
 
+def _as_interactive(text: str) -> dict | None:
+    """Return the parsed interactive-button payload if `text` is one, else None.
+
+    Interactive button messages are built by BaseButton.get_buttons as a
+    ``json.dumps`` string and handed to send_text_message through the same
+    `text` argument as plain messages. We recognise them here by shape
+    (top-level ``type`` of button/list plus an ``action``) rather than by
+    "is this parseable as JSON", so an ordinary reply that happens to look
+    like JSON is never mistaken for buttons.
+    """
+    stripped = text.strip() if isinstance(text, str) else text
+    if not (isinstance(stripped, str) and stripped.startswith("{") and stripped.endswith("}")):
+        return None
+    try:
+        obj = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict) and obj.get("type") in ("button", "list") and "action" in obj:
+        return obj
+    return None
+
+
+def prepend_text_to_buttons(prefix: str, reply: str) -> str:
+    """Combine leading `prefix` text with a `reply` that may be a button payload.
+
+    WhatsApp can't carry free text *and* interactive buttons as separate parts
+    of one message — the buttons message already owns its body text. So when
+    `reply` is a button payload we fold `prefix` into that body (keeping the
+    JSON valid); otherwise we just join the two as plain text. This prevents
+    the "raw JSON delivered as text" bug that happened when `prefix + reply`
+    corrupted the button JSON.
+    """
+    interactive = _as_interactive(reply)
+    if interactive is None:
+        return f"{prefix}\n\n{reply}" if prefix else reply
+    body = interactive.setdefault("body", {})
+    existing = body.get("text", "")
+    body["text"] = f"{prefix}\n\n{existing}" if prefix else existing
+    return json.dumps(interactive)
+
+
 def download_media(channel: OutboundChannel, media:WhatsAppMedia) -> bytes | None:
     """Resolve a media_id to its temporary URL and download the bytes. None on failure."""
     bot_config = config.get_bot_config(channel.phone_number_id)
@@ -60,6 +101,8 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
     if not bot_config:
         raise ValueError(f"Bot config not found for phone number ID: {channel.phone_number_id}")
 
+    interactive = _as_interactive(text)
+
     if provider == 'meta':
         headers = {
             "Authorization": f"Bearer {bot_config['access_token']}",
@@ -72,12 +115,10 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
             "type": "text",
             "text": {"preview_url": False, "body": text},
         }
-        try:
-            payload["interactive"] = json.loads(text)
+        if interactive is not None:
             payload["type"] = "interactive"
+            payload["interactive"] = interactive
             payload.pop("text")
-        except Exception:
-            pass
 
         url = config.get_whatsapp_api_url(channel.phone_number_id)
 
@@ -95,12 +136,10 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
             "Content-Type": "application/json",
         }
 
-        try:
-            payload["interactive"] = json.loads(text)
+        if interactive is not None:
             payload["type"] = "interactive"
+            payload["interactive"] = interactive
             payload.pop("text")
-        except Exception:
-            pass
 
         url = config.get_ycloud_api_url()
 

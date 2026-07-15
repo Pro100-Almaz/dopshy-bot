@@ -96,6 +96,14 @@ def _api_key_actor() -> str:
 # Routes
 # ---------------------------------------------------------------------------
 
+@manager_api.get("/api/manager/bookings/all")
+def list_all_bookings():
+    rows = repo.get_all_bookings()
+    payments = booking_service.get_payments()
+    rows = _combine_bookings_payments(rows, payments)
+    return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
+
+
 @manager_api.get("/api/manager/bookings")
 def list_bookings():
     today = date.today()
@@ -115,6 +123,29 @@ def get_booking(booking_id: int):
     if not row:
         return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Бронь не найдена."}), 404
     return jsonify({"ok": True, "data": _serialize(row)}), 200
+
+
+@manager_api.get("/api/manager/bookings/range/<string:start_date>/<string:end_date>/<int:field>")
+def get_bookings_in_range(start_date: str, end_date: str, field: int):
+    rows = repo.get_bookings_in_range(
+        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid"), field=field
+    )
+    payments = booking_service.get_payments()
+    rows = _combine_bookings_payments(rows, payments)
+    return jsonify({
+        "ok": True,
+        "date": [_serialize(r) for r in rows]
+    }), 200
+
+
+@manager_api.get("/api/manager/fields")
+def get_fields_info():
+    prices = repo.get_field_prices() #list of prices
+    fields = repo.get_fields_info() # list of fields
+
+    return jsonify({"ok": True, "data": {"prices": prices, "fields": fields}}), 200
+
+
 
 
 @manager_api.post("/api/manager/bookings")
@@ -147,6 +178,44 @@ def create_booking():
     if res["ok"] and res.get("data", {}).get("booking_id"):
         booking_row = repo.get_booking(res["data"]["booking_id"])
         _single_table_write(booking_row)
+
+    return jsonify(res), (200 if res["ok"] else 409)
+
+
+@manager_api.post("/api/manager/bookings/batch")
+def create_bookings_batch():
+    """Create bookings for a single customer from a list of slots.
+
+    Body: {slots: [{field, date, time_start, time_end}, ...],
+           customer?, phone?, notes?, price_total?, reserved_until?, updated_by?}
+    Overlapping/adjacent slots on the same field are merged (across midnight
+    too) before creation. See booking_service.manager_create_bookings_batch.
+    """
+    body = request.get_json(silent=True) or {}
+    slots = body.get("slots")
+    if not isinstance(slots, list) or not slots:
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "slots must be a non-empty list."}), 400
+    for s in slots:
+        if not isinstance(s, dict) or not all(s.get(k) for k in ("field", "date", "time_start", "time_end")):
+            return jsonify({"ok": False, "code": "INVALID",
+                            "message": "each slot needs field, date, time_start, time_end."}), 400
+
+    res = booking_service.manager_create_bookings_batch(
+        slots,
+        customer=body.get("customer"),
+        phone=body.get("phone"),
+        notes=body.get("notes"),
+        price_total=body.get("price_total"),
+        actor_id=_api_key_actor(),
+        reserved_until=body.get("reserved_until", 30),
+        updated_by=body.get("updated_by", "Неизвестен"),
+    )
+
+    for r in res.get("data", {}).get("created", []):
+        if r.get("ok") and r.get("data", {}).get("booking_id"):
+            booking_row = repo.get_booking(r["data"]["booking_id"])
+            _single_table_write(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 409)
 
