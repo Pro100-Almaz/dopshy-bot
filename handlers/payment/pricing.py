@@ -123,11 +123,13 @@ _PRICES_I18N = {
         "empty": "Пока цены не указаны.",
         "header": "💰 Наши тарифы:",
         "per_hour": "тг/час",
+        "prepayment": "💳 Предоплата (аванс) для брони — 10 000 ₸.",
     },
     "kk": {
         "empty": "Әзірге бағалар көрсетілмеген.",
         "header": "💰 Біздің тарифтер:",
         "per_hour": "тг/сағ",
+        "prepayment": "💳 Брондау үшін алдын ала төлем (аванс) — 10 000 ₸.",
     },
 }
 
@@ -164,4 +166,6 @@ def process_field_prices(lang: str = "ru") -> str:
 
         message += "\n"
 
-    return message.strip()
+    message = message.strip()
+    message += f"\n\n{strings['prepayment']}"
+    return message
