@@ -81,7 +81,6 @@ def get_awaiting_payment_booking(phone: str) -> dict | None:
 
 
 def get_bookings_for_sheet() -> list[dict]:
-    """All slot-holding bookings (awaiting_payment + confirmed + unpaid) for the flat Sheet view."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
@@ -90,6 +89,7 @@ def get_bookings_for_sheet() -> list[dict]:
                        paid_kaspi_qr, paid_cash
                 FROM bookings
                 WHERE state IN ('awaiting_payment', 'confirmed', 'unpaid')
+                  AND date >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY date, time_start, field
             """)
             result = [dict(r) for r in cur.fetchall()]
