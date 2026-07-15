@@ -62,14 +62,6 @@ POSTGRES_MAX_CONN: int = int(os.getenv("POSTGRES_MAX_CONN", "10"))
 MANAGER_API_KEY: str = os.getenv("MANAGER_API_KEY", "")
 MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
 
-# Comma-separated list of origins allowed to call the manager API from a browser.
-# Defaults to "*" (any origin) — the API is still gated by X-API-Key. Set e.g.
-# CORS_ALLOWED_ORIGINS="https://script.google.com,https://my-ui.example.com" to lock it down.
-CORS_ALLOWED_ORIGINS: list[str] | str = (
-    [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",") if o.strip()]
-    if os.getenv("CORS_ALLOWED_ORIGINS", "*") != "*" else "*"
-)
-
 # ---------------------------------------------------------------------------
 # Google Sheets
 # ---------------------------------------------------------------------------
