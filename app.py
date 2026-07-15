@@ -12,7 +12,6 @@ import threading
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
-from flask_cors import CORS
 
 import config
 from handlers.message_handler import handle_incoming_message
@@ -41,17 +40,6 @@ app = Flask(__name__)
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402
 app.register_blueprint(manager_api)
-
-# CORS — only the manager API is browser-facing; webhooks/admin are server-to-server.
-# Origins come from config (CORS_ALLOWED_ORIGINS env, default "*"). The custom
-# X-API-Key header must be allow-listed so browsers don't strip it on preflight.
-CORS(
-    app,
-    resources={r"/api/manager/*": {"origins": config.CORS_ALLOWED_ORIGINS}},
-    allow_headers=["Content-Type", "X-API-Key"],
-    methods=["GET", "POST", "PATCH", "DELETE"],
-    max_age=86400,
-)
 
 # ---------------------------------------------------------------------------
 # Scheduler: refresh Google Sheet every Monday 06:00 Almaty time

@@ -118,7 +118,6 @@ def get_awaiting_payment_booking(phone: str) -> dict | None:
 
 
 def get_bookings_for_sheet() -> list[dict]:
-    """All slot-holding bookings (awaiting_payment + confirmed + unpaid) for the flat Sheet view."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
@@ -127,6 +126,7 @@ def get_bookings_for_sheet() -> list[dict]:
                        paid_kaspi_qr, paid_cash
                 FROM bookings
                 WHERE state IN ('awaiting_payment', 'confirmed', 'unpaid')
+                  AND date >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY date, time_start, field
             """)
             result = [dict(r) for r in cur.fetchall()]
@@ -139,7 +139,7 @@ def get_bookings_for_sheet() -> list[dict]:
             return result
 
 
-def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed"), field: int| None = None) -> list[dict]:
+def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed")) -> list[dict]:
     """Bookings between two dates (inclusive) for the manager API list view."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -149,11 +149,9 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                        paid_kaspi_qr, paid_cash
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
-                      AND (%s IS NULL OR field = %s)
                 ORDER BY date, time_start, field
-            """, (start, end, list(states), field, field))
+            """, (start, end, list(states)))
             return [dict(r) for r in cur.fetchall()]
-
 
 
 def get_booking(booking_id: int) -> dict | None:
@@ -253,23 +251,3 @@ def get_transitive_total_price(booking_id: int) -> float | None:
             """, (booking_id,))
             row = cur.fetchone()
             return float(row["total_price"]) if row and row["total_price"] else None
-
-
-def get_field_prices() -> list[dict]:
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT format_name, pricing_type, price_per_hour FROM field_prices;;
-            """)
-            rows = cur.fetchall()
-            return [dict(r) for r in rows]
-
-
-def get_fields_info() -> list[dict]:
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, name, format, capacity, description FROM fields
-            """)
-            rows = cur.fetchall()
-            return [dict(r) for r in rows]

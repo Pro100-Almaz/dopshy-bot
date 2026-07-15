@@ -18,7 +18,7 @@ from integrations.repo.bot_pause_repo import is_bot_paused
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
-from handlers.whatsapp_client import send_text_message, mark_as_read, download_media, prepend_text_to_buttons
+from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
@@ -402,7 +402,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 logger.info("[CANCEL] LLM called cancel_trial tool")
                 handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
 
-            reply = prepend_text_to_buttons(reply, handle_reply)
+            reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 
         # 6. Save to history
         append_message(chat_id, "user", user_text)
