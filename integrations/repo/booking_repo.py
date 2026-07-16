@@ -22,6 +22,8 @@ def get_all_bookings() -> list[dict]:
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, created_at, updated_at, group_transition
                 FROM bookings
+                WHERE field IS NOT NULL AND date IS NOT NULL
+                  AND time_start IS NOT NULL AND time_end IS NOT NULL
                 ORDER BY date, time_start, field
             """)
             return [dict(r) for r in cur.fetchall()]
@@ -181,6 +183,8 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
                   AND (%s::int IS NULL OR field = %s)
+
+                  AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
                 ORDER BY date, time_start, field
             """, (start, end, list(states), field, field))
             return [dict(r) for r in cur.fetchall()]
