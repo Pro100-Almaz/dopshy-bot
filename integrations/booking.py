@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 
 import config
 from integrations.repo import booking_repo
-from utils import now_almaty, today_almaty
+from utils import now_almaty, today_almaty, display_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,8 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
                .setdefault(w["field"], []) \
                .append(w)
 
-    lines = [_T["available_days"][lang]]
+    _DAY_SEPARATOR = "  ─────────────"
+    day_blocks = []
     for d in sorted(by_date):
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = []
@@ -246,8 +247,9 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
                 f"{s.strftime('%H:%M')}–{e.strftime('%H:%M')}" for s, e in merged
             )
             field_lines.append(f"    {fmt}: {range_str}")
-        lines.append(f"  {day_label}:\n" + "\n".join(field_lines))
-    return "\n".join(lines)
+        day_blocks.append(f"  {day_label}:\n" + "\n".join(field_lines))
+
+    return _T["available_days"][lang] + "\n" + f"\n{_DAY_SEPARATOR}\n".join(day_blocks)
 
 
 def _merge_transitive(bookings: list[dict]) -> list[dict]:
@@ -290,13 +292,12 @@ def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
         d = b["date"] if isinstance(b["date"], date) else \
             datetime.strptime(str(b["date"]), "%Y-%m-%d").date()
         ts = str(b["time_start"])[:5]
-        te = str(b["time_end"])[:5]
+        te = display_end_time(b["time_end"])  # show an end-of-day 23:59 as 00:00
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         status_str = _T.get(b.get("state", ""))[lang] if _T.get(b.get("state", "")) else b.get("state", "")
         price = f" | {int(b['price_total']):,} тг".replace(",", " ") if b.get("price_total") else ""
         lines.append(
-            f"  {day_label} {ts}–{te} | {b['format']} | "
-            f"{b.get('players', '?')} {_T['players'][lang]}.{price} | {status_str}"
+            f"  {day_label} {ts}–{te} | {b['format']}{price} | {status_str}"
         )
     return "\n".join(lines)
 

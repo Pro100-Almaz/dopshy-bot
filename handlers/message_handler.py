@@ -23,6 +23,7 @@ from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation, booking, trial
+from utils import display_end_time
 from integrations.repo import booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
@@ -514,7 +515,7 @@ def _handle_payment_receipt(channel: OutboundChannel, sender_phone: str,
 
     booking_date = booking["date"]
     ts = str(booking["time_start"])[:5]
-    te = str(booking["time_end"])[:5]
+    te = display_end_time(booking["time_end"])  # show an end-of-day 23:59 as 00:00
     price_line = fmt_price(booking["price_total"]) if booking.get("price_total") else ""
 
     paid = float(result["parsed"].get("amount") or 0)

@@ -18,9 +18,9 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
-from utils import is_past_booking_time
+from utils import is_past_booking_time, normalize_end_time
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
@@ -85,6 +85,18 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     return _err("INVALID_TIME", "Не все данные брони заполнены.")
                 if is_past_booking_time(str(row["date"]), str(row["time_start"])[:5]):
                     return _err("TIME_IN_PAST", "Указанное время уже прошло.")
+
+                # A midnight end-time (00:00) means "until end of day", not a
+                # day transition. Pin it to 23:59:59 so it stays a single
+                # booking instead of being split with a redundant 00:00→00:00
+                # second half. (Interactive/LLM flows normalize this earlier;
+                # this guards any draft that still reached here as 00:00.)
+                if row["time_end"] == time(0, 0) and row["time_start"] != time(0, 0):
+                    cur.execute(
+                        "UPDATE bookings SET time_end = '23:59:59'::time WHERE id = %s",
+                        (booking_id,),
+                    )
+                    row["time_end"] = time(23, 59, 59)
 
                 # TRANSITIVE BOOKING: split if time_start > time_end (day transition)
                 is_transitive = row["time_start"] > row["time_end"]
@@ -355,6 +367,9 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 new_ts      = diff.get("time_start",    str(row["time_start"])[:5])
                 # TRANSITIVE BOOKING: use logical end time (from second booking) as the base
                 new_te      = diff.get("time_end",      logical_time_end)
+                # A midnight end (00:00) means "until end of day" → keep it a
+                # single booking ending 23:59, not a day-crossing pair.
+                new_te      = normalize_end_time(new_ts, new_te)
                 new_field   = int(diff.get("field",     row["field"]))
                 new_players = diff.get("players",       row["players"])
                 new_name    = diff.get("customer_name", row["customer_name"])
@@ -629,6 +644,9 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
     """
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end = max(datetime.strptime(end_date, "%Y-%m-%d"), current)
+    # A midnight end (00:00) means "until end of day" → single booking, not a
+    # day-crossing pair with a redundant 00:00→00:00 second half.
+    end_time = normalize_end_time(start_time, end_time)
     transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
     while current <= end:
