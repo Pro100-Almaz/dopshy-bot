@@ -107,6 +107,14 @@ def _api_key_actor() -> str:
 # Routes
 # ---------------------------------------------------------------------------
 
+@manager_api.get("/api/manager/bookings/all")
+def list_all_bookings():
+    rows = repo.get_all_bookings()
+    payments = booking_service.get_payments()
+    rows = _combine_bookings_payments(rows, payments)
+    return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
+
+
 @manager_api.get("/api/manager/bookings")
 def list_bookings():
     today = date.today()
@@ -143,10 +151,12 @@ def get_bookings_in_range(start_date: str, end_date: str, field: int):
 
 @manager_api.get("/api/manager/fields")
 def get_fields_info():
-    prices = repo.get_field_prices() #list of prices
-    fields = repo.get_fields_info() # list of fields
-
-    return jsonify({"ok": True, "data": {"prices": prices, "fields": fields}}), 200
+    prices = repo.get_field_prices()  # list of BotPriceRow
+    fields = repo.get_fields_info()   # list of BotFieldRow
+    return jsonify({"ok": True, "data": {
+        "prices": [_serialize(p) for p in prices],
+        "fields": [_serialize(f) for f in fields],
+    }}), 200
 
 
 
