@@ -8,6 +8,18 @@ truncated between tests). Set it before invoking pytest, e.g.:
 If the DSN is unset or unreachable, DB tests are skipped.
 """
 
+import os
+import tempfile
+
+# Redirect the SQLite conversation store to a disposable temp file BEFORE config
+# is imported. chat.conversation bootstraps this DB at import time, and the real
+# ./data dir may be missing or not writable in test runs (e.g. it's root-owned
+# when created by the Docker bind-mount). setdefault so an explicit env still wins.
+os.environ.setdefault(
+    "CONVERSATION_DB_PATH",
+    os.path.join(tempfile.gettempdir(), "dopshy_test_conversations.db"),
+)
+
 import pytest
 
 import config

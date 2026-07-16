@@ -18,6 +18,7 @@ from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
 from integrations.providers.payload import OutboundChannel
 from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
+from integrations.repo.bot_pause_repo import set_bot_paused
 from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
@@ -39,6 +40,17 @@ app = Flask(__name__)
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402
 app.register_blueprint(manager_api)
+
+# CORS — only the manager API is browser-facing; webhooks/admin are server-to-server.
+# Origins come from config (CORS_ALLOWED_ORIGINS env, default "*"). The custom
+# X-API-Key header must be allow-listed so browsers don't strip it on preflight.
+CORS(
+    app,
+    resources={r"/api/manager/*": {"origins": config.CORS_ALLOWED_ORIGINS}},
+    allow_headers=["Content-Type", "X-API-Key"],
+    methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    max_age=86400,
+)
 
 # ---------------------------------------------------------------------------
 # Scheduler: refresh Google Sheet every Monday 06:00 Almaty time
@@ -199,6 +211,19 @@ def receive_ycloud_message():
     logger.info({'INCOMING MESSAGE'})
     if not payload:
         abort(400)
+
+    # A human agent replied from the WhatsApp Business app — YCloud echoes it
+    # back here. Auto-pause the bot for that customer so it stops replying
+    # until a manager turns it back on from the UI.
+    if payload.get("type") == "whatsapp.smb.message.echoes":
+        customer_phone = (payload.get("whatsappMessage") or {}).get("to")
+        if customer_phone:
+            try:
+                set_bot_paused(customer_phone, True, reason="auto")
+                logger.info("[AUTO-PAUSE] Manager replied to %s — bot paused", customer_phone)
+            except Exception:
+                logger.exception("Failed to auto-pause bot for %s", customer_phone)
+        return jsonify({"status": "ok"}), 200
 
     # Confirm this is a WhatsApp Business Account event
     if payload.get("type") != "whatsapp.inbound_message.received":
