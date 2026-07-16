@@ -8,6 +8,43 @@ from integrations.repo.postgres import _conn
 
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
+def get_all_bookings() -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    b.id, b.field, b.customer_name, b.phone, b.time_start, b.time_end, b.price_total, b.state, b.source,
+                    b.notes, b.created_at, b.updated_at, b.date, p.amount
+                FROM bookings AS b
+                LEFT JOIN payments AS p
+                    ON p.booking_id = b.id
+                ORDER BY
+                    b.date,
+                    b.time_start,
+                    b.field;
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_booking_customers() -> list[dict]:
+    """Distinct customers seen in bookings, with their latest booking activity.
+
+    One row per phone (the DB keeps phones as bare digits); used to merge
+    booking customers into the unified contact list alongside WhatsApp texters.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    phone,
+                    MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
+                    MAX(GREATEST(created_at, COALESCE(updated_at, created_at))) AS last_at
+                FROM bookings
+                WHERE phone IS NOT NULL AND phone <> ''
+                GROUP BY phone
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
     """Return slot-holding bookings (awaiting_payment + confirmed) in a date range."""

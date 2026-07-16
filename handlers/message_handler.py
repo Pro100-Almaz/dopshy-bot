@@ -14,6 +14,7 @@ from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
+from integrations.repo.bot_pause_repo import is_bot_paused
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
@@ -149,6 +150,14 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         msg_type = payload.message_type
         message_id = payload.whatsapp_message_id
         sender_id = payload.customer.phone  # sender phone number
+
+        # Bot paused for this contact — a manager is handling them. Mark the
+        # message read so their inbox stays clean, but send no auto-reply.
+        if is_bot_paused(sender_id):
+            if message_id:
+                mark_as_read(channel, message_id)
+            logger.info("[PAUSED] Bot paused for %s — skipping auto-reply", sender_id)
+            return
 
         # Mark as read immediately
         if message_id:

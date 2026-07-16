@@ -111,3 +111,17 @@ def clear_history(chat_id: str) -> None:
         _cache[chat_id] = []
         _loaded.add(chat_id)
         _save_to_db(chat_id, [])
+
+
+def list_contacts() -> list[dict]:
+    """Return every conversation's raw chat_id and last-activity timestamp.
+
+    chat_id is stored as "<phone_number_id>:<sender_phone>" (older rows may be a
+    bare phone). Callers extract and normalize the sender phone themselves — this
+    reader stays free of phone-format concerns so it has no cross-module deps.
+    """
+    with sqlite3.connect(config.CONVERSATION_DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT chat_id, updated_at FROM conversations"
+        ).fetchall()
+    return [{"chat_id": r[0], "updated_at": r[1]} for r in rows]
