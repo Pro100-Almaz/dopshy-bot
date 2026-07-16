@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from integrations import booking_service
 from integrations.repo import postgres as svc
 from integrations.repo.postgres import _conn
@@ -165,6 +167,84 @@ def test_manager_create_booking_slot_taken():
                                      time_start="12:30", time_end="13:30")
     assert not res["ok"]
     assert res["code"] == "SLOT_TAKEN"
+
+
+def _count_bookings() -> int:
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM bookings")
+            return cur.fetchone()[0]
+
+
+def test_batch_creates_all_slots():
+    res = booking_service.manager_create_bookings_batch(
+        [{"field": 1, "date": "2026-08-01", "time_start": "10:00", "time_end": "11:00"},
+         {"field": 2, "date": "2026-08-01", "time_start": "10:00", "time_end": "11:00"},
+         {"field": 3, "date": "2026-08-01", "time_start": "10:00", "time_end": "11:00"}],
+        customer="Батч", phone="7702",
+    )
+    assert res["ok"]
+    created = res["data"]["created"]
+    assert len(created) == 3
+    assert _count_bookings() == 3
+    for r in created:
+        assert "manager_created" in _events(r["booking_id"])
+
+
+def test_batch_is_atomic_on_conflict():
+    """If any slot in the batch clashes, NONE of the batch is persisted."""
+    # Pre-existing booking that the second batch slot will collide with.
+    pre = booking_service.manager_create_booking(
+        field=2, date="2026-08-02", end_date="2026-08-02",
+        time_start="12:00", time_end="13:00",
+    )
+    assert pre["ok"]
+    assert _count_bookings() == 1
+
+    res = booking_service.manager_create_bookings_batch(
+        [{"field": 1, "date": "2026-08-02", "time_start": "10:00", "time_end": "11:00"},
+         {"field": 2, "date": "2026-08-02", "time_start": "12:30", "time_end": "13:30"},  # clashes
+         {"field": 3, "date": "2026-08-02", "time_start": "10:00", "time_end": "11:00"}],
+    )
+    assert not res["ok"]
+    assert res["code"] == "SLOT_TAKEN"
+    # The whole batch rolled back — only the pre-existing booking remains.
+    assert _count_bookings() == 1
+
+
+def test_batch_empty_slots_returns_invalid():
+    res = booking_service.manager_create_bookings_batch([])
+    assert not res["ok"]
+    assert res["code"] == "INVALID"
+
+
+@pytest.mark.parametrize("midnight_end", ["23:59", "24:00"])
+def test_batch_merges_midnight_sentinel(midnight_end):
+    res = booking_service.manager_create_bookings_batch(
+        [{"field": 1, "date": "2026-08-10", "time_start": "23:00", "time_end": midnight_end},
+         {"field": 1, "date": "2026-08-11", "time_start": "00:00", "time_end": "01:00"}],
+        customer="Полночь", phone="7703",
+    )
+    assert res["ok"]
+    created = res["data"]["created"]
+    # One logical cross-midnight booking = two rows (pre- and post-midnight halves).
+    assert len(created) == 2
+    ids = [r["booking_id"] for r in created]
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT time_start, time_end, group_transition FROM bookings "
+                "WHERE id = ANY(%s) ORDER BY date, time_start",
+                (ids,),
+            )
+            rows = cur.fetchall()
+    # First half runs 23:00 -> midnight, second half 00:00 -> 01:00.
+    assert str(rows[0][0]).startswith("23:00")
+    assert str(rows[0][1]).startswith("23:59")
+    assert str(rows[1][0]).startswith("00:00")
+    assert str(rows[1][1]).startswith("01:00")
+    # Both halves are linked as the same booking via group_transition.
+    assert rows[0][2] == rows[1][2]
 
 
 def _age_row(booking_id, *, reserved_until=None, created_at=None):

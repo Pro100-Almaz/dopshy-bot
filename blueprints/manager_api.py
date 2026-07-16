@@ -14,6 +14,7 @@ repo emits it):
 import logging
 import threading
 import time
+import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -55,6 +56,8 @@ def _serialize(b: dict) -> dict:
             out[k] = v.isoformat()
         elif isinstance(v, Decimal):
             out[k] = float(v)
+        elif isinstance(v, uuid.UUID):  # e.g. group_transition
+            out[k] = str(v)
         elif hasattr(v, "isoformat"):  # time
             out[k] = str(v)[:5]
         elif v is None:
@@ -64,6 +67,9 @@ def _serialize(b: dict) -> dict:
 
 @manager_api.before_request
 def _authenticate():
+    if request.method == "OPTIONS":
+        return None
+
     if not config.MANAGER_API_KEY:
         return jsonify({"ok": False, "code": "NOT_CONFIGURED",
                         "message": "Manager API is not configured."}), 503
@@ -134,7 +140,7 @@ def get_bookings_in_range(start_date: str, end_date: str, field: int):
     rows = _combine_bookings_payments(rows, payments)
     return jsonify({
         "ok": True,
-        "date": [_serialize(r) for r in rows]
+        "data": [_serialize(r) for r in rows]
     }), 200
 
 
@@ -212,10 +218,11 @@ def create_bookings_batch():
         updated_by=body.get("updated_by", "Неизвестен"),
     )
 
-    for r in res.get("data", {}).get("created", []):
-        if r.get("ok") and r.get("data", {}).get("booking_id"):
-            booking_row = repo.get_booking(r["data"]["booking_id"])
-            _single_table_write(booking_row)
+    if res["ok"]:
+        for r in res.get("data", {}).get("created", []):
+            if r.get("booking_id"):
+                booking_row = repo.get_booking(r["booking_id"])
+                _single_table_write(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 409)
 

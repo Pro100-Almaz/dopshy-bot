@@ -48,7 +48,7 @@ CORS(
     app,
     resources={r"/api/manager/*": {"origins": config.CORS_ALLOWED_ORIGINS}},
     allow_headers=["Content-Type", "X-API-Key"],
-    methods=["GET", "POST", "PATCH", "DELETE"],
+    methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     max_age=86400,
 )
 

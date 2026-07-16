@@ -13,7 +13,7 @@ def get_all_bookings() -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, customer_name, phone, time_start, time_end, price_total, state,
-                        source, notes, created_at, updated_at, date
+                        source, notes, created_at, updated_at, date, group_transition
                 FROM bookings
                 ORDER BY date, time_start, field
             """)
@@ -120,7 +120,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
-                       paid_kaspi_qr, paid_cash
+                       paid_kaspi_qr, paid_cash, group_transition
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
                       AND (%s IS NULL OR field = %s)
@@ -136,7 +136,7 @@ def get_booking(booking_id: int) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, source, created_at
+                       phone, notes, state, price_total, source, created_at, group_transition
                 FROM bookings WHERE id = %s
             """, (booking_id,))
             row = cur.fetchone()
