@@ -28,6 +28,7 @@ from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
+from utils import display_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +424,7 @@ class BookingStepHandler(BaseStepHandler):
         if not free_fields:
             logger.info(self.LOGGER_MESSAGES["step_time_fields_reject"])
             return (
-                    f"{self.builder.data_localization(lang, "no_free_fields", start=time_start, end=time_end)}"
+                    f"{self.builder.data_localization(lang, "no_free_fields", start=time_start, end=display_end_time(time_end))}"
                     f"\n\n{self.builder.ask_time(chosen_date, day_windows, lang)}"
             )
 
@@ -530,7 +531,7 @@ class BookingPromptBuilder(BasePromptBuilder):
             "booking_pending",
             date=self.fmt_date(params["date"], lang),
             start=time_start_str,
-            end=time_end_str,
+            end=display_end_time(time_end_str),
             field=field,
             fmt=params["format"],
             name=params.get("customer_name", ""),
@@ -577,7 +578,7 @@ class BookingPromptBuilder(BasePromptBuilder):
             "summary",
             date=self.fmt_date(params.get("date", ""), lang),
             start=params.get("time_start", "?"),
-            end=params.get("time_end", "?"),
+            end=display_end_time(params.get("time_end", "?")),
             field=params.get("field", "?"),
             fmt=params.get("format", "?"),
             name=params.get("customer_name", "?"),

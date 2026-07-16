@@ -15,6 +15,7 @@ from flask import Flask, request, jsonify, abort
 import config
 from handlers.message_batcher import enqueue_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
+from integrations.providers.payload import OutboundChannel
 from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
 from integrations.sheets.booking_sheets import refresh_week_sheet
@@ -95,7 +96,7 @@ def _cancel_expired_bookings():
                 ts = str(b["time_start"])[:5]
                 te = str(b["time_end"])[:5]
                 send_text_message(
-                    config.WHATSAPP_PHONE_NUMBER_ID_BOT_1,
+                    OutboundChannel(provider="ycloud", phone_number_id=config.WHATSAPP_PHONE_NUMBER_ID_BOT_1),
                     b["phone"],
                     f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
                     f"была отменена — оплата не поступила в течении 20 минут.\n"

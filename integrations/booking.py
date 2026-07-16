@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 
 import config
 from integrations.repo import booking_repo
-from utils import now_almaty, today_almaty
+from utils import now_almaty, today_almaty, display_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,7 @@ def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
         d = b["date"] if isinstance(b["date"], date) else \
             datetime.strptime(str(b["date"]), "%Y-%m-%d").date()
         ts = str(b["time_start"])[:5]
-        te = str(b["time_end"])[:5]
+        te = display_end_time(b["time_end"])  # show an end-of-day 23:59 as 00:00
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         status_str = _T.get(b.get("state", ""))[lang] if _T.get(b.get("state", "")) else b.get("state", "")
         price = f" | {int(b['price_total']):,} тг".replace(",", " ") if b.get("price_total") else ""

@@ -42,7 +42,7 @@ from integrations import booking_service
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
-from utils import is_past_booking_time
+from utils import is_past_booking_time, normalize_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,11 @@ class LlmBookingFlowHandler:
                 data[key] = floor_time_to_30_minutes(
                     datetime.strptime(data[key], "%H:%M").time()
                 )
+
+        # A midnight end-time (00:00) means "until end of day" — keep it a
+        # single booking ending 23:59 instead of a day-crossing pair.
+        if data.get("time_start") and data.get("time_end"):
+            data["time_end"] = normalize_end_time(data["time_start"], data["time_end"])
 
         # data["field"] from the extractor is a format string ("5x5", "6x6"),
         # not a field ID.
