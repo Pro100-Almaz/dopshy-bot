@@ -43,16 +43,21 @@ PRICING_PERIODS = [
 
 
 def _to_minutes(t) -> int:
-    """Convert a time/str to minutes-from-midnight.  23:59:59 → 1440 (midnight)."""
+    """Convert a time/str to minutes-from-midnight.  23:59[:ss] → 1440 (midnight).
+
+    Any 23:59 time (with or without seconds) is treated as end-of-day, since
+    normalize_end_time() stores a midnight (00:00) end as 23:59 and the
+    transitive first-half boundary is 23:59:59. Rounding the whole minute up
+    to 1440 avoids losing that final minute's price.
+    """
     if isinstance(t, str):
         parts = t.split(":")
         h, m = int(parts[0]), int(parts[1])
-        s = int(parts[2]) if len(parts) > 2 else 0
     elif isinstance(t, time):
-        h, m, s = t.hour, t.minute, t.second
+        h, m = t.hour, t.minute
     else:
         raise ValueError(f"Cannot convert {t!r} to minutes")
-    if h == 23 and m == 59 and s >= 59:
+    if h == 23 and m == 59:
         return 1440
     return h * 60 + m
 
