@@ -18,10 +18,23 @@ services:
     ports:
       - "5432:5432"
 
+  redis:
+    image: redis:7-alpine
+    # Ephemeral message-batch buffer only — no persistence needed.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   bot:
     build: .
     env_file:
       - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - chroma_data:/app/chroma_db      # persistent vector DB
       - bot_data:/app/data              # persistent conversation history (SQLite)
@@ -29,6 +42,8 @@ services:
       - ./secrets:/app/secrets:ro       # Google service account JSON
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:

@@ -42,7 +42,7 @@ from integrations import booking_service
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
-from utils import is_past_booking_time
+from utils import is_past_booking_time, normalize_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -130,24 +130,22 @@ T = {
                                     "📅 {date}\n"
                                     "⏰ {ts}–{te}\n"
                                     "⚽ {fmt}\n"
-                                    "👥 Игроков: {players}\n"
                                     "👤 Имя: {name}\n"
                                     "💰 {price}\n\n"
                                     "Оплатите аванс на сумму не менее 10тысяч тг:\n{pay_url}\n"
                                     "💳 По желанию вы можете оплатить полную сумму сразу.\n"
                                     "⚠️ Возврат при неявке не производится\n\n"
-                                    "Отправьте PDF-чек сюда 🙏\n⚠️ 20 мин без оплаты — бронь отменится."),
+                                    "⚠️ Отправьте PDF-чек сюда 🙏\n⚠️ 20 мин без оплаты — бронь отменится."),
                              "kk": ("📋 Брондау тіркелді!\n\n"
                                     "📅 {date}\n"
                                     "⏰ {ts}–{te}\n"
                                     "⚽ {fmt}\n"
-                                    "👥 Ойыншылар: {players}\n"
                                     "👤 Аты: {name}\n"
                                     "💰 {price}\n\n"
                                     "Аванс ретінде кемінде 10мың тг төлем жасаңыз:\n{pay_url}\n"
                                     "💳 Қаласаңыз толық соманы бірден төлей аласыз.\n"
                                     "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
-                                    "PDF-чек жіберіңіз 🙏\n⚠️ 20 мин төлемсіз — брондау жойылады.")},
+                                    "⚠️ PDF-чек жіберіңіз 🙏\n⚠️ 20 мин төлемсіз — брондау жойылады.")},
     "cancelled":            {"ru": "Бронь отменена. Напишите, если что! 🙂",
                              "kk": "Брондау тоқтатылды. Қаласаңыз жазыңыз! 🙂"},
     "general_header":       {"ru": "Давайте забронируем! Свободные слоты:",
@@ -212,6 +210,11 @@ class LlmBookingFlowHandler:
                 data[key] = floor_time_to_30_minutes(
                     datetime.strptime(data[key], "%H:%M").time()
                 )
+
+        # A midnight end-time (00:00) means "until end of day" — keep it a
+        # single booking ending 23:59 instead of a day-crossing pair.
+        if data.get("time_start") and data.get("time_end"):
+            data["time_end"] = normalize_end_time(data["time_start"], data["time_end"])
 
         # data["field"] from the extractor is a format string ("5x5", "6x6"),
         # not a field ID.
@@ -373,7 +376,7 @@ class LlmBookingFlowHandler:
 
         return self.asker.localize(lang, "booking_done",
                   date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
-                  fid=field_id, fmt=fmt, players=players,
+                  fid=field_id, fmt=fmt,
                   name=name, price=fmt_price(total),
                   pay_url=config.KASPI_PAYMENT_URL)
 
@@ -402,7 +405,6 @@ class LlmBookingFlowHandler:
         has_ts = data.get("time_start") is not None
         has_te = data.get("time_end") is not None
         has_field = data.get("field") is not None
-        has_players = data.get("players") is not None
         has_name = data.get("customer_name") is not None
 
         # ── Rule 6: only one of start/end provided → ask for both ──
@@ -441,17 +443,15 @@ class LlmBookingFlowHandler:
                 fl = "\n".join(f"  • {fmt}" for fmt in formats)
                 return self.asker.localize(lang, "field_not_found") + "\n" + fl
 
-        # ── Rule 7: validate players ──
-        if has_players and int(data["players"]) <= 0:
-            return self.asker.localize(lang, "players_invalid")
-        if has_players and int(data["players"]) > config.MAX_PLAYERS:
+        # ── Players count is optional and no longer asked for. If the user
+        #    volunteered an out-of-range value, just drop it rather than block. ──
+        if data.get("players") is not None and (
+            int(data["players"]) <= 0 or int(data["players"]) > config.MAX_PLAYERS
+        ):
             data["players"] = None
-            has_players = False
-            return (self.asker.localize(lang, "players_overflow")
-                    + "\n" + self.asker.localize(lang, "ask_players"))
 
-        # ── All 6 fields → confirm ──
-        if has_date and has_time and has_field and has_players and has_name:
+        # ── All required fields → confirm ──
+        if has_date and has_time and has_field and has_name:
             return self.checker.check_and_confirm(data)
 
         # ── Rule 4: date + time + field → check slot, ask remaining ──

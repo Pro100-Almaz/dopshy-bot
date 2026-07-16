@@ -24,7 +24,7 @@ def test_cancel_detected(text):
 @pytest.mark.parametrize("text", [
     "1",                      # step_date number
     "10:00 до 12:00",         # step_time
-    "8",                      # step_players
+    "8",                      # bare number (e.g. a date/time reply)
     "Алмаз",                  # step_name
     "да",                     # step_confirm yes
     "нет",                    # step_confirm no — not "strong cancel"

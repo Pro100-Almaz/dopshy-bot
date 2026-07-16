@@ -25,7 +25,7 @@ psycopg2-binary = "^2.9"
 apscheduler = "^3.10"
 tzdata = "^2026.2"
 pypdf = "^6.12.2"
-flask-cors = "^6.0.5"
+redis = "^5.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

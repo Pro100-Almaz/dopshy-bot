@@ -3,6 +3,7 @@ from handlers.base_classes.base_button import BaseButton
 from handlers.base_classes.base_draft_handler import BaseDraftHandler
 from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from integrations import booking as booking_logic
+from utils import display_end_time
 from handlers.base_classes.base_asker import BaseAsker
 from handlers.base_classes.base_format import BaseFormat
 
@@ -38,6 +39,7 @@ class BaseChecker:
         lang = data.get("lang", "ru")
         date_str = data["date"]
         ts, te = data["time_start"], data["time_end"]
+        te_disp = display_end_time(te)  # show an end-of-day 23:59 as 00:00 to the client
         field_id = int(data["field"])
 
         week_start, week_end = booking_logic.get_week_range()
@@ -58,7 +60,7 @@ class BaseChecker:
             return (
                     self.asker.localize(lang, "field_free",
                        fid=field_id, fmt=fmt,
-                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
+                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                     + "\n\n" + next_ask
             )
 
@@ -69,7 +71,7 @@ class BaseChecker:
         return (
                 self.asker.localize(lang, "field_taken",
                    fid=field_id, fmt=fmt,
-                   date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
+                   date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                 + "\n\n" + self.asker.localize(lang, "alternatives") + "\n" + alt_text
         )
 
@@ -94,6 +96,7 @@ class BaseChecker:
         """Rule 2: show available dates and fields for the given time interval."""
         lang = data.get("lang", "ru")
         ts, te = data["time_start"], data["time_end"]
+        te_disp = display_end_time(te)  # show an end-of-day 23:59 as 00:00 to the client
 
         week_start, week_end = booking_logic.get_week_range()
         from datetime import timedelta
@@ -112,9 +115,9 @@ class BaseChecker:
                 available.append({"date": d, "fields": free_fields})
 
         if not available:
-            return self.asker.localize(lang, "no_fields_time", ts=ts, te=te)
+            return self.asker.localize(lang, "no_fields_time", ts=ts, te=te_disp)
 
-        return (self.asker.localize(lang, "time_available", ts=ts, te=te)
+        return (self.asker.localize(lang, "time_available", ts=ts, te=te_disp)
                  + "\n\n" + self.asker.localize(lang, "which_date"))
 
     def check_date_and_field(self, data: dict) -> str:
@@ -183,6 +186,7 @@ class BaseChecker:
         lang = data.get("lang", "ru")
         date_str = data["date"]
         ts, te = data["time_start"], data["time_end"]
+        te_disp = display_end_time(te)  # show an end-of-day 23:59 as 00:00 to the client
 
         week_start, week_end = booking_logic.get_week_range()
         from datetime import timedelta
@@ -206,7 +210,7 @@ class BaseChecker:
             alt_text = self.formatter.format_windows_by_field(day_windows, lang)
             return (
                     self.asker.localize(lang, "no_free_fields_slot",
-                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
+                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                     + "\n\n" + self.asker.localize(lang, "available_time") + "\n" + alt_text
             )
 
@@ -225,13 +229,13 @@ class BaseChecker:
             return (
                     self.asker.localize(lang, "field_auto",
                        fid=f["id"], fmt=f["format"],
-                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
+                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                     + "\n\n" + next_ask
             )
 
         # Multiple formats — let user pick by size
         btn_text = self.asker.localize(lang, "choose_field",
-                      date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
+                      date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
         return self.buttons.get_buttons(btn_text, free_formats)
 
     def check_and_confirm(self, data: dict) -> str:
@@ -242,6 +246,7 @@ class BaseChecker:
         lang = data.get("lang", "ru")
         date_str = data["date"]
         ts, te = data["time_start"], data["time_end"]
+        te_disp = display_end_time(te)  # show an end-of-day 23:59 as 00:00 to the client
         field_id = int(data["field"])
 
         week_start, week_end = booking_logic.get_week_range()
@@ -261,7 +266,7 @@ class BaseChecker:
             return (
                     self.asker.localize(lang, "slot_taken_confirm",
                        fid=field_id, fmt=fmt,
-                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te)
+                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                     + "\n\n" + self.asker.localize(lang, "alternatives") + "\n" + alt_text
             )
 
@@ -269,9 +274,8 @@ class BaseChecker:
         summary = (
             f"{self.asker.localize(lang, 'confirm_header')}\n"
             f"📅 {self.formatter.fmt_date(date_str, lang)}\n"
-            f"⏰ {ts}–{te}\n"
+            f"⏰ {ts}–{te_disp}\n"
             f"⚽ {fmt}\n"
-            f"👥 {data['players']}\n"
             f"👤 {data['customer_name']}\n"
             f"💰 {fmt_price(total)}\n\n"
             f"{self.asker.localize(lang, 'confirm_question')}"

@@ -24,6 +24,17 @@ services:
     ports:
       - "5432:5432"
 
+  redis:
+    # Ephemeral message-batch buffer only — no persistence needed.
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   bot:
     # Mount the full source so code changes propagate without a rebuild.
     # Named volumes for chroma_db and data take precedence over the bind mount.
@@ -47,10 +58,14 @@ services:
       - --reload
       - --reload-extra-file=/app/migrations
     ports:
-      - "127.0.0.1:5000:5000"
+      - "127.0.0.1:5001:5000"
     environment:
       LOG_LEVEL: DEBUG
       PYTHONDONTWRITEBYTECODE: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      redis:
+        condition: service_healthy
 
   ingest:
     build: .

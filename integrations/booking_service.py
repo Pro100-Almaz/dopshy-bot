@@ -20,7 +20,7 @@ import logging
 import uuid
 from datetime import datetime, time, timedelta
 
-from utils import is_past_booking_time
+from utils import is_past_booking_time, normalize_end_time
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
@@ -85,6 +85,18 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     return _err("INVALID_TIME", "Не все данные брони заполнены.")
                 if is_past_booking_time(str(row["date"]), str(row["time_start"])[:5]):
                     return _err("TIME_IN_PAST", "Указанное время уже прошло.")
+
+                # A midnight end-time (00:00) means "until end of day", not a
+                # day transition. Pin it to 23:59:59 so it stays a single
+                # booking instead of being split with a redundant 00:00→00:00
+                # second half. (Interactive/LLM flows normalize this earlier;
+                # this guards any draft that still reached here as 00:00.)
+                if row["time_end"] == time(0, 0) and row["time_start"] != time(0, 0):
+                    cur.execute(
+                        "UPDATE bookings SET time_end = '23:59:59'::time WHERE id = %s",
+                        (booking_id,),
+                    )
+                    row["time_end"] = time(23, 59, 59)
 
                 # TRANSITIVE BOOKING: split if time_start > time_end (day transition)
                 is_transitive = row["time_start"] > row["time_end"]
@@ -355,6 +367,9 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 new_ts      = diff.get("time_start",    str(row["time_start"])[:5])
                 # TRANSITIVE BOOKING: use logical end time (from second booking) as the base
                 new_te      = diff.get("time_end",      logical_time_end)
+                # A midnight end (00:00) means "until end of day" → keep it a
+                # single booking ending 23:59, not a day-crossing pair.
+                new_te      = normalize_end_time(new_ts, new_te)
                 new_field   = int(diff.get("field",     row["field"]))
                 new_players = diff.get("players",       row["players"])
                 new_name    = diff.get("customer_name", row["customer_name"])
@@ -532,23 +547,60 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
 
 
 _MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash"}
+_MANAGER_SLOT_FIELDS = ("field", "date", "time_start", "time_end")
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
-    """Manager edit of free-edit fields (customer_name, notes, price_total)."""
+    """Manager edit of free-edit fields (customer_name, notes, price_total, state, …)
+    and slot fields (field, date, time_start, time_end).
+
+    Rescheduling (any slot field) recomputes start_at/end_at from the effective
+    new-or-existing values so the bookings_no_overlap EXCLUDE constraint stays
+    consistent; a clashing slot returns SLOT_TAKEN. `end_date` is not a
+    single-booking column and is ignored here (it only affects repeat generation
+    at create time).
+    """
     patch = {k: v for k, v in fields.items() if k in _MANAGER_PATCH_FIELDS}
-    if not patch:
+    slot = {k: fields[k] for k in _MANAGER_SLOT_FIELDS if k in fields}
+    if not patch and not slot:
         return _ok({"booking_id": booking_id})
-    set_clause = ", ".join(f"{k} = %s" for k in patch) + ", updated_at = NOW()"
-    vals = list(patch.values()) + [booking_id]
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
-            )
-            if cur.fetchone():
-                _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
-                return _ok({"booking_id": booking_id})
+
+    # Reject unknown field numbers up front: an invalid field would otherwise
+    # commit to the DB and then crash the downstream sheet sync (KeyError).
+    if slot.get("field") is not None:
+        valid_fields = {int(f["id"]) for f in config.BOOKING_FIELDS}
+        if int(slot["field"]) not in valid_fields:
+            return _err("INVALID_FIELD", "Такого поля не существует.")
+
+    set_parts = [f"{k} = %s" for k in patch]
+    vals = list(patch.values())
+
+    if slot:
+        # SET expressions read the row's OLD values, so COALESCE(param, column)
+        # keeps unchanged slot fields at their current value.
+        for k in _MANAGER_SLOT_FIELDS:
+            set_parts.append(f"{k} = COALESCE(%s, {k})")
+            vals.append(slot.get(k))
+        set_parts.append("start_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_start)) AT TIME ZONE %s")
+        vals += [slot.get("date"), slot.get("time_start"), config.BOOKING_TIMEZONE]
+        set_parts.append("end_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_end)) AT TIME ZONE %s")
+        vals += [slot.get("date"), slot.get("time_end"), config.BOOKING_TIMEZONE]
+
+    set_clause = ", ".join(set_parts) + ", updated_at = NOW()"
+    vals.append(booking_id)
+
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
+                )
+                if cur.fetchone():
+                    _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
+                    return _ok({"booking_id": booking_id})
+    except psycopg2.errors.ExclusionViolation:
+        logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
+        return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     return _err("NOT_FOUND", "Бронь не найдена.")
 
 
@@ -647,22 +699,17 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
     entries per iteration — first half (start→23:59:59, is_latter=False) and
     second half (00:00→end, is_latter=True). The latter booking should not get
     a reserved_until value since payments are checked on the former.
-
-    A booking ending exactly at midnight (end_time == "00:00") has no next-day
-    portion, so it yields only the first half (start→23:59:59) as a single
-    same-day segment — no zero-length 00:00→00:00 tail.
     """
     current = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    ends_at_midnight = (datetime.strptime(end_time, "%H:%M").time() == time(0, 0))
-    transitive = (not ends_at_midnight
-                  and datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
+    end = max(datetime.strptime(end_date, "%Y-%m-%d"), current)
+    # A midnight end (00:00) means "until end of day" → single booking, not a
+    # day-crossing pair with a redundant 00:00→00:00 second half.
+    end_time = normalize_end_time(start_time, end_time)
+    transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
     while current <= end:
         group_transition = str(uuid.uuid4())
-        if ends_at_midnight:
-            yield current, start_time, "23:59:59", group_transition, False
-        elif transitive:
+        if transitive:
             yield current, start_time, "23:59:59", group_transition, False
             yield current + timedelta(days=1), "00:00", end_time, group_transition, True
         else:

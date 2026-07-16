@@ -8,17 +8,17 @@ Endpoints:
 """
 
 import logging
-import threading
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
-from flask_cors import CORS
 
 import config
-from handlers.message_handler import handle_incoming_message
+from handlers.message_batcher import enqueue_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
+from integrations.providers.payload import OutboundChannel
 from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
+from integrations.repo.bot_pause_repo import set_bot_paused
 from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
@@ -108,7 +108,7 @@ def _cancel_expired_bookings():
                 ts = str(b["time_start"])[:5]
                 te = str(b["time_end"])[:5]
                 send_text_message(
-                    config.WHATSAPP_PHONE_NUMBER_ID_BOT_1,
+                    OutboundChannel(provider="ycloud", phone_number_id=config.WHATSAPP_PHONE_NUMBER_ID_BOT_1),
                     b["phone"],
                     f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
                     f"была отменена — оплата не поступила в течении 20 минут.\n"
@@ -194,13 +194,9 @@ def receive_message():
     if data is None:
         return jsonify({"status": "ignored"}), 200
 
-    # Process in background so the webhook response is immediate
-    thread = threading.Thread(
-        target=handle_incoming_message,
-        args=(data,),
-        daemon=True,
-    )
-    thread.start()
+    # Buffer + debounce: fragments sent in quick succession are combined into a
+    # single message before hitting the pipeline. Non-blocking — returns at once.
+    enqueue_incoming_message(data)
 
     return jsonify({"status": "ok"}), 200
 
@@ -212,8 +208,22 @@ def receive_ycloud_message():
     (Meta requires a 200 response within 20 seconds or it retries).
     """
     payload = request.get_json(silent=True)
+    logger.info({'INCOMING MESSAGE'})
     if not payload:
         abort(400)
+
+    # A human agent replied from the WhatsApp Business app — YCloud echoes it
+    # back here. Auto-pause the bot for that customer so it stops replying
+    # until a manager turns it back on from the UI.
+    if payload.get("type") == "whatsapp.smb.message.echoes":
+        customer_phone = (payload.get("whatsappMessage") or {}).get("to")
+        if customer_phone:
+            try:
+                set_bot_paused(customer_phone, True, reason="auto")
+                logger.info("[AUTO-PAUSE] Manager replied to %s — bot paused", customer_phone)
+            except Exception:
+                logger.exception("Failed to auto-pause bot for %s", customer_phone)
+        return jsonify({"status": "ok"}), 200
 
     # Confirm this is a WhatsApp Business Account event
     if payload.get("type") != "whatsapp.inbound_message.received":
@@ -221,6 +231,10 @@ def receive_ycloud_message():
 
     try:
         data = parser_ycloud(payload)
+        # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
+        #     logger.info({f'IGNORED phone number {data.customer.phone}'})
+        #     return jsonify({"status": "ignored"}), 200
+
     except WhatsappPayloadParserError:
         logger.error({'Failed to parse YCloud webhook'})
         return jsonify({"status": "ignored"}), 200
@@ -228,13 +242,9 @@ def receive_ycloud_message():
     if data is None:
         return jsonify({"status": "ignored"}), 200
 
-    # Process in background so the webhook response is immediate
-    thread = threading.Thread(
-        target=handle_incoming_message,
-        args=(data,),
-        daemon=True,
-    )
-    thread.start()
+    # Buffer + debounce: fragments sent in quick succession are combined into a
+    # single message before hitting the pipeline. Non-blocking — returns at once.
+    enqueue_incoming_message(data)
 
     return jsonify({"status": "ok"}), 200
 

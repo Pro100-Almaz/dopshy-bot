@@ -12,17 +12,19 @@ from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel
+from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
+from integrations.repo.bot_pause_repo import is_bot_paused
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
-from handlers.whatsapp_client import send_text_message, mark_as_read, download_media, prepend_text_to_buttons
+from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation, booking, trial
+from utils import display_end_time
 from integrations.repo import booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
@@ -149,13 +151,21 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         message_id = payload.whatsapp_message_id
         sender_id = payload.customer.phone  # sender phone number
 
+        # Bot paused for this contact — a manager is handling them. Mark the
+        # message read so their inbox stays clean, but send no auto-reply.
+        if is_bot_paused(sender_id):
+            if message_id:
+                mark_as_read(channel, message_id)
+            logger.info("[PAUSED] Bot paused for %s — skipping auto-reply", sender_id)
+            return
+
         # Mark as read immediately
         if message_id:
             mark_as_read(channel, message_id)
 
         # Document = payment receipt — confirm the booking
         if msg_type == "document":
-            _handle_payment_receipt(channel, phone_number_id, sender_id, payload.media)
+            _handle_payment_receipt(channel, sender_id, payload.media)
             return
 
         # Only handle text messages
@@ -169,7 +179,9 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             return
 
         user_text = ""
-        if msg_type == "interactive" and payload.interactive and payload.interactive.type == 'button_reply':
+        if (msg_type == "interactive" and payload.interactive
+                and payload.interactive.button_reply
+                and payload.interactive.button_reply.title):
             user_text = str(payload.interactive.button_reply.title)
 
         if msg_type == "text":
@@ -393,7 +405,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 logger.info("[CANCEL] LLM called cancel_trial tool")
                 handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
 
-            reply = prepend_text_to_buttons(reply, handle_reply)
+            reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 
         # 6. Save to history
         append_message(chat_id, "user", user_text)
@@ -448,8 +460,8 @@ def _refresh_booking_sheet(booking: dict, state: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, sender_phone: str,
-                            proof_media_id: str | None = None) -> None:
+def _handle_payment_receipt(channel: OutboundChannel, sender_phone: str,
+                            media: WhatsAppMedia | None = None) -> None:
     """
     Called when a user sends a document (assumed to be a payment receipt).
     Finds their most recent awaiting_payment booking, confirms it via the
@@ -472,7 +484,7 @@ def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, send
         booking["price_total"] = combined_price
 
     # Download the receipt PDF and validate it before confirming.
-    pdf = download_media(phone_number_id, proof_media_id) if proof_media_id else None
+    pdf = download_media(channel, media) if media else None
     if not pdf:
         logger.warning("[PAYMENT] Could not download media for booking id=%d", booking["id"])
         send_text_message(
@@ -494,7 +506,7 @@ def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, send
         return
 
     res = booking_service.submit_payment_proof(
-        booking["id"], parsed=result["parsed"], proof_media_id=proof_media_id
+        booking["id"], parsed=result["parsed"], proof_media_id=media.id
     )
     if not res["ok"]:
         msg = ("Этот чек уже был использован. Свяжитесь с администратором.\n"
@@ -512,7 +524,7 @@ def _handle_payment_receipt(channel: OutboundChannel, phone_number_id: str, send
 
     booking_date = booking["date"]
     ts = str(booking["time_start"])[:5]
-    te = str(booking["time_end"])[:5]
+    te = display_end_time(booking["time_end"])  # show an end-of-day 23:59 as 00:00
     price_line = fmt_price(booking["price_total"]) if booking.get("price_total") else ""
 
     paid = float(result["parsed"].get("amount") or 0)

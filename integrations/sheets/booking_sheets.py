@@ -16,7 +16,7 @@ from typing import Any
 import config
 from integrations.booking_service import get_payments
 from integrations.repo import booking_repo
-from utils import now_almaty, today_almaty
+from utils import now_almaty, today_almaty, display_end_time
 import datetime
 
 logger = logging.getLogger(__name__)
@@ -109,14 +109,15 @@ def _booking_to_row(b: dict) -> list:
         b.get("field", ""),
         str(b["date"])[:10],
         str(b.get("time_start", ""))[:5],
-        str(b.get("time_end", ""))[:5],
+        display_end_time(b.get("time_end", "")),  # show an end-of-day 23:59 as 00:00
         b.get("customer_name", "") or "",
         b.get("phone", ""),
         b.get("notes", "") or "",
         _STATES_RUSSIAN.get(b.get("state", ""), b.get("state", "")),
         (b.get("updated_at") or now_almaty()).strftime("%Y-%m-%d %H:%M"),
         b.get("source", ""),
-        b.get("reserved_until").strftime("%Y-%m-%d %H:%M") if b.get("reserved_until") else "",
+        b.get("reserved_until").strftime("%Y-%m-%d %H:%M")
+        if b.get("state") == "awaiting_payment" and b.get("reserved_until") else "",
         float(b.get("price_total", 0)),
         float(b.get("payment_current", 0)),
         max(0, float(b.get("price_total", 0)) - float(b.get("payment_current", 0))),
@@ -348,14 +349,20 @@ def _paint_confirmed_booking(worksheet, booking, requests, cell_updates) -> None
 
     sheet_row = start_slot_index + 2
 
+    # Keep the 24:00 slot index for grid placement, but show it as 00:00.
+    booking_end_display = display_end_time(booking_end_time)
+
     cell_text = (
         f"{booking.get('customer_name') or 'No Customer name'}\n"
-        f"{booking_start_time} - {booking_end_time}\n"
+        f"{booking_start_time} - {booking_end_display}\n"
         f"{booking.get('notes') or ''}"
     ).strip()
 
     col_letter = col_index_to_letter(col - 1)
     cell_updates.append({"range": f"{col_letter}{sheet_row}", "values": [[cell_text]]})
+
+    # Unmerge the target range before (re)merging.
+    requests.append(_get_unmerge_request(worksheet.id, start_slot_index + 1, end_slot_index + 1, col - 1, col))
 
     note_text = (
         f"Booking ID: {booking.get('id')}\n"
@@ -477,17 +484,27 @@ def col_index_to_letter(index):
 
 
 def _single_table_write(booking):
-    field = booking.get('field')
-    worksheet = _get_week_worksheet(field)
+    try:
+        field = booking.get('field')
+        worksheet = _get_week_worksheet(field)
 
-    requests = []
-    cell_updates = []
-    _paint_confirmed_booking(worksheet, booking, requests, cell_updates)
+        requests = []
+        cell_updates = []
+        _paint_confirmed_booking(worksheet, booking, requests, cell_updates)
 
-    if cell_updates:
-        worksheet.batch_update(cell_updates, value_input_option="RAW")
-    if requests:
-        worksheet.spreadsheet.batch_update({'requests': requests})
+        if cell_updates:
+            worksheet.batch_update(cell_updates, value_input_option="RAW")
+        if requests:
+            worksheet.spreadsheet.batch_update({'requests': requests})
+    except Exception as exc:
+        logger.warning(
+            "[SHEET] _single_table_write failed for booking %s (%s); rebuilding week sheet",
+            booking.get('id'), exc,
+        )
+        try:
+            refresh_week_sheet()
+        except Exception as exc2:
+            logger.error("[SHEET] week-sheet rebuild fallback also failed: %s", exc2)
 
 
 def _single_table_erase(booking) -> None:
