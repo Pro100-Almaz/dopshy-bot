@@ -8,21 +8,28 @@ from integrations.repo.postgres import _conn
 
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
-def get_all_bookings() -> list[dict]:
+def get_all_bookings(
+    states: tuple = ("draft", "awaiting_payment", "confirmed", "unpaid"),
+) -> list[dict]:
+    """Every booking in the given states, one row each — no date window.
+
+    Backs the manager API `GET /api/manager/bookings/all` (consumed by the
+    backend's staff booking list). Same column shape as
+    `get_bookings_in_range`; payments are merged separately by the route via
+    `_combine_bookings_payments`, so no payments JOIN here (which would
+    duplicate a booking once per payment). No date filter, so DRAFT rows with a
+    NULL date are included too.
+    """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT 
-                    b.id, b.field, b.customer_name, b.phone, b.time_start, b.time_end, b.price_total, b.state, b.source,
-                    b.notes, b.created_at, b.updated_at, b.date, b.group_transition,  p.amount
-                FROM bookings AS b
-                LEFT JOIN payments AS p
-                    ON p.booking_id = b.id
-                ORDER BY
-                    b.date,
-                    b.time_start,
-                    b.field;
-            """)
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, group_transition
+                FROM bookings
+                WHERE state = ANY(%s)
+                ORDER BY date, time_start, field
+            """, (list(states),))
             return [dict(r) for r in cur.fetchall()]
 
 

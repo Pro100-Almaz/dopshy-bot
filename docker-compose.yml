@@ -58,18 +58,25 @@ services:
       - default
       - shared
 
+  # Single edge proxy for the whole server: terminates TLS and routes by
+  # domain — ${SERVER_NAME} → bot:5000, ${API_SERVER_NAME} → backend_app:8000.
+  # The backend runs in a separate compose project reachable over `shared`.
   nginx:
     build: ./nginx
     env_file:
       - .env
     environment:
       SERVER_NAME: ${SERVER_NAME}
+      API_SERVER_NAME: ${API_SERVER_NAME}
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - certbot_certs:/etc/letsencrypt
       - certbot_webroot:/var/www/certbot
+    networks:
+      - default
+      - shared
     depends_on:
       - bot
     restart: unless-stopped
@@ -87,7 +94,7 @@ services:
     # continuation lines start with leading spaces and end up being interpreted as
     # separate shell commands. Override `command: []` so the certbot image's
     # default `--help` CMD doesn't tag along after our script.
-    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email \"$$CERTBOT_EMAIL\" --agree-tos --no-eff-email --non-interactive -d \"$$SERVER_NAME\" || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
+    entrypoint: ["/bin/sh", "-c", "certbot certonly --webroot --webroot-path=/var/www/certbot --email \"$$CERTBOT_EMAIL\" --agree-tos --no-eff-email --non-interactive -d \"$$SERVER_NAME\" || true; certbot certonly --webroot --webroot-path=/var/www/certbot --email \"$$CERTBOT_EMAIL\" --agree-tos --no-eff-email --non-interactive -d \"$$API_SERVER_NAME\" || true; while true; do sleep 12h; certbot renew --webroot --webroot-path=/var/www/certbot --quiet; done"]
     command: []
     depends_on:
       - nginx

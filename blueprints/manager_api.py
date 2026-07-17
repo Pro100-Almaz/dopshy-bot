@@ -120,6 +120,18 @@ def list_bookings():
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
 
 
+@manager_api.get("/api/manager/bookings/all")
+def list_all_bookings():
+    """Every booking (all non-terminal states), deduped, with aggregated
+    payment info. Consumed by the backend's staff `GET /bookings`
+    (bookings:list-all). Mirrors `list_bookings` but without a date window.
+    """
+    rows = repo.get_all_bookings()
+    payments = booking_service.get_payments()
+    rows = _combine_bookings_payments(rows, payments)
+    return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
+
+
 @manager_api.get("/api/manager/bookings/<int:booking_id>")
 def get_booking(booking_id: int):
     row = repo.get_booking(booking_id)
