@@ -71,6 +71,15 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 X_SERVICE_TOKEN: str = os.getenv("X_SERVICE_TOKEN", "")
 MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
 
+# Origins allowed to call the browser-facing manager API (CORS). Comma-separated
+# env list, e.g. "https://a.example.com,https://b.example.com". "*" (the default)
+# allows any origin. flask-cors needs a list for multiple origins, so split here.
+_cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*").strip()
+CORS_ALLOWED_ORIGINS = (
+    "*" if _cors_origins_raw in ("", "*")
+    else [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+)
+
 # ---------------------------------------------------------------------------
 # Google Sheets
 # ---------------------------------------------------------------------------
