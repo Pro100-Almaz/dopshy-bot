@@ -1,6 +1,6 @@
 """Manager API blueprint — endpoints the Google Apps Script manager UI calls.
 
-Auth: X-API-Key header matched against config.MANAGER_API_KEY.
+Auth: X-API-Key header matched against config.X_SERVICE_TOKEN.
 Rate limit: config.MANAGER_RATE_LIMIT requests/min per client IP.
 
 All responses use the service envelope: {"ok": bool, "data"/"code"/"message"}.
@@ -75,10 +75,10 @@ def _authenticate():
     if request.method == "OPTIONS":
         return None
 
-    if not config.MANAGER_API_KEY:
+    if not config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "NOT_CONFIGURED",
                         "message": "Manager API is not configured."}), 503
-    if request.headers.get("X-API-Key", "") != config.MANAGER_API_KEY:
+    if request.headers.get("X-API-Key", "") != config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "UNAUTHORIZED", "message": "Bad API key."}), 401
     if _rate_limited(request.remote_addr or "unknown"):
         return jsonify({"ok": False, "code": "RATE_LIMITED",
@@ -100,7 +100,7 @@ def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> li
 
 
 def _api_key_actor() -> str:
-    return "manager:" + (config.MANAGER_API_KEY[:6] if config.MANAGER_API_KEY else "?")
+    return "manager:" + (config.X_SERVICE_TOKEN[:6] if config.X_SERVICE_TOKEN else "?")
 
 
 # ---------------------------------------------------------------------------

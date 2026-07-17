@@ -68,7 +68,7 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # ---------------------------------------------------------------------------
 # Manager API (Google Apps Script → backend)
 # ---------------------------------------------------------------------------
-MANAGER_API_KEY: str = os.getenv("MANAGER_API_KEY", "")
+X_SERVICE_TOKEN: str = os.getenv("X_SERVICE_TOKEN", "")
 MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
 
 # ---------------------------------------------------------------------------

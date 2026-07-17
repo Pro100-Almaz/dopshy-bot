@@ -54,6 +54,9 @@ services:
     # Bind only to localhost — nginx fronts the public traffic.
     ports:
       - "127.0.0.1:5000:5000"
+    networks:
+      - default
+      - shared
 
   nginx:
     build: ./nginx
@@ -141,3 +144,11 @@ volumes:
   directus_extensions:
   certbot_certs:
   certbot_webroot:
+
+networks:
+  default:
+  # Shared with the backend's compose project so the backend can reach the bot
+  # at http://bot:5000. Create once: `docker network create dopshy_shared`.
+  shared:
+    external: true
+    name: dopshy_shared
