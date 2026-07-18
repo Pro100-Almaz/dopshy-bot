@@ -9,8 +9,8 @@ function showNewBookingSidebar() {
 /** Field options shown in the sidebar dropdown. Keep in sync with BOOKING_FIELDS. */
 function getFieldOptions() {
   return [
-    { id: 1, label: 'Поле 1 (5x5)' },
-    { id: 2, label: 'Поле 2 (6x6)' },
+    { id: 1, label: 'Поле 1 (6x6)' },
+    { id: 2, label: 'Поле 2 (5x5)' },
     { id: 3, label: 'Поле 3 (5x5)' }
   ];
 }

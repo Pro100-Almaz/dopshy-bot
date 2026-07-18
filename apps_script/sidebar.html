@@ -93,9 +93,9 @@
         if (!form.field || !form.date || !form.start || !form.end) {
           return show(false, 'Заполните поле, дату и время.');
         }
-        if (form.end <= form.start) {
-          return show(false, 'Конец должен быть позже начала.');
-        }
+        // if (form.end <= form.start) {
+        //   return show(false, 'Конец должен быть позже начала.');
+        // }
         if (form.repeat !== 'none') {
             if (!form.endDate || !form.date || form.date >= form.endDate) {
                 return show(false, 'Заполните даты правильно');
@@ -130,15 +130,18 @@
       }
 
       const reservedUntil = document.getElementById('reservedUntil');
+      const reservedUntilLabel = document.getElementById('reservedUntilLabel');
       const endDateDiv = document.getElementById('endDateDiv');
       const repeatSelect = document.getElementById('repeat');
       repeatSelect.addEventListener('change', function (e) {
           if (repeatSelect.value !== 'none') {
               endDateDiv.style.display = 'block';
               reservedUntil.style.display = 'none';
+              reservedUntilLabel.style.display = 'none';
           } else {
               endDateDiv.style.display = 'none';
               reservedUntil.style.display = 'block';
+              reservedUntilLabel.style.display = 'block';
           }
       });
 

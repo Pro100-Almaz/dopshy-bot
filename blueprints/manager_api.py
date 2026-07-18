@@ -143,7 +143,7 @@ def get_bookings_in_range(start_date: str, end_date: str, field: int):
 
 @manager_api.get("/api/manager/fields")
 def get_fields_info():
-    prices = repo.get_field_prices() #list of prices
+    prices = repo.get_field_prices() # list of prices
     fields = repo.get_fields_info() # list of fields
 
     return jsonify({"ok": True, "data": {"prices": prices, "fields": fields}}), 200
