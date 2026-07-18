@@ -88,14 +88,15 @@ def _authenticate():
 
 def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> list[dict]:
     for booking in bookings:
-        booking.setdefault("payment_current", 0)
         booking.setdefault("last_receipt_date", None)
         for payment in payments:
             if payment['booking_id'] == booking["id"]:
-                booking["payment_current"] += payment.get("amount", 0)
+                booking["paid_bot"] = payment.get("amount") or 0
                 rd = payment.get("receipt_date")
                 if rd and (booking["last_receipt_date"] is None or rd > booking["last_receipt_date"]):
                     booking["last_receipt_date"] = rd
+        for p in ("paid_kaspi_qr", "paid_cash", "paid_avans"):
+            booking[p] = booking.get(p) or 0
     return bookings
 
 
@@ -159,8 +160,6 @@ def get_fields_info():
     }}), 200
 
 
-
-
 @manager_api.post("/api/manager/bookings")
 def create_booking():
     body = request.get_json(silent=True) or {}
@@ -220,6 +219,7 @@ def create_bookings_batch():
         phone=body.get("phone"),
         notes=body.get("notes"),
         price_total=body.get("price_total"),
+        prepayment=body.get("prepayment"),
         actor_id=_api_key_actor(),
         reserved_until=body.get("reserved_until", 30),
         updated_by=body.get("updated_by", "Неизвестен"),
@@ -254,6 +254,8 @@ def patch_booking(booking_id: int):
         patch["paid_kaspi_qr"] = body["paid_kaspi_qr"]
     if "paid_cash" in body:
         patch["paid_cash"] = body["paid_cash"]
+    if "paid_avans" in body:
+        patch["paid_avans"] = body["paid_avans"]
     if "time_start" in body:
         patch["time_start"] = body["time_start"]
     if "time_end" in body:
@@ -511,5 +513,4 @@ def list_contacts():
         result.append(entry)
 
     result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
-    return jsonify({"ok": True, "contacts": result}), 200
-
+    return result
