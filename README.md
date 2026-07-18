@@ -199,7 +199,7 @@ POSTGRES_DSN=postgresql://dopshy:changeme@localhost:5432/dopshy POSTGRES_MAX_CON
 | `POSTGRES_DSN` | Yes | e.g. `postgresql://dopshy:changeme@postgres:5432/dopshy` |
 | `POSTGRES_PASSWORD` | Yes (Docker) | Used by the bundled Postgres container |
 | `POSTGRES_MAX_CONN` | No | Connection pool size (default 10) |
-| `MANAGER_API_KEY` | Yes (mgr) | Long random key shared with Apps Script |
+| `X_SERVICE_TOKEN` | Yes (mgr) | Long random key shared with Apps Script |
 | `MANAGER_RATE_LIMIT` | No | Per-IP rate limit (default 60/min) |
 | `KASPI_PAYMENT_URL` | Yes (Bot 1) | Kaspi pay-link sent on booking confirmation |
 | `GOOGLE_CREDENTIALS_PATH` | No | Path to service account JSON (default `./secrets/google_credentials.json`) |
@@ -258,7 +258,7 @@ Every mutation goes through `integrations/booking_service.py`, which returns a t
 Managers act on bookings inside Google Sheets:
 
 - A container-bound Apps Script (`apps_script/`) adds a menu, a new-booking sidebar, and an `onEdit` trigger that PATCHes cell changes to `manager_api`.
-- The backend exposes `/api/manager/bookings` (GET / POST / PATCH / DELETE), guarded by header `X-API-Key: $MANAGER_API_KEY` with an in-process per-IP rate limit.
+- The backend exposes `/api/manager/bookings` (GET / POST / PATCH / DELETE), guarded by header `X-API-Key: $X_SERVICE_TOKEN` with an in-process per-IP rate limit.
 - The sheet itself is a read-mostly mirror — bookings are computed from Postgres; the manager UI never edits authoritative data directly.
 
 To deploy the Apps Script:
@@ -273,7 +273,7 @@ clasp push
 In the script's **Project Settings → Script Properties**, set:
 
 - `API_BASE_URL` — the bot's public URL (e.g. `https://bot.dopshy.kz`)
-- `API_KEY` — same value as `MANAGER_API_KEY` on the bot
+- `API_KEY` — same value as `X_SERVICE_TOKEN` on the bot
 
 The first time, run **Допши → Настройка / API-ключ** from the sheet menu to validate.
 
@@ -315,7 +315,7 @@ This drops and recreates the ChromaDB collection (to avoid duplicate chunks) and
 | `PATCH` | `/api/manager/bookings/<id>` | Update booking |
 | `DELETE` | `/api/manager/bookings/<id>` | Cancel booking |
 
-All `/api/manager/*` endpoints require `X-API-Key: $MANAGER_API_KEY`.
+All `/api/manager/*` endpoints require `X-API-Key: $X_SERVICE_TOKEN`.
 
 ---
 

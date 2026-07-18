@@ -9,19 +9,47 @@ from integrations.repo.postgres import _conn
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
 def get_all_bookings() -> list[dict]:
+    """Every booking for the manager API list view (BotBookingRaw shape).
+
+    One row per booking (no payments join — payment_current is summed by the
+    endpoint via _combine_bookings_payments, so a booking with multiple payment
+    rows is not duplicated here).
+    """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT 
-                    b.id, b.field, b.customer_name, b.phone, b.time_start, b.time_end, b.price_total, b.state, b.source,
-                    b.notes, b.created_at, b.updated_at, b.date, b.group_transition,  p.amount
-                FROM bookings AS b
-                LEFT JOIN payments AS p
-                    ON p.booking_id = b.id
-                ORDER BY
-                    b.date,
-                    b.time_start,
-                    b.field;
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, created_at, updated_at, group_transition
+                FROM bookings
+                WHERE field IS NOT NULL AND date IS NOT NULL
+                  AND time_start IS NOT NULL AND time_end IS NOT NULL
+                ORDER BY date, time_start, field
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_fields_info() -> list[dict]:
+    """Active fields for the manager UI (BotFieldRow shape)."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, description, format, capacity
+                FROM fields
+                WHERE active = TRUE
+                ORDER BY id
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_field_prices() -> list[dict]:
+    """Time-of-day pricing rows (BotPriceRow shape)."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT format_name, pricing_type, price_per_hour
+                FROM field_prices
+                ORDER BY format_name, id
             """)
             return [dict(r) for r in cur.fetchall()]
 
@@ -139,18 +167,26 @@ def get_bookings_for_sheet() -> list[dict]:
             return result
 
 
-def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed")) -> list[dict]:
-    """Bookings between two dates (inclusive) for the manager API list view."""
+def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed"),
+                          field: int | None = None) -> list[dict]:
+    """Bookings between two dates (inclusive) for the manager API list view.
+
+    When `field` is given, only that field's bookings are returned; when None,
+    all fields are included.
+    """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
-                       paid_kaspi_qr, paid_cash, group_transition
+                       paid_kaspi_qr, paid_cash, created_at, updated_at, group_transition
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
+                  AND (%s::int IS NULL OR field = %s)
+
+                  AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
                 ORDER BY date, time_start, field
-            """, (start, end, list(states)))
+            """, (start, end, list(states), field, field))
             return [dict(r) for r in cur.fetchall()]
 
 

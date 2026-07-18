@@ -1,6 +1,23 @@
+# Bootstrap config — HTTP only. Serves the ACME challenge for BOTH domains so
+# certbot can issue the first certificates. The entrypoint swaps in
+# server.conf.template once the certs exist.
+
 server {
     listen 80;
     server_name ${SERVER_NAME};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 404;
+    }
+}
+
+server {
+    listen 80;
+    server_name ${API_SERVER_NAME};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;

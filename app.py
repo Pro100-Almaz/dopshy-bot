@@ -11,6 +11,7 @@ import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
+from flask_cors import CORS
 
 import config
 from handlers.message_batcher import enqueue_incoming_message
