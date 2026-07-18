@@ -1,6 +1,6 @@
 """Manager API blueprint — endpoints the Google Apps Script manager UI calls.
 
-Auth: X-API-Key header matched against config.MANAGER_API_KEY.
+Auth: X-API-Key header matched against config.X_SERVICE_TOKEN.
 Rate limit: config.MANAGER_RATE_LIMIT requests/min per client IP.
 
 All responses use the service envelope: {"ok": bool, "data"/"code"/"message"}.
@@ -75,10 +75,10 @@ def _authenticate():
     if request.method == "OPTIONS":
         return None
 
-    if not config.MANAGER_API_KEY:
+    if not config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "NOT_CONFIGURED",
                         "message": "Manager API is not configured."}), 503
-    if request.headers.get("X-API-Key", "") != config.MANAGER_API_KEY:
+    if request.headers.get("X-API-Key", "") != config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "UNAUTHORIZED", "message": "Bad API key."}), 401
     if _rate_limited(request.remote_addr or "unknown"):
         return jsonify({"ok": False, "code": "RATE_LIMITED",
@@ -100,7 +100,7 @@ def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> li
 
 
 def _api_key_actor() -> str:
-    return "manager:" + (config.MANAGER_API_KEY[:6] if config.MANAGER_API_KEY else "?")
+    return "manager:" + (config.X_SERVICE_TOKEN[:6] if config.X_SERVICE_TOKEN else "?")
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,18 @@ def list_bookings():
     rows = repo.get_bookings_in_range(
         start, end, states=("draft", "awaiting_payment", "confirmed", "unpaid")
     )
+    payments = booking_service.get_payments()
+    rows = _combine_bookings_payments(rows, payments)
+    return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
+
+
+@manager_api.get("/api/manager/bookings/all")
+def list_all_bookings():
+    """Every booking (all non-terminal states), deduped, with aggregated
+    payment info. Consumed by the backend's staff `GET /bookings`
+    (bookings:list-all). Mirrors `list_bookings` but without a date window.
+    """
+    rows = repo.get_all_bookings()
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
@@ -143,10 +155,12 @@ def get_bookings_in_range(start_date: str, end_date: str, field: int):
 
 @manager_api.get("/api/manager/fields")
 def get_fields_info():
-    prices = repo.get_field_prices() #list of prices
-    fields = repo.get_fields_info() # list of fields
-
-    return jsonify({"ok": True, "data": {"prices": prices, "fields": fields}}), 200
+    prices = repo.get_field_prices()  # list of BotPriceRow
+    fields = repo.get_fields_info()   # list of BotFieldRow
+    return jsonify({"ok": True, "data": {
+        "prices": [_serialize(p) for p in prices],
+        "fields": [_serialize(f) for f in fields],
+    }}), 200
 
 
 

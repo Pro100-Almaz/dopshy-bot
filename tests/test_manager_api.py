@@ -15,7 +15,7 @@ _HDR = {"X-API-Key": _KEY}
 
 @pytest.fixture
 def client():
-    config.MANAGER_API_KEY = _KEY
+    config.X_SERVICE_TOKEN = _KEY
     app = Flask(__name__)
     app.register_blueprint(manager_api)
     return app.test_client()
