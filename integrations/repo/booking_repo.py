@@ -20,7 +20,7 @@ def get_all_bookings() -> list[dict]:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
-                       paid_kaspi_qr, paid_cash, created_at, updated_at, group_transition
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
                 FROM bookings
                 WHERE field IS NOT NULL AND date IS NOT NULL
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
@@ -179,7 +179,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
-                       paid_kaspi_qr, paid_cash, created_at, updated_at, group_transition
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
                   AND (%s::int IS NULL OR field = %s)
