@@ -21,15 +21,18 @@ _END_OF_DAY = ("23:59", "24:00")
 
 
 def normalize_end_time(time_start: str, time_end: str) -> str:
-    """Normalize a midnight end-time to end-of-day.
+    """Normalize an end-of-day end-time to the stored 23:59 sentinel.
 
-    A booking ending at 00:00 means "until the end of the day", not a
+    A booking ending at 00:00 or 24:00 means "until the end of the day", not a
     day-crossing (transitive) range, so it should be stored as a single
-    booking. Return 23:59 in that case. A true zero-duration 00:00-00:00
-    range (start is also midnight) is left untouched so the caller can
-    reject it as invalid.
+    booking. Return 23:59 in that case. "24:00" is the explicit end-of-day
+    marker the manager frontend sends and is always end-of-day (even for a
+    full-day 00:00-24:00 slot). A true zero-duration 00:00-00:00 range (start
+    is also midnight) is left untouched so the caller can reject it as invalid.
     """
     ts, te = str(time_start)[:5], str(time_end)[:5]
+    if te == "24:00":
+        return "23:59"
     if te == "00:00" and ts != "00:00":
         return "23:59"
     return te
