@@ -14,7 +14,11 @@
   </head>
   <body>
     <label>Поле</label>
-    <select id="field"></select>
+    <select>
+      <option value="1">Поле 1 (6x6)</option>
+      <option value="2">Поле 2 (5x5)</option>
+      <option value="3">Поле 3 (5x5)</option>
+    </select>
 
     <label>Повторить</label>
     <select id="repeat">
@@ -61,14 +65,14 @@
     <div id="msg"></div>
 
     <script>
-      google.script.run.withSuccessHandler(function (opts) {
-        var sel = document.getElementById('field');
-        opts.forEach(function (o) {
-          var el = document.createElement('option');
-          el.value = o.id; el.textContent = o.label;
-          sel.appendChild(el);
-        });
-      }).getFieldOptions();
+      // google.script.run.withSuccessHandler(function (opts) {
+      //   var sel = document.getElementById('field');
+      //   opts.forEach(function (o) {
+      //     var el = document.createElement('option');
+      //     el.value = o.id; el.textContent = o.label;
+      //     sel.appendChild(el);
+      //   });
+      // }).getFieldOptions();
 
       function show(ok, text) {
         var m = document.getElementById('msg');
