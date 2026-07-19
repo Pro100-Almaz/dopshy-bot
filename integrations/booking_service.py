@@ -546,7 +546,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash"}
+_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash", "paid_avans"}
 _MANAGER_SLOT_FIELDS = ("field", "date", "time_start", "time_end")
 
 
@@ -606,9 +606,9 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
 
 _INSERT_BOOKING_SQL = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
-                          notes, price_total, state, source, client_token, start_at, end_at,
+                          notes, price_total, paid_avans, state, source, client_token, start_at, end_at,
                           group_repetition, group_transition, repeat, reserved_until)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', %s,
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', %s,
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
                                  (%s::date + %s::time) AT TIME ZONE %s,
@@ -623,7 +623,7 @@ _INSERT_BOOKING_SQL = """INSERT INTO bookings
 def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: str,
                          end_date: str, repeat: str = 'none',
                          customer: str | None = None, phone: str | None = None,
-                         notes: str | None = None, price_total=None,
+                         notes: str | None = None, price_total=None, prepayment=None,
                          actor_id: str | None = None, client_token: str | None = None,
                          format_: str | None = None, reserved_until: int = 30,
                          updated_by: str = 'manager') -> list[int]:
@@ -645,7 +645,7 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
         cur.execute(
             _INSERT_BOOKING_SQL,
             (phone, customer, d_str, st, et, int(field), format_,
-             notes, row_price, updated_by, client_token,
+             notes, row_price, prepayment, updated_by, client_token,
              d_str, st, config.BOOKING_TIMEZONE,
              d_str, et, config.BOOKING_TIMEZONE,
              group_repetition, group_transition,
@@ -780,7 +780,7 @@ def _split_day_segments(start_dt: datetime, end_dt: datetime):
 
 
 def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
-                                  notes: str | None = None, price_total=None, actor_id: str | None = None,
+                                  notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
                                   reserved_until: int = 30, updated_by: str = 'manager'
                                   ) -> dict:
     # atomic transaction is made by sharing a single db connection cursor to every insert operation
@@ -806,7 +806,7 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                         cur, field=field, date=d, time_start=ts, time_end=te,
                         end_date=d, repeat="none",
                         customer=customer, phone=phone, notes=notes,
-                        price_total=price_total, actor_id=actor_id,
+                        price_total=price_total, prepayment=prepayment, actor_id=actor_id,
                         reserved_until=reserved_until, updated_by=updated_by,
                     )
                     created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
