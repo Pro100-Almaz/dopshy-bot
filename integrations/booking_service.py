@@ -18,6 +18,7 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 import json
 import logging
 import uuid
+from decimal import Decimal
 from datetime import datetime, time, timedelta
 
 from utils import is_past_booking_time, normalize_end_time
@@ -30,6 +31,8 @@ import psycopg2.extras
 import config
 from handlers.payment.pricing import calculate_booking_price
 from integrations.repo.utils import _conn, _err, _ok
+from integrations.repo.history_repo import _record_history
+from integrations.status_labels import STATES_RUSSIAN as _STATES_RUSSIAN
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,26 @@ def _record_event(cur, booking_id: int, event: str, actor_type: str,
         "VALUES (%s, %s, %s, %s, %s)",
         (booking_id, event, actor_type, actor_id, note),
     )
+
+
+def _history_source(actor_type: str, actor_id: str | None = None) -> str:
+    """booking_history.source: 'whatsapp' for the bot, else the manager id/email."""
+    if actor_type == "whatsapp":
+        return "whatsapp"
+    return actor_id or actor_type
+
+
+def _record_status_change(cur, booking_id: int, old_status, new_status,
+                          source: str) -> None:
+    """Log a booking status transition to booking_history (no-op if unchanged).
+
+    Raw DB states are rendered via _STATES_RUSSIAN (uppercase RU labels).
+    """
+    if old_status is None or old_status == new_status:
+        return
+    _record_history(cur, booking_id, source, key="status_change",
+                    old_status=_STATES_RUSSIAN.get(old_status, old_status),
+                    new_status=_STATES_RUSSIAN.get(new_status, new_status))
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +178,8 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                      booking_id, booking_id),
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
+                _record_status_change(cur, booking_id, row["state"],
+                                      "awaiting_payment", "whatsapp")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
                 reserved_until = cur.fetchone()["reserved_until"]
     except psycopg2.errors.ExclusionViolation:
@@ -203,6 +228,10 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
                 )
                 _record_event(cur, booking_id, "payment_received", "whatsapp",
                               note=parsed.get("ref"))
+                _record_history(cur, booking_id, "whatsapp", key="payment_bot",
+                                amount=parsed.get("amount") or 0)
+                _record_status_change(cur, booking_id, row["state"],
+                                      "confirmed", "whatsapp")
     except psycopg2.errors.UniqueViolation:
         logger.warning("[BOOKING_SERVICE] duplicate receipt ref=%s for booking %d",
                        parsed.get("ref"), booking_id)
@@ -240,6 +269,8 @@ def reject_payment(booking_id: int, reason: str, parsed: dict | None = None) -> 
                 (booking_id, parsed.get("bank"), parsed.get("amount"), reason),
             )
             _record_event(cur, booking_id, "payment_rejected", "whatsapp", note=reason)
+            _record_history(cur, booking_id, "whatsapp", key="payment_rejected",
+                            reject_reason=reason or "")
     return _ok({"booking_id": booking_id})
 
 
@@ -260,6 +291,11 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
+                "SELECT state, date, customer_name, phone FROM bookings WHERE id = %s",
+                (booking_id,),
+            )
+            _prev = cur.fetchone()
+            cur.execute(
                 "UPDATE bookings SET state = 'cancelled', updated_at = NOW() FROM bookings "
                 "target WHERE target.id = %s AND "
                 "(bookings.id = target.id "
@@ -271,6 +307,13 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
             )
             if cur.fetchone():
                 _record_event(cur, booking_id, "cancelled", actor_type, actor_id, reason)
+                _record_history(
+                    cur, booking_id, _history_source(actor_type, actor_id),
+                    key="cancel_all_bookings",
+                    date=_prev["date"] if _prev else "",
+                    customer_name=(_prev["customer_name"] if _prev else "") or "",
+                    customer_phone=(_prev["phone"] if _prev else "") or "",
+                )
                 cur.execute(
                     "DELETE FROM booking_sessions WHERE booking_id = %s", (booking_id,)
                 )
@@ -421,6 +464,8 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                     note=json.dumps({"from": old_snap, "to": new_snap},
                                     ensure_ascii=False, default=str),
                 )
+                _record_status_change(cur, booking_id, row["state"], "cancelled",
+                                      "whatsapp")
 
                 # 2) Insert new booking(s) with state preserved.
                 # TRANSITIVE BOOKING: if new range crosses midnight, create two bookings
@@ -548,6 +593,25 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
 _MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash", "paid_avans"}
 _MANAGER_SLOT_FIELDS = ("field", "date", "time_start", "time_end")
 
+# Manager-editable payment-amount columns → their history template key.
+_PAYMENT_HISTORY_KEYS = {
+    "paid_avans":    "manager_avans_change",
+    "paid_kaspi_qr": "manager_kaspi_qr_change",
+    "paid_cash":     "manager_cash_change",
+}
+
+
+def _to_decimal(v) -> Decimal:
+    """Coerce a money value (Decimal/int/float/str/None) to Decimal for comparison."""
+    return Decimal(str(v)) if v is not None else Decimal(0)
+
+
+def _fmt_amount(v) -> str:
+    """Money value for history text: plain digits, trailing .00 dropped."""
+    d = _to_decimal(v)
+    d = d.to_integral_value() if d == d.to_integral_value() else d.normalize()
+    return f"{d:f}"
+
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
     """Manager edit of free-edit fields (customer_name, notes, price_total, state, …)
@@ -588,14 +652,35 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
     set_clause = ", ".join(set_parts) + ", updated_at = NOW()"
     vals.append(booking_id)
 
+    # Columns whose before-values we need to render history (state + payments).
+    history_cols = (["state"] if "state" in patch else []) + \
+                   [f for f in _PAYMENT_HISTORY_KEYS if f in patch]
+
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                old = {}
+                if history_cols:
+                    cur.execute(
+                        f"SELECT {', '.join(history_cols)} FROM bookings WHERE id = %s",
+                        (booking_id,),
+                    )
+                    _prev = cur.fetchone()
+                    old = dict(_prev) if _prev else {}
                 cur.execute(
                     f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
                 )
                 if cur.fetchone():
+                    src = _history_source(fields.get("source", "manager"), actor_id)
                     _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
+                    if "state" in patch:
+                        _record_status_change(cur, booking_id, old.get("state"),
+                                              patch["state"], src)
+                    for f, key in _PAYMENT_HISTORY_KEYS.items():
+                        if f in patch and _to_decimal(old.get(f)) != _to_decimal(patch[f]):
+                            _record_history(cur, booking_id, src, key=key,
+                                            old_amount=_fmt_amount(old.get(f)),
+                                            new_amount=_fmt_amount(patch[f]))
                     return _ok({"booking_id": booking_id})
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
@@ -657,6 +742,8 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
         client_token = str(uuid.uuid4())
         booking_id = cur.fetchone()["id"]
         _record_event(cur, booking_id, "manager_created", updated_by, actor_id)
+        _record_history(cur, booking_id, _history_source(updated_by, actor_id),
+                        key="booking_created")
         ids.append(booking_id)
     return ids
 

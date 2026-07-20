@@ -1,0 +1,13 @@
+{
+  "_comment": "Dynamic templates for booking_history.description. Placeholders are [UPPERCASE] tokens; integrations/repo/history_repo.py:render_description(key, **params) substitutes them (a param `old_status` fills the [OLD_STATUS] token). Keep tokens in sync with the callers.",
+
+  "status_change": "Изменение статуса с [OLD_STATUS] на [NEW_STATUS].",
+  "payment_bot": "Оплата [AMOUNT]тг через бота",
+  "manager_avans_change": "Изменен сумма полученного аванса с [OLD_AMOUNT] на [NEW_AMOUNT]",
+  "manager_kaspi_qr_change": "Изменен сумма оплаты через KaspiQR c [OLD_AMOUNT] на [NEW_AMOUNT]",
+  "manager_cash_change": "Изменен сумма оплаты наличными с [OLD_AMOUNT] на [NEW_AMOUNT]",
+
+  "booking_created": "Создание брони.",
+  "payment_rejected": "Оплата отклонена. [REJECT_REASON]",
+  "cancel_all_bookings": "Все последующие брони начиная с [DATE] отменены для клиента [CUSTOMER_NAME] [CUSTOMER_PHONE]"
+}

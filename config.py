@@ -70,6 +70,7 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # ---------------------------------------------------------------------------
 X_SERVICE_TOKEN: str = os.getenv("X_SERVICE_TOKEN", "")
 MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
+PAGE_SIZE: int = int(os.getenv("PAGE_SIZE", "20"))  # default rows per page for paginated endpoints
 
 # Origins allowed to call the browser-facing manager API (CORS). Comma-separated
 # env list, e.g. "https://a.example.com,https://b.example.com". "*" (the default)

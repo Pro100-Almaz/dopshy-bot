@@ -26,7 +26,7 @@ from integrations.repo.academy_repo import deactivate_group_repo, setting_traini
     create_or_update_group, on_manual_group_edit
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
     upsert_booking_row
-from integrations.repo import booking_repo as repo, postgres
+from integrations.repo import booking_repo as repo, postgres, history_repo
 from integrations.repo.bot_pause_repo import get_statuses, normalize_phone, set_bot_paused
 from chat.conversation import list_contacts as _list_conversation_contacts
 from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
@@ -143,9 +143,18 @@ def list_all_bookings():
 
 @manager_api.get("/api/manager/bookings/<int:booking_id>")
 def get_booking(booking_id: int):
+    """Full detail for a single booking, with aggregated payment info.
+
+    Mirrors the list endpoints: the raw booking row is enriched with the
+    bot-collected payment total (`paid_bot`), the latest receipt date
+    (`last_receipt_date`) and the manual payment buckets, so a manager can see
+    everything about one booking in a single round trip.
+    """
     row = repo.get_booking(booking_id)
     if not row:
         return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Бронь не найдена."}), 404
+    payments = booking_service.get_payments()
+    row = _combine_bookings_payments([row], payments)[0]
     return jsonify({"ok": True, "data": _serialize(row)}), 200
 
 
@@ -179,6 +188,96 @@ def get_bookings_in_range(start_date: str, end_date: str):
         "ok": True,
         "data": [_serialize(r) for r in rows]
     }), 200
+
+
+def _page_args() -> tuple[int, int, int]:
+    """Parse ?page and ?page_size into (page, page_size, offset).
+
+    page is 1-based; page_size defaults to config.PAGE_SIZE and is capped at 100.
+    Invalid values fall back to defaults rather than erroring.
+    """
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.args.get("page_size", config.PAGE_SIZE))
+    except (TypeError, ValueError):
+        page_size = config.PAGE_SIZE
+    page_size = max(1, min(page_size, 100))
+    return page, page_size, (page - 1) * page_size
+
+
+def _paginated(rows: list[dict], total: int, page: int, page_size: int):
+    return jsonify({
+        "ok": True,
+        "data": [_serialize(r) for r in rows],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size,
+    }), 200
+
+
+@manager_api.get("/api/manager/history")
+def list_history():
+    """Booking change history (newest first), paginated.
+
+    Optional filters:
+      ?source=<exact>            exact source ('whatsapp' or a manager id/email)
+      ?channel=whatsapp|manager  bot-driven vs any manager-driven
+    Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
+    Without a filter, returns every history row.
+    """
+    page, page_size, offset = _page_args()
+    source = request.args.get("source")
+    channel = request.args.get("channel")
+    if source:
+        rows, total = history_repo.get_history_by_source(source, page_size, offset)
+    elif channel == "whatsapp":
+        rows, total = history_repo.get_whatsapp_history(page_size, offset)
+    elif channel == "manager":
+        rows, total = history_repo.get_manager_history(limit=page_size, offset=offset)
+    else:
+        rows, total = history_repo.get_all_history(page_size, offset)
+    return _paginated(rows, total, page, page_size)
+
+
+@manager_api.get("/api/manager/history/range/<string:start_date>/<string:end_date>")
+def get_history_in_range(start_date: str, end_date: str):
+    """History rows with created_at in [start_date, end_date] (inclusive), paginated.
+
+    Bare dates ('YYYY-MM-DD') expand the end to end-of-day so the whole
+    end date is included; full timestamps are passed through unchanged.
+    Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
+    """
+    page, page_size, offset = _page_args()
+    end = end_date if len(end_date) > 10 else f"{end_date} 23:59:59.999999"
+    rows, total = history_repo.get_history_between(start_date, end, page_size, offset)
+    return _paginated(rows, total, page, page_size)
+
+
+@manager_api.get("/api/manager/history/source/<string:source>")
+def get_history_by_source(source: str):
+    """History rows from one exact source ('whatsapp' or a manager id/email),
+    newest first, paginated.
+
+    Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
+    """
+    page, page_size, offset = _page_args()
+    rows, total = history_repo.get_history_by_source(source, page_size, offset)
+    return _paginated(rows, total, page, page_size)
+
+
+@manager_api.get("/api/manager/bookings/<int:booking_id>/history")
+def get_booking_history(booking_id: int):
+    """Chronological change history for a single booking (oldest first), paginated.
+
+    Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
+    """
+    page, page_size, offset = _page_args()
+    rows, total = history_repo.get_history_for_booking(booking_id, page_size, offset)
+    return _paginated(rows, total, page, page_size)
 
 
 @manager_api.get("/api/manager/fields")
