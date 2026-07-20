@@ -221,7 +221,9 @@ def get_booking(booking_id: int) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, source, created_at, group_transition
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
+                       group_transition
                 FROM bookings WHERE id = %s
             """, (booking_id,))
             row = cur.fetchone()

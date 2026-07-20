@@ -143,9 +143,18 @@ def list_all_bookings():
 
 @manager_api.get("/api/manager/bookings/<int:booking_id>")
 def get_booking(booking_id: int):
+    """Full detail for a single booking, with aggregated payment info.
+
+    Mirrors the list endpoints: the raw booking row is enriched with the
+    bot-collected payment total (`paid_bot`), the latest receipt date
+    (`last_receipt_date`) and the manual payment buckets, so a manager can see
+    everything about one booking in a single round trip.
+    """
     row = repo.get_booking(booking_id)
     if not row:
         return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Бронь не найдена."}), 404
+    payments = booking_service.get_payments()
+    row = _combine_bookings_payments([row], payments)[0]
     return jsonify({"ok": True, "data": _serialize(row)}), 200
 
 
