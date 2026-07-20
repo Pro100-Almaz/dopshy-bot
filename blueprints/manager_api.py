@@ -128,6 +128,7 @@ def list_all_bookings():
     (bookings:list-all). Mirrors `list_bookings` but without a date window.
     """
     page = request.args.get("page", type=int)
+    search = request.args.get("search", type=str)
     if page is not None and page < 1:
         return jsonify({
             "ok": False,
@@ -135,7 +136,7 @@ def list_all_bookings():
             "message": "page must be a positive integer."
         }), 400
 
-    rows = repo.get_all_bookings(page=page)
+    rows = repo.get_all_bookings(page=page, search=search)
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
@@ -163,6 +164,7 @@ def get_bookings_in_range(start_date: str, end_date: str):
     # field omitted from the URL → None → all fields in the range.
     page = request.args.get("page", type=int)
     field = request.args.get("field", type=int)
+    search = request.args.get("search", type=str)
 
     if page is not None and page < 1:
         return jsonify({
@@ -180,7 +182,8 @@ def get_bookings_in_range(start_date: str, end_date: str):
         }), 400
 
     rows = repo.get_bookings_in_range(
-        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid"), field=field, page=page
+        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid"),
+        field=field, page=page, search=search
     )
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)

@@ -8,12 +8,15 @@ from integrations.repo.postgres import _conn
 
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
-def get_all_bookings(page: int| None = None) -> list[dict]:
+def get_all_bookings(page: int| None = None, search: str | None = None) -> list[dict]:
     """Every booking for the manager API list view (BotBookingRaw shape).
 
     One row per booking (no payments join — payment_current is summed by the
     endpoint via _combine_bookings_payments, so a booking with multiple payment
     rows is not duplicated here).
+
+    When `search` is given, rows are filtered to those whose id, customer_name
+    or phone match the search term (case-insensitive, partial match).
     """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -24,11 +27,16 @@ def get_all_bookings(page: int| None = None) -> list[dict]:
                 FROM bookings
                 WHERE field IS NOT NULL AND date IS NOT NULL
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
-                ORDER BY date, time_start, field, id
             """
 
-
             parameters = []
+
+            search_clause, search_params = _build_search_clause(search)
+            query += search_clause
+            parameters.extend(search_params)
+
+            query += " ORDER BY date, time_start, field, id"
+
             if page is not None:
                 offset = (page - 1) * PAGE_SIZE
                 query += """ LIMIT %s OFFSET %s"""
@@ -179,12 +187,37 @@ def get_bookings_for_sheet() -> list[dict]:
 
 PAGE_SIZE = 20
 
+
+def _build_search_clause(search: str | None) -> tuple[str, list]:
+    """Build a WHERE fragment (and its params) that filters bookings by id,
+    customer_name or phone. Returns ("", []) when no search term is given.
+
+    The match is case-insensitive and partial: id is compared as text so a
+    substring of the numeric id also matches.
+    """
+    if not search:
+        return "", []
+
+    like = f"%{search.strip()}%"
+    clause = """
+                  AND (
+                      CAST(id AS TEXT) ILIKE %s
+                      OR customer_name ILIKE %s
+                      OR phone ILIKE %s
+                  )
+    """
+    return clause, [like, like, like]
+
+
 def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed"),
-                          field: int | None = None, page: int | None = None) -> list[dict]:
+                          field: int | None = None, page: int | None = None,
+                          search: str | None = None) -> list[dict]:
     """Bookings between two dates (inclusive) for the manager API list view.
 
     When `field` is given, only that field's bookings are returned; when None,
-    all fields are included.
+    all fields are included. When `search` is given, rows are further filtered
+    to those whose id, customer_name or phone match the search term
+    (case-insensitive, partial match).
     """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -197,12 +230,17 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                   AND (%s::int IS NULL OR field = %s)
 
                   AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
-                ORDER BY date, time_start, field, id
             """
 
             parameters = [
                 start, end, list(states), field, field
             ]
+
+            search_clause, search_params = _build_search_clause(search)
+            query += search_clause
+            parameters.extend(search_params)
+
+            query += " ORDER BY date, time_start, field, id"
 
             if page is not None:
                 offset = (page - 1) * PAGE_SIZE
