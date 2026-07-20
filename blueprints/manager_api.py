@@ -171,7 +171,7 @@ def get_bookings_in_range(start_date: str, end_date: str):
         }), 400
 
     rows = repo.get_bookings_in_range(
-        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid", "pending"), field=field, page=page
+        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid"), field=field, page=page
     )
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)
