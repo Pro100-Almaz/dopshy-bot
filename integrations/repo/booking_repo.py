@@ -8,7 +8,7 @@ from integrations.repo.postgres import _conn
 
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
-def get_all_bookings() -> list[dict]:
+def get_all_bookings(page: int| None = None) -> list[dict]:
     """Every booking for the manager API list view (BotBookingRaw shape).
 
     One row per booking (no payments join — payment_current is summed by the
@@ -17,15 +17,26 @@ def get_all_bookings() -> list[dict]:
     """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
+            query = """
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
                 FROM bookings
                 WHERE field IS NOT NULL AND date IS NOT NULL
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
-                ORDER BY date, time_start, field
-            """)
+                ORDER BY date, time_start, field, id
+            """
+
+
+            parameters = []
+            if page is not None:
+                offset = (page - 1) * PAGE_SIZE
+                query += """ LIMIT %s OFFSET %s"""
+
+                parameters.extend([PAGE_SIZE, offset])
+
+            cur.execute(query, parameters)
+
             return [dict(r) for r in cur.fetchall()]
 
 
@@ -166,9 +177,10 @@ def get_bookings_for_sheet() -> list[dict]:
                     r["updated_at"] = r["updated_at"].astimezone(ALMATY_TZ)
             return result
 
+PAGE_SIZE = 20
 
 def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed"),
-                          field: int | None = None) -> list[dict]:
+                          field: int | None = None, page: int | None = None) -> list[dict]:
     """Bookings between two dates (inclusive) for the manager API list view.
 
     When `field` is given, only that field's bookings are returned; when None,
@@ -176,7 +188,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
     """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
+            query = """
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
@@ -185,8 +197,21 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                   AND (%s::int IS NULL OR field = %s)
 
                   AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
-                ORDER BY date, time_start, field
-            """, (start, end, list(states), field, field))
+                ORDER BY date, time_start, field, id
+            """
+
+            parameters = [
+                start, end, list(states), field, field
+            ]
+
+            if page is not None:
+                offset = (page - 1) * PAGE_SIZE
+                query += """ LIMIT %s OFFSET %s"""
+
+                parameters.extend([PAGE_SIZE, offset])
+
+            cur.execute(query, parameters)
+
             return [dict(r) for r in cur.fetchall()]
 
 
