@@ -127,7 +127,15 @@ def list_all_bookings():
     payment info. Consumed by the backend's staff `GET /bookings`
     (bookings:list-all). Mirrors `list_bookings` but without a date window.
     """
-    rows = repo.get_all_bookings()
+    page = request.args.get("page", type=int)
+    if page is not None and page < 1:
+        return jsonify({
+            "ok": False,
+            "code": "INVALID",
+            "message": "page must be a positive integer."
+        }), 400
+
+    rows = repo.get_all_bookings(page=page)
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)
     return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
@@ -141,10 +149,29 @@ def get_booking(booking_id: int):
     return jsonify({"ok": True, "data": _serialize(row)}), 200
 
 
-@manager_api.get("/api/manager/bookings/range/<string:start_date>/<string:end_date>/<int:field>")
-def get_bookings_in_range(start_date: str, end_date: str, field: int):
+@manager_api.get("/api/manager/bookings/range/<string:start_date>/<string:end_date>")
+def get_bookings_in_range(start_date: str, end_date: str):
+    # field omitted from the URL → None → all fields in the range.
+    page = request.args.get("page", type=int)
+    field = request.args.get("field", type=int)
+
+    if page is not None and page < 1:
+        return jsonify({
+            "ok": False,
+            "code": "INVALID",
+            "message": "page must be a positive integer."
+        }), 400
+
+
+    if field is not None and not 1 <= field <= 3:
+        return jsonify({
+            "ok": False,
+            "code": "INVALID_FIELD",
+            "message": "field must be between 1 and 3.",
+        }), 400
+
     rows = repo.get_bookings_in_range(
-        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid"), field=field
+        start_date, end_date, states=("draft", "awaiting_payment", "confirmed", "unpaid"), field=field, page=page
     )
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)
@@ -290,22 +317,50 @@ def create_booking():
 
 @manager_api.post("/api/manager/bookings/batch")
 def create_bookings_batch():
-    """Create bookings for a single customer from a list of slots.
+    """Create bookings for a single customer from a list of (repeating) slots.
 
-    Body: {slots: [{field, date, time_start, time_end}, ...],
-           customer?, phone?, notes?, price_total?, reserved_until?, updated_by?}
-    Overlapping/adjacent slots on the same field are merged (across midnight
-    too) before creation. See booking_service.manager_create_bookings_batch.
+    Body: {slots: [{field, date, time_start, time_end,
+                    repeat_mode?, repeat_until?}, ...],
+           customer?, phone?, notes?, prepayment?, reserved_until?, updated_by?}
+    Each slot is one merged interval; the backend expands `repeat_mode`
+    (none|daily|weekly|monthly, until `repeat_until`) into one booking per
+    occurrence. Creation is atomic: a single conflict rejects the whole batch.
+    See booking_service.manager_create_bookings_batch.
     """
     body = request.get_json(silent=True) or {}
     slots = body.get("slots")
     if not isinstance(slots, list) or not slots:
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "slots must be a non-empty list."}), 400
+
+    valid_modes = ("none", "daily", "weekly", "monthly")
+    total_occurrences = 0
     for s in slots:
         if not isinstance(s, dict) or not all(s.get(k) for k in ("field", "date", "time_start", "time_end")):
             return jsonify({"ok": False, "code": "INVALID",
                             "message": "each slot needs field, date, time_start, time_end."}), 400
+        mode = s.get("repeat_mode") or "none"
+        if mode not in valid_modes:
+            return jsonify({"ok": False, "code": "INVALID",
+                            "message": f"repeat_mode must be one of {valid_modes}."}), 400
+        until = s.get("repeat_until")
+        if mode != "none":
+            if not until:
+                return jsonify({"ok": False, "code": "INVALID",
+                                "message": "repeat_until is required when repeat_mode != none."}), 400
+            if str(until) < str(s["date"]):
+                return jsonify({"ok": False, "code": "INVALID",
+                                "message": "repeat_until must be >= date."}), 400
+        try:
+            total_occurrences += len(booking_service.occurrence_dates(
+                str(s["date"]), str(until or s["date"]), mode))
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "code": "INVALID",
+                            "message": "invalid date or repeat_until."}), 400
+
+    if total_occurrences > 1000:
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "too many occurrences (max 1000); shorten the repeat range."}), 400
 
     res = booking_service.manager_create_bookings_batch(
         slots,
@@ -324,8 +379,20 @@ def create_bookings_batch():
             if r.get("booking_id"):
                 booking_row = repo.get_booking(r["booking_id"])
                 _single_table_write(booking_row)
+        data = res.get("data") or {}
+        return jsonify({"ok": True,
+                        "created_count": data.get("created_count", 0),
+                        "booking_ids": data.get("booking_ids", []),
+                        "data": data}), 200
 
-    return jsonify(res), (200 if res["ok"] else 409)
+    # Conflict ->  409 with the precise collision list the FE renders.
+    if res.get("error") == "conflict":
+        return jsonify({"ok": False, "error": "conflict",
+                        "conflicts": res.get("conflicts", []),
+                        "code": res.get("code"),
+                        "message": res.get("message")}), 409
+
+    return jsonify(res), 409
 
 
 @manager_api.patch("/api/manager/bookings/<int:booking_id>")
