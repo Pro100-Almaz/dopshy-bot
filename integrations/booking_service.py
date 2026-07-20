@@ -21,7 +21,6 @@ import uuid
 from datetime import datetime, time, timedelta
 
 from utils import is_past_booking_time, normalize_end_time
-from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -636,16 +635,20 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
     group_repetition = str(uuid.uuid4())
 
     ids: list[int] = []
-    for d, st, et, group_transition, is_latter in dates:
+    for i, (d, st, et, group_transition, is_latter) in enumerate(dates):
         d_str = datetime.strftime(d, format="%Y-%m-%d")
         row_price = price_total
         if row_price is None:
             row_price = calculate_booking_price(format_, d_str, st, et)
         skip_reserved = is_repetitive or is_latter
+        # The prepayment/avans belongs to the MAIN booking only
+        row_avans = prepayment if i == 0 else 0
+        row_notes = notes if i == 0 else None
+
         cur.execute(
             _INSERT_BOOKING_SQL,
             (phone, customer, d_str, st, et, int(field), format_,
-             notes, row_price, prepayment, updated_by, client_token,
+             row_notes, row_price, row_avans, updated_by, client_token,
              d_str, st, config.BOOKING_TIMEZONE,
              d_str, et, config.BOOKING_TIMEZONE,
              group_repetition, group_transition,
@@ -692,39 +695,65 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
     return _ok({"booking_id": ids[-1], "status": "ОЖИДАНИЕ"})
 
 
+def occurrence_dates(start_date, end_date, repeat):
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = max(datetime.strptime(end_date, "%Y-%m-%d"), start)
+
+    if repeat == "none":
+        return [start]
+
+    out: list[datetime] = []
+    if repeat == "daily":
+        step = timedelta(days=1)
+        cur = start
+        while cur <= end:
+            out.append(cur)
+            cur += step
+    elif repeat == "weekly":
+        step = timedelta(weeks=1)
+        cur = start
+        while cur <= end:
+            out.append(cur)
+            cur += step
+    elif repeat == "monthly":
+        base_month = start.year * 12 + (start.month - 1)
+        i = 0
+        while True:
+            ym = base_month + i
+            year, month = ym // 12, ym % 12 + 1
+            if datetime(year, month, 1) > end:
+                break
+            try:
+                cand = start.replace(year=year, month=month)
+            except ValueError:
+                i += 1
+                continue
+            if start <= cand <= end:
+                out.append(cand)
+            i += 1
+    else:
+        raise ValueError("Unknown repeat type")
+    return out
+
+
 def generate_dates(start_date, end_date, start_time, end_time, repeat):
     """Yield (date, start_time, end_time, group_transition, is_latter) tuples.
 
     TRANSITIVE BOOKING: when start_time > end_time (day transition), yields two
-    entries per iteration — first half (start→23:59:59, is_latter=False) and
+    entries per occurrence — first half (start→23:59:59, is_latter=False) and
     second half (00:00→end, is_latter=True). The latter booking should not get
     a reserved_until value since payments are checked on the former.
     """
-    current = datetime.strptime(start_date, "%Y-%m-%d")
-    end = max(datetime.strptime(end_date, "%Y-%m-%d"), current)
-    # A midnight end (00:00) means "until end of day" → single booking, not a
-    # day-crossing pair with a redundant 00:00→00:00 second half.
     end_time = normalize_end_time(start_time, end_time)
     transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
-    while current <= end:
+    for current in occurrence_dates(start_date, end_date, repeat):
         group_transition = str(uuid.uuid4())
         if transitive:
             yield current, start_time, "23:59:59", group_transition, False
             yield current + timedelta(days=1), "00:00", end_time, group_transition, True
         else:
             yield current, start_time, end_time, group_transition, False
-
-        if repeat == "none":
-            break
-        elif repeat == "daily":
-            current += timedelta(days=1)
-        elif repeat == "weekly":
-            current += timedelta(weeks=1)
-        elif repeat == "monthly":
-            current += relativedelta(months=1)
-        else:
-            raise ValueError("Unknown repeat type")
 
 
 def _merge_slots(slots: list[dict]) -> list[tuple]:
@@ -779,39 +808,100 @@ def _split_day_segments(start_dt: datetime, end_dt: datetime):
         cur = next_midnight
 
 
+_BLOCKING_STATES = ("draft", "awaiting_payment", "confirmed", "unpaid")
+
+def _conflict(conflicts: list[dict]) -> dict:
+    """Conflict envelope: nothing was created, `conflicts` lists what collided."""
+    return {"ok": False, "code": "SLOT_TAKEN", "error": "conflict",
+            "conflicts": conflicts, "data": None,
+            "message": "Часть слотов уже занята — ни одна бронь не создана."}
+
+
 def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
                                   notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
                                   reserved_until: int = 30, updated_by: str = 'manager'
                                   ) -> dict:
-    # atomic transaction is made by sharing a single db connection cursor to every insert operation
-    # Flatten merged intervals into concrete per-day (field, date, start, end) segments.
-    segments: list[tuple] = []
-    for field, start_dt, end_dt in _merge_slots(slots):
-        if end_dt.date() <= start_dt.date() + timedelta(days=1):
-            segments.append((field, start_dt.strftime("%Y-%m-%d"),
-                             start_dt.strftime("%H:%M"), end_dt.strftime("%H:%M")))
-        else:
-            for d, ts, te in _split_day_segments(start_dt, end_dt):
-                segments.append((field, d, ts, te))
+    """Create bookings for a batch of (possibly repeating) merged intervals.
 
-    if not segments:
+    Each slot is ``{field, date, time_start, time_end, repeat_mode?, repeat_until?}``.
+    Every slot is expanded to its occurrence dates (see ``occurrence_dates``);
+    each occurrence becomes one booking (day-crossing intervals split into two
+    linked rows). The whole batch is atomic: if ANY occurrence overlaps an
+    existing booking, nothing is created and the collisions are returned.
+
+    Request-shape validation (enum, required repeat_until, occurrence cap) is
+    done by the endpoint; this layer assumes normalized input.
+    """
+    from integrations.booking import check_range_free  # local import avoids import cycle
+
+    if not slots:
         return _err("INVALID", "Не удалось сформировать ни одной брони из слотов.")
 
+    # Expand every slot once; reuse the expansion for both the conflict
+    # pre-check and the covering date range of the existing-bookings query.
+    expanded: list[dict] = []          # per-slot: normalized fields + occurrence base dates
+    min_date: datetime | None = None
+    max_date: datetime | None = None
+    fields: set[int] = set()
+    for s in slots:
+        field = int(s["field"])
+        date = str(s["date"])
+        ts = str(s["time_start"])[:5]
+        te_raw = str(s["time_end"])[:5]
+        te = normalize_end_time(ts, te_raw)          # 24:00 / 00:00 → 23:59
+        repeat_mode = s.get("repeat_mode") or "none"
+        repeat_until = s.get("repeat_until") or date
+        bases = occurrence_dates(date, repeat_until, repeat_mode)
+        fields.add(field)
+        for b in bases:
+            min_date = b if min_date is None else min(min_date, b)
+            # +1 day so the second half of a day-crossing occurrence is covered.
+            top = b + timedelta(days=1)
+            max_date = top if max_date is None else max(max_date, top)
+        expanded.append({"field": field, "ts": ts, "te": te, "te_raw": te_raw,
+                         "repeat_mode": repeat_mode, "repeat_until": repeat_until,
+                         "bases": bases})
+
     created: list[dict] = []
+    booking_ids: list[int] = []
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                for field, d, ts, te in segments:
+                cur.execute(
+                    """SELECT field, date, time_start, time_end
+                         FROM bookings
+                        WHERE field = ANY(%s) AND date BETWEEN %s AND %s
+                          AND state <> 'cancelled' AND state = ANY(%s)
+                          AND time_start IS NOT NULL AND time_end IS NOT NULL""",
+                    (sorted(fields), min_date.strftime("%Y-%m-%d"),
+                     max_date.strftime("%Y-%m-%d"), list(_BLOCKING_STATES)),
+                )
+                booked = [dict(r) for r in cur.fetchall()]
+
+                conflicts: list[dict] = []
+                for e in expanded:
+                    for b in e["bases"]:
+                        d_str = b.strftime("%Y-%m-%d")
+                        if not check_range_free(booked, d_str, e["ts"], e["te"], e["field"]):
+                            conflicts.append({"field": e["field"], "date": d_str,
+                                              "time_start": e["ts"], "time_end": e["te_raw"]})
+                if conflicts:
+                    return _conflict(conflicts)
+
+                for e in expanded:
                     ids = _insert_booking_rows(
-                        cur, field=field, date=d, time_start=ts, time_end=te,
-                        end_date=d, repeat="none",
+                        cur, field=e["field"], date=e["bases"][0].strftime("%Y-%m-%d"),
+                        time_start=e["ts"], time_end=e["te_raw"],
+                        end_date=e["repeat_until"], repeat=e["repeat_mode"],
                         customer=customer, phone=phone, notes=notes,
                         price_total=price_total, prepayment=prepayment, actor_id=actor_id,
                         reserved_until=reserved_until, updated_by=updated_by,
                     )
+                    booking_ids.extend(ids)
                     created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
     except psycopg2.errors.ExclusionViolation:
-        return _err("SLOT_TAKEN",
-                    "Часть слотов уже занята — ни одна бронь не создана.")
+        # Lost the race with a concurrent booking after the pre-check passed.
+        return _conflict([])
 
-    return _ok({"created": created})
+    return _ok({"created": created, "booking_ids": booking_ids,
+                "created_count": len(booking_ids)})
