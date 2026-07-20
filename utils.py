@@ -49,6 +49,56 @@ def display_end_time(time_end) -> str:
     return "00:00" if te in _END_OF_DAY else te
 
 
+def is_valid_time_str(value) -> bool:
+    """True if value is a real 24-hour time in HH:MM form.
+
+    Accepts 00:00–23:59 and the end-of-day marker 24:00. Rejects impossible
+    values the LLM extractor may emit, e.g. "24:30", "25:00", "18:70", so
+    downstream datetime parsing never raises.
+    """
+    if not value:
+        return False
+    s = str(value)[:5]
+    if s == "24:00":
+        return True
+    try:
+        datetime.strptime(s, "%H:%M")
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def is_valid_date_str(value) -> bool:
+    """True if value is a real calendar date in YYYY-MM-DD form.
+
+    Rejects impossible values the LLM extractor may emit, e.g. "2026-13-40",
+    "2026-02-30", so downstream date parsing never raises.
+    """
+    if not value:
+        return False
+    try:
+        date.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def parse_player_count(value) -> int | None:
+    """Return a positive int player count, or None if value isn't a valid one.
+
+    Guards against the extractor emitting a non-integer (e.g. "много", 3.5,
+    "10 человек") where int() would otherwise raise. Invalid input becomes
+    None rather than being coerced.
+    """
+    if value is None:
+        return None
+    try:
+        n = int(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+    return n if n > 0 else None
+
+
 def is_past_booking_time(date_str: str, time_start_str: str | None = None) -> bool:
     """True if the booking date (+ optional start time) has already passed in BOOKING_TIMEZONE."""
     now = now_almaty()

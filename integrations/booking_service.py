@@ -756,7 +756,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                            client_token: str | None = None,
                            format_: str | None = None, reserved_until: int = 30,
                            updated_by: str = 'manager') -> dict:
-    """Manager-created booking: DRAFT is skipped, goes straight to CONFIRMED."""
+    """Manager-created booking: DRAFT is skipped, inserted directly as awaiting_payment."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

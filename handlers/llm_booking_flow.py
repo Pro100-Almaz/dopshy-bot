@@ -42,7 +42,13 @@ from integrations import booking_service
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
-from utils import is_past_booking_time, normalize_end_time
+from utils import (
+    is_past_booking_time,
+    is_valid_date_str,
+    is_valid_time_str,
+    normalize_end_time,
+    parse_player_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,10 +211,27 @@ class LlmBookingFlowHandler:
         """
         data["lang"] = lang
 
+        # Guard against malformed values the extractor may emit despite the
+        # prompt (e.g. "24:30", "2026-13-40", a non-numeric player count).
+        # Invalid data is dropped to None — never normalized/guessed — so the
+        # flow simply re-asks for it instead of crashing on datetime parsing.
+        if not is_valid_date_str(data.get("date")):
+            if data.get("date"):
+                logger.warning("[LLM_FLOW] Dropping invalid date: %r", data.get("date"))
+            data["date"] = None
+        for key in ("time_start", "time_end"):
+            if data.get(key) and not is_valid_time_str(data[key]):
+                logger.warning("[LLM_FLOW] Dropping invalid %s: %r", key, data[key])
+                data[key] = None
+        data["players"] = parse_player_count(data.get("players"))
+
         for key in ("time_start", "time_end"):
             if data.get(key):
+                # "24:00" (end-of-day) isn't a parseable clock time; floor it as
+                # 00:00 — normalize_end_time() below restores the end-of-day value.
+                hhmm = "00:00" if str(data[key])[:5] == "24:00" else str(data[key])[:5]
                 data[key] = floor_time_to_30_minutes(
-                    datetime.strptime(data[key], "%H:%M").time()
+                    datetime.strptime(hhmm, "%H:%M").time()
                 )
 
         # A midnight end-time (00:00) means "until end of day" — keep it a
