@@ -88,7 +88,7 @@ def calculate_booking_price(format_name: str, booking_date,
 
     start_min = _to_minutes(time_start)
     end_min = _to_minutes(time_end)
-    if end_min <= start_min:
+    if end_min < start_min:
         end_min = 1440
 
     if _is_weekend_or_holiday(booking_date):

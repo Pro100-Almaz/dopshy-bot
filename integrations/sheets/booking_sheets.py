@@ -16,6 +16,8 @@ from typing import Any
 import config
 from integrations.booking_service import get_payments
 from integrations.repo import booking_repo
+from integrations.status_labels import STATE_DISPLAY as _STATE_DISPLAY, \
+    STATES_RUSSIAN as _STATES_RUSSIAN
 from utils import now_almaty, today_almaty, display_end_time
 import datetime
 
@@ -28,25 +30,6 @@ _HEADERS = ["Номер брони", "Поле", "Дата", "Начало", "К
             "Менеджер", "Резерв до", "Сумма", "Оплачено", "Остаток суммы",
             "Дата чека", "Kaspi QR", "Наличные"]
 _COL_COUNT = len(_HEADERS)  # 9
-
-# DB state → sheet status label (uppercase, matches Apps Script dropdown).
-_STATE_DISPLAY = {
-    "draft":            "DRAFT",
-    "awaiting_payment": "AWAITING_PAYMENT",
-    "confirmed":        "CONFIRMED",
-    "cancelled":        "CANCELLED",
-    "failed":           "FAILED",
-    "unpaid":           "UNPAID",
-}
-
-_STATES_RUSSIAN = {
-    "draft":            "ЧЕРНОВИК",
-    "awaiting_payment": "ОЖИДАЕТ ОПЛАТЫ",
-    "confirmed":        "ПОДТВЕРЖДЕНО",
-    "cancelled":        "ОТМЕНЕНО",
-    "failed":           "ПРОВАЛИЛОСЬ",
-    "unpaid":           "НЕ ОПЛАЧЕНО",
-}
 
 
 _client: Any = None

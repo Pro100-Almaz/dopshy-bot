@@ -8,7 +8,8 @@ import psycopg2.extras
 import psycopg2.pool
 
 import config
-from integrations.booking_service import _record_event
+from integrations.booking_service import _record_event, _record_status_change, _history_source
+from integrations.repo.history_repo import _record_history
 from integrations.repo.utils import _conn, _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
                 object_id = row["id"]
                 if type_string == "booking":
                     _record_event(cur, object_id, "draft_created", "whatsapp", chat_id)
+                    _record_history(cur, object_id, "whatsapp", key="booking_created")
             else:
                 cur.execute(
                     f"SELECT id FROM {table_name} WHERE client_token = %s", (patch['client_token'],)
@@ -115,6 +117,9 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whats
                     )
                 """
                 params = (object_id, object_id)
+            cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
+            _prev = cur.fetchone()
+            old_state = _prev["state"] if _prev else None
             cur.execute(
                 f"UPDATE {table_name} SET state = %s, updated_at = NOW() "
                 f"WHERE (id = %s ) {extra}"
@@ -126,6 +131,8 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whats
                 types_string = "trial"
                 if bot_name == "dopsy_bot":
                     _record_event(cur, object_id, target_state, actor_type, actor_id, reason)
+                    _record_status_change(cur, object_id, old_state, target_state,
+                                          _history_source(actor_type, actor_id))
                     table_del = "booking_sessions"
                     types_string = "booking"
 

@@ -66,6 +66,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    networks: [default, shared]
 
   ingest:
     build: .
@@ -77,6 +78,11 @@ services:
     command: python scripts/ingest.py
     profiles:
       - ingest
+
+networks:
+  shared:
+    external: true
+    name: dopshy_shared
 
 volumes:
   chroma_data:
