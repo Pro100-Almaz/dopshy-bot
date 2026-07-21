@@ -114,7 +114,8 @@ def list_bookings():
     start = request.args.get("from", str(today))
     end = request.args.get("to", str(today + timedelta(days=30)))
     rows = repo.get_bookings_in_range(
-        start, end, states=("draft", "awaiting_payment", "confirmed", "unpaid")
+        # start, end, states=("draft", "awaiting_payment", "confirmed", "unpaid")
+        start, end, states=("awaiting_payment", "confirmed")
     )
     payments = booking_service.get_payments()
     rows = _combine_bookings_payments(rows, payments)

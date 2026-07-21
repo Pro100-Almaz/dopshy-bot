@@ -895,7 +895,8 @@ def _split_day_segments(start_dt: datetime, end_dt: datetime):
         cur = next_midnight
 
 
-_BLOCKING_STATES = ("draft", "awaiting_payment", "confirmed", "unpaid")
+# statuses that can take the slots
+_BLOCKING_STATES = ("awaiting_payment", "confirmed")
 
 def _conflict(conflicts: list[dict]) -> dict:
     """Conflict envelope: nothing was created, `conflicts` lists what collided."""
