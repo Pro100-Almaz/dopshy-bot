@@ -61,7 +61,7 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
                 object_id = row["id"]
                 if type_string == "booking":
                     _record_event(cur, object_id, "draft_created", "whatsapp", chat_id)
-                    _record_history(cur, object_id, "whatsapp", key="booking_created")
+                    _record_history(cur, object_id, "chatbot:Бот", key="booking_created")
             else:
                 cur.execute(
                     f"SELECT id FROM {table_name} WHERE client_token = %s", (patch['client_token'],)
@@ -98,7 +98,7 @@ def update_draft(bot_name: str, object_id: int, state: str = 'draft', **patch) -
     return _err("BOOKING_WRONG_STATE", "Эту запись уже нельзя изменить.")
 
 
-def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whatsapp",
+def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatbot:Бот",
                    actor_id: str | None = None, reason: str | None = None,
                    target_state: str = "cancelled") -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot

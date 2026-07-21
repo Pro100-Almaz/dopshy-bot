@@ -53,8 +53,8 @@ def _record_event(cur, booking_id: int, event: str, actor_type: str,
 
 def _history_source(actor_type: str, actor_id: str | None = None) -> str:
     """booking_history.source: 'whatsapp' for the bot, else the manager id/email."""
-    if actor_type == "whatsapp":
-        return "whatsapp"
+    if actor_type == "chatbot:Бот":
+        return "chatbot:Бот"
     return actor_id or actor_type
 
 
@@ -179,7 +179,7 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
                 _record_status_change(cur, booking_id, row["state"],
-                                      "awaiting_payment", "whatsapp")
+                                      "awaiting_payment", "chatbot:Бот")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
                 reserved_until = cur.fetchone()["reserved_until"]
     except psycopg2.errors.ExclusionViolation:
@@ -228,10 +228,10 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
                 )
                 _record_event(cur, booking_id, "payment_received", "whatsapp",
                               note=parsed.get("ref"))
-                _record_history(cur, booking_id, "whatsapp", key="payment_bot",
+                _record_history(cur, booking_id, "chatbot:Бот", key="payment_bot",
                                 amount=parsed.get("amount") or 0)
                 _record_status_change(cur, booking_id, row["state"],
-                                      "confirmed", "whatsapp")
+                                      "confirmed", "chatbot:Бот")
     except psycopg2.errors.UniqueViolation:
         logger.warning("[BOOKING_SERVICE] duplicate receipt ref=%s for booking %d",
                        parsed.get("ref"), booking_id)
@@ -269,7 +269,7 @@ def reject_payment(booking_id: int, reason: str, parsed: dict | None = None) -> 
                 (booking_id, parsed.get("bank"), parsed.get("amount"), reason),
             )
             _record_event(cur, booking_id, "payment_rejected", "whatsapp", note=reason)
-            _record_history(cur, booking_id, "whatsapp", key="payment_rejected",
+            _record_history(cur, booking_id, "chatbot:Бот", key="payment_rejected",
                             reject_reason=reason or "")
     return _ok({"booking_id": booking_id})
 
@@ -284,7 +284,7 @@ def get_payment_recipients() -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
-def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
+def cancel_all_bookings(booking_id: int, actor_type: str = "chatbot:Бот",
                    actor_id: str | None = None, reason: str | None = None) -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
@@ -465,7 +465,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                                     ensure_ascii=False, default=str),
                 )
                 _record_status_change(cur, booking_id, row["state"], "cancelled",
-                                      "whatsapp")
+                                      "chatbot:Бот")
 
                 # 2) Insert new booking(s) with state preserved.
                 # TRANSITIVE BOOKING: if new range crosses midnight, create two bookings
@@ -671,7 +671,7 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                     f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
                 )
                 if cur.fetchone():
-                    src = _history_source(fields.get("source", "manager"), actor_id)
+                    src = fields.get("source", "manager:Unknown")
                     _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
                     if "state" in patch:
                         _record_status_change(cur, booking_id, old.get("state"),
@@ -742,8 +742,7 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
         client_token = str(uuid.uuid4())
         booking_id = cur.fetchone()["id"]
         _record_event(cur, booking_id, "manager_created", updated_by, actor_id)
-        _record_history(cur, booking_id, _history_source(updated_by, actor_id),
-                        key="booking_created")
+        _record_history(cur, booking_id, updated_by, key="booking_created")
         ids.append(booking_id)
     return ids
 

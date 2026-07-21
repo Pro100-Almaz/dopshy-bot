@@ -285,7 +285,7 @@ def test_cancel_clears_linked_session():
                         {"booking_id": bid, "available_days": []}, bid)
     assert svc.get_active_session('dopsy_bot', "chatX") is not None
 
-    svc.cancel_booking_trial('dopsy_bot', object_id=bid, actor_type="whatsapp", reason="test")
+    svc.cancel_booking_trial('dopsy_bot', object_id=bid, actor_type="chatbot:Бот", reason="test")
 
     assert svc.get_active_session('dopsy_bot', "chatX") is None
 
