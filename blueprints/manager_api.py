@@ -17,6 +17,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request
 
@@ -32,6 +33,8 @@ from chat.conversation import list_contacts as _list_conversation_contacts
 from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_TZ = ZoneInfo(config.BOOKING_TIMEZONE)
 
 manager_api = Blueprint("manager_api", __name__)
 
@@ -651,12 +654,27 @@ def list_contacts():
             contacts[key] = entry
         return entry
 
+    def _as_dt(ts) -> datetime | None:
+        #Force a timestamp to a tz-aware datetime in BOOKING_TIMEZONE.
+        # Because sqlite time format does not include timezone
+        try:
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_LOCAL_TZ)
+        return ts.astimezone(_LOCAL_TZ)
+
     def _bump_activity(entry: dict, ts) -> None:
         if not ts:
             return
-        ts = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-        if entry["last_activity"] is None or ts > entry["last_activity"]:
-            entry["last_activity"] = ts
+        dt = _as_dt(ts)
+        if dt is None:
+            return
+        cur = _as_dt(entry["last_activity"]) if entry["last_activity"] else None
+        if cur is None or dt > cur:
+            entry["last_activity"] = dt.isoformat()
 
     # WhatsApp texters — sender phone is the part after the last ':' in chat_id.
     for row in _list_conversation_contacts():
