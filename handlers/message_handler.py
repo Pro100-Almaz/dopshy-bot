@@ -167,13 +167,6 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
     sender_id = ""
     # channel = None
     try:
-        # if type(payload) is IncomingWhatsAppMessage and payload.provider == 'ycloud':
-        #     phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
-        # elif type(payload) is dict and payload.get('provider') == 'ycloud':
-        #     phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
-        # else:
-        #     phone_number_id = payload.business.phone_number_id
-
         if payload.provider == 'ycloud':
             phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
         else:

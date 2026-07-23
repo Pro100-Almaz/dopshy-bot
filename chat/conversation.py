@@ -16,9 +16,18 @@ import json
 import os
 import sqlite3
 import threading
+from datetime import datetime
 from typing import TypedDict
+from zoneinfo import ZoneInfo
 
 import config
+
+_LOCAL_TZ = ZoneInfo(config.BOOKING_TIMEZONE)
+
+
+def _local_now() -> str:
+    """Current Asia/Almaty time as 'YYYY-MM-DD HH:MM:SS' (matches SQLite's format)."""
+    return datetime.now(_LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Message(TypedDict):
@@ -68,12 +77,12 @@ def _save_to_db(chat_id: str, messages: list[Message]) -> None:
         conn.execute(
             """
             INSERT INTO conversations (chat_id, messages, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 messages   = excluded.messages,
                 updated_at = excluded.updated_at
             """,
-            (chat_id, json.dumps(messages, ensure_ascii=False)),
+            (chat_id, json.dumps(messages, ensure_ascii=False), _local_now()),
         )
 
 
