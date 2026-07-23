@@ -25,7 +25,7 @@ def get_all_bookings(page: int| None = None, search: str | None = None) -> list[
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
                 FROM bookings
-                WHERE field IS NOT NULL AND date IS NOT NULL
+                WHERE field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_payment')
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
             """
 
@@ -230,6 +230,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                   AND (%s::int IS NULL OR field = %s)
 
                   AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
+                  AND state in ('confirmed', 'awaiting_payment')
             """
 
             parameters = [
