@@ -183,7 +183,7 @@ class BaseStepHandler:
                 postgres.cancel_booking_trial(
                     self.builder.bot_name,
                     object_id=params[id_type],
-                    actor_type="whatsapp",
+                    actor_type="chatbot:Бот",
                     actor_id=chat_id,
                     reason="user_declined"
                 )

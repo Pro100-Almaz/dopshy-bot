@@ -408,7 +408,7 @@ class LlmBookingFlowHandler:
         clear_history(chat_id)
         postgres.cancel_booking_trial(
             self.BOT_NAME, draft["id"],
-            actor_type="whatsapp", reason="user_cancel_llm_flow",
+            actor_type="chatbot:Бот", reason="user_cancel_llm_flow",
         )
         logger.info("[LLM_FLOW] Draft id=%d cancelled", draft["id"])
         return self.asker.localize(lang, "cancelled")

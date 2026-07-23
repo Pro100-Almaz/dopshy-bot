@@ -276,7 +276,7 @@ def handle_booking_turn(
             bid = params.get("booking_id")
             if bid:
                 postgres.cancel_booking_trial(
-                    _BOT_NAME, bid, actor_type="whatsapp", actor_id=chat_id, reason="user_cancel_mid_flow"
+                    _BOT_NAME, bid, actor_type="chatbot:Бот", actor_id=chat_id, reason="user_cancel_mid_flow"
                 )
             else:
                 postgres.delete_session(_BOT_NAME, chat_id)

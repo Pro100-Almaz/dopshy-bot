@@ -3,6 +3,7 @@ Core message processing pipeline:
   incoming text → RAG retrieval → GPT-4o-mini → WhatsApp reply
 """
 import logging
+import re
 import threading
 from typing import Union
 
@@ -28,11 +29,54 @@ from utils import display_end_time
 from integrations.repo import booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
+from handlers.base_classes.base_checker import BaseChecker
 import config
 
 logger = logging.getLogger(__name__)
 
 RESET_COMMANDS = {"/reset", "/сброс", "/тазалау", "сброс", "reset"}
+
+
+# ── Pre-LLM confirmation short-circuit helpers ────────────────────────────────
+# The short-circuit decides, WITHOUT an LLM call, whether a message on a
+# ready-to-confirm draft is a plain confirm/cancel. It reuses BaseChecker's
+# YES/NO word sets as the single source of truth, but matches on word
+# BOUNDARIES rather than substrings so an edit request like "давай 19:00" is
+# NOT misread as "да" (confirm) — it falls through to the LLM as before.
+def _build_confirm_re(words: set[str]):
+    # Alphanumeric words match on \b…\b; emoji/symbol tokens (e.g. "👍") have no
+    # word chars, so \b can't anchor them — those are matched by substring below.
+    alnum = [re.escape(w) for w in words if any(ch.isalnum() for ch in w)]
+    return re.compile(r"\b(?:" + "|".join(alnum) + r")\b") if alnum else None
+
+
+_YES_RE = _build_confirm_re(BaseChecker._YES_WORDS)
+_NO_RE = _build_confirm_re(BaseChecker._NO_WORDS)
+_YES_SYMBOLS = tuple(w for w in BaseChecker._YES_WORDS if not any(ch.isalnum() for ch in w))
+
+# Kazakh-specific confirm/cancel tokens — used only to pick a reply language
+# without an LLM call. The confirm buttons are localized, so a
+# "Растаймын✅"/"Бас тартамын❌" reply implies kk, while "Подтверждаю✅"/"Отмена❌"
+# (and anything ambiguous) defaults to ru.
+_CONFIRM_KK_WORDS = {
+    "иә", "растаймын", "жарайды", "дұрыс",
+    "жоқ", "бас тартамын", "болмайды", "өзгерт", "бастапқы",
+}
+
+
+def _confirm_intent(text: str) -> str | None:
+    """Return 'yes'/'no'/None for a confirmation, using word-boundary matching."""
+    lower = text.lower().strip()
+    if (_YES_RE and _YES_RE.search(lower)) or any(s in lower for s in _YES_SYMBOLS):
+        return "yes"
+    if _NO_RE and _NO_RE.search(lower):
+        return "no"
+    return None
+
+
+def _infer_confirm_lang(text: str) -> str:
+    lower = text.lower()
+    return "kk" if any(w in lower for w in _CONFIRM_KK_WORDS) else "ru"
 
 # Distinct user-facing messages per payment_validation rejection code.
 # Format placeholders {paid} and {required} are filled in for the "amount" code.
@@ -251,6 +295,30 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     append_message(chat_id, "user", user_text)
                     append_message(chat_id, "assistant", booking_reply)
                     send_text_message(channel, sender_id, booking_reply)
+                    return
+
+            # (a.5) Pre-LLM confirmation short-circuit.
+            # When the user already has a draft with every required field filled,
+            # a plain "да"/"растаймын"/"нет" is a confirm or cancel of THAT draft.
+            # Handle it deterministically here so an LLM1 intent misclassification
+            # (e.g. a bare "да" routed to `other`) can't drop a valid confirmation.
+            # A message that isn't a yes/no word falls through to the LLM as before,
+            # preserving the edit/continue path.
+            _ready_draft = get_existing_draft(sender_id)
+            if _ready_draft and LlmBookingFlowHandler.helper.is_ready_for_confirm(_ready_draft):
+                _confirm = _confirm_intent(user_text)
+                if _confirm in ("yes", "no"):
+                    _lang = _infer_confirm_lang(user_text)
+                    logger.info(
+                        "[BOOKING] Pre-LLM confirm short-circuit (%s) for draft id=%s",
+                        _confirm, _ready_draft["id"],
+                    )
+                    reply = LlmBookingFlowHandler().handle(
+                        {}, chat_id, user_text, sender_id, _lang
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", reply)
+                    send_text_message(channel, sender_id, reply)
                     return
 
             intent, lang = route_incoming_message(history, user_text)

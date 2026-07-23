@@ -383,7 +383,7 @@ def create_bookings_batch():
         prepayment=body.get("prepayment"),
         actor_id=_api_key_actor(),
         reserved_until=body.get("reserved_until", 30),
-        updated_by=body.get("updated_by", "Неизвестен"),
+        updated_by=body.get("source", "Неизвестен"),
     )
 
     if res["ok"]:
