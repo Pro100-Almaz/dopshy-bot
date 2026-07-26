@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _reject(code: str, reason: str, parsed: dict) -> dict:
+    logger.info(f"[PARSER] Receipt payment failed for reason: {reason}.\nExtracted data: {parsed}")
     return {"ok": False, "code": code, "reason": reason, "parsed": parsed}
 
 
