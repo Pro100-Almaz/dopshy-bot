@@ -169,6 +169,10 @@ def _handle_non_text(payload: IncomingWhatsAppMessage) -> None:
 
     def _run():
         try:
+            # Ensure the client and Lua scripts are registered. A non-text
+            # message can be the first thing a worker handles, in which case
+            # enqueue_incoming_message() never ran and _drain_now is still None.
+            _redis()
             raw = _drain_now(keys=[seq_key, buf_key, tpl_key])
             _dispatch_drained(raw)
         except Exception:
