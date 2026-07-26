@@ -2,12 +2,15 @@
 
 Checks (in order):
   1. Readable + known bank (Kaspi/Halyk).
-  2. Recipient is an accepted Dopshy account (payment_recipients table).
-  3. Amount >= PAYMENT_MIN_FRACTION of the booking's full price.
-  4. Receipt date within PAYMENT_RECEIPT_MAX_AGE_HOURS of now.
+  2. A receipt reference number was extracted (required for dedup).
+  3. Recipient is an accepted Dopshy account (payment_recipients table).
+  4. Amount >= PAYMENT_MIN_FRACTION of the booking's full price.
+  5. Receipt date is present and within PAYMENT_RECEIPT_MAX_AGE_HOURS of now.
 
 Returns {ok, code, reason (RU, user-facing), parsed}. Dedup of the receipt
-number is enforced at insert time via the payments UNIQUE index.
+number is enforced at insert time via the payments UNIQUE index; a receipt
+without a parseable reference is rejected here so it can never be replayed
+through the NULL-exempt partial index.
 """
 
 import logging
@@ -46,6 +49,11 @@ def validate_receipt(booking: dict, pdf_bytes: bytes) -> dict:
         return _reject("unreadable",
                        "Не удалось распознать чек. Отправьте PDF-чек из Kaspi или Halyk.", parsed)
 
+    if not parsed.get("ref"):
+        return _reject("unreadable",
+                       "Не удалось распознать номер чека. Отправьте официальный PDF-чек "
+                       "из Kaspi или Halyk.", parsed)
+
     if not _recipient_matches(parsed):
         return _reject("recipient",
                        "Платёж отправлен не на счёт Допши. Проверьте получателя.", parsed)
@@ -61,12 +69,15 @@ def validate_receipt(booking: dict, pdf_bytes: bytes) -> dict:
                 parsed,
             )
 
-    if parsed["date"] is not None:
-        receipt_dt = parsed["date"].replace(tzinfo=ZoneInfo(config.BOOKING_TIMEZONE))
-        now = now_almaty()
-        if (now - receipt_dt > timedelta(hours=config.PAYMENT_RECEIPT_MAX_AGE_HOURS)
-                or receipt_dt - now > timedelta(minutes=10)):
-            return _reject("date",
-                           "Чек устарел или дата некорректна. Отправьте свежий чек.", parsed)
+    if parsed["date"] is None:
+        return _reject("date",
+                       "Не удалось определить дату чека. Отправьте свежий чек.", parsed)
+
+    receipt_dt = parsed["date"].replace(tzinfo=ZoneInfo(config.BOOKING_TIMEZONE))
+    now = now_almaty()
+    if (now - receipt_dt > timedelta(hours=config.PAYMENT_RECEIPT_MAX_AGE_HOURS)
+            or receipt_dt - now > timedelta(minutes=10)):
+        return _reject("date",
+                       "Чек устарел или дата некорректна. Отправьте свежий чек.", parsed)
 
     return {"ok": True, "code": "OK", "reason": "", "parsed": parsed}

@@ -197,6 +197,10 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
     number is stored with a UNIQUE index → reused receipts return PAYMENT_DUPLICATE.
     """
     parsed = parsed or {}
+    if not parsed.get("ref"):
+        logger.warning("[BOOKING_SERVICE] refusing payment without receipt ref for booking %d",
+                       booking_id)
+        return _err("PAYMENT_NO_REF", "Не удалось распознать номер чека.")
     receipt_dt = None
     if parsed.get("date"):
         receipt_dt = parsed["date"].replace(tzinfo=ZoneInfo(config.BOOKING_TIMEZONE))

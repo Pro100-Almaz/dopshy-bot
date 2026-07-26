@@ -2,6 +2,11 @@
 
 Both banks produce text-based PDFs (no OCR needed). Field labels and values are
 sometimes on separate lines, so patterns are matched position-independently.
+
+Both banks localise their receipts, so every label pattern matches the Russian
+label OR its Kazakh equivalent (e.g. "Получатель" / "Алушы", "№ чека" /
+"Түбіртек №", "Фискальный" / "Фискалдық"). The values themselves — amounts,
+dates, BINs, "QR..." references — are language-independent.
 """
 
 import logging
@@ -15,11 +20,16 @@ _SPACES = "    "
 
 _AMOUNT_RE = re.compile(r"([\d" + _SPACES + r"]+)\s*₸")
 _DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})")
-_BIN_RE = re.compile(r"ИИН/БИН\s*продавца[\s\n]*(\d{12})")
-_KASPI_REF_RE = re.compile(r"№\s*чека[\s\n]*([A-Za-z]{0,4}\d{6,})")
-_HALYK_REF_RE = re.compile(r"№\s*квитанции[\s\n]*(\d{6,})")
-_RECIPIENT_RE = re.compile(r"Получатель[\s\n]*([^\n]+)")
-_PHONE_RE = re.compile(r"Куда[\s\n]*([+\d\s()\-]{8,})")
+# BIN: RU "ИИН/БИН продавца" | KZ "Сатушының ЖСН/БСН" (match the abbreviation).
+_BIN_RE = re.compile(r"(?:ИИН/БИН\s*продавца|ЖСН/БСН)[\s\n]*(\d{12})")
+# Kaspi ref: RU "№ чека" (symbol-first) | KZ "Түбіртек №" (label-first).
+_KASPI_REF_RE = re.compile(r"(?:№\s*чека|Түбіртек\s*№)[\s\n]*([A-Za-z]{0,4}\d{6,})")
+# Halyk ref: RU "№ квитанции" | KZ "Түбіртек №".
+_HALYK_REF_RE = re.compile(r"(?:№\s*квитанции|Түбіртек\s*№)[\s\n]*(\d{6,})")
+_RECIPIENT_RE = re.compile(r"(?:Получатель|Алушы)[\s\n]*([^\n]+)")
+# Label and value may sit on separate lines (leading [\s\n]*), but the captured
+# phone must not cross a newline — otherwise it swallows the next field (amount).
+_PHONE_RE = re.compile(r"(?:Куда|Қайда)[\s\n]*([+(]?\d[\d \t()\-]{7,})")
 
 
 def extract_text(pdf_bytes: bytes) -> str:
@@ -52,10 +62,14 @@ def _parse_date(text: str) -> datetime | None:
 
 def _detect_bank(text: str) -> str:
     low = text.lower()
-    if "квитанции" in low or "перевод" in low:
-        return "halyk"
-    if "фискальный" in low or "kaspi" in low:
+    # Both banks use "Түбіртек №" in Kazakh, so detection relies on distinct
+    # markers. Kaspi is checked first: its "Фискалдық"/"kaspi" markers are
+    # unambiguous, while Halyk's transfer wording ("перевод"/"аудару") can also
+    # appear on a Kaspi P2P transfer receipt.
+    if "фискальный" in low or "фискалдық" in low or "kaspi" in low:
         return "kaspi"
+    if "квитанции" in low or "перевод" in low or "аудару" in low:
+        return "halyk"
     return "unknown"
 
 
