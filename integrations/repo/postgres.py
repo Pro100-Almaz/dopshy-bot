@@ -196,3 +196,38 @@ def delete_session(bot_name: str, chat_id: str) -> None:
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {table_name} WHERE chat_id = %s", (chat_id,))
+
+
+# ---------------------------------------------------------------------------
+#  Webhook enabledness
+# ---------------------------------------------------------------------------
+
+def is_ycloud_enabled() -> bool:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT is_enabled FROM ycloud_enabled WHERE id = 1")
+            row = cur.fetchone()
+            return row["is_enabled"] if row else True
+
+
+def set_ycloud_enabled(enabled: bool | None = None, actor: str = "") -> bool:
+    if enabled is None:
+        value_expr, params = "NOT is_enabled", (actor,)
+    else:
+        value_expr, params = "%s", (enabled, actor)
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE ycloud_enabled SET is_enabled = {value_expr}, "
+                f"updated_at = NOW(), updated_by = %s "
+                f"WHERE id = 1 RETURNING is_enabled",
+                params,
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            "ycloud_enabled has no id = 1 row — migration 035 has not been applied"
+        )
+    return row["is_enabled"]
