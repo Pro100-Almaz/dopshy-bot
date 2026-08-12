@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
@@ -82,6 +84,120 @@ def on_manual_group_edit(
             return {
                 'ok': True,
                 'group_id': row['id']
+            }
+
+
+def on_manual_group_schedule_edit(
+        group_id: int,
+        training_day: int,
+        new_training_day: int | None = None,
+        time_start: str | None = None,
+        time_end: str | None = None,
+) -> dict:
+    fields = []
+    values = []
+
+    if new_training_day is not None:
+        fields.append("training_day = %s")
+        values.append(new_training_day)
+    if time_start is not None:
+        fields.append("time_start = %s")
+        values.append(time_start)
+    if time_end is not None:
+        fields.append("time_end = %s")
+        values.append(time_end)
+
+    if not fields:
+        return {
+            'ok': False,
+            'code': 'NO_FIELDS',
+            'message': 'No schedule fields to update'
+        }
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, time_start, time_end
+                FROM academy_group_schedules
+                WHERE group_id = %s
+                  AND training_day = %s
+                FOR UPDATE
+                """,
+                (group_id, training_day)
+            )
+            rows = cur.fetchall()
+
+            if not rows:
+                return {
+                    'ok': False,
+                    'code': 'SCHEDULE_NOT_FOUND',
+                    'message': 'Group schedule not found'
+                }
+
+            if len(rows) > 1:
+                return {
+                    'ok': False,
+                    'code': 'AMBIGUOUS_SCHEDULE',
+                    'message': 'Multiple schedules found for this group and training day'
+                }
+
+            existing = rows[0]
+            next_training_day = new_training_day if new_training_day is not None else training_day
+            next_start = time_start if time_start is not None else str(existing['time_start'])[:5]
+            next_end = time_end if time_end is not None else str(existing['time_end'])[:5]
+            if next_training_day < 0 or next_training_day > 6:
+                return {
+                    'ok': False,
+                    'code': 'INVALID_WEEKDAY',
+                    'message': 'training_day must be between 0 and 6'
+                }
+            if datetime.strptime(str(next_start)[:5], "%H:%M") >= datetime.strptime(str(next_end)[:5], "%H:%M"):
+                return {
+                    'ok': False,
+                    'code': 'INVALID_TIME',
+                    'message': 'time_start must be before time_end'
+                }
+
+            cur.execute(
+                """
+                SELECT id
+                FROM academy_group_schedules
+                WHERE group_id = %s
+                  AND training_day = %s
+                  AND time_start = %s
+                  AND time_end = %s
+                  AND id <> %s
+                """,
+                (group_id, next_training_day, next_start, next_end, existing['id'])
+            )
+            if cur.fetchone():
+                return {
+                    'ok': False,
+                    'code': 'SCHEDULE_CONFLICT',
+                    'message': 'A schedule with this weekday and time already exists'
+                }
+
+            values.extend([group_id, training_day])
+            cur.execute(
+                f"""
+                UPDATE academy_group_schedules
+                SET {", ".join(fields)},
+                    updated_at = NOW()
+                WHERE group_id = %s
+                  AND training_day = %s
+                RETURNING id, group_id, training_day, time_start, time_end
+                """,
+                values,
+            )
+            row = cur.fetchone()
+            return {
+                'ok': True,
+                'group_id': row['group_id'],
+                'schedule_id': row['id'],
+                'training_day': row['training_day'],
+                'time_start': row['time_start'],
+                'time_end': row['time_end'],
             }
 
 

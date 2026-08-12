@@ -85,3 +85,85 @@ def test_delete_cancels(client):
     assert r.status_code == 200 and r.get_json()["ok"]
     g = client.get(f"/api/manager/bookings/{bid}", headers=_HDR)
     assert g.get_json()["data"]["state"] == "cancelled"
+
+
+def test_academy_group_patch_omits_group_name(monkeypatch, client):
+    captured = {}
+
+    def fake_edit(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "group_id": kwargs["group_id"]}
+
+    monkeypatch.setattr("blueprints.manager_api.on_manual_group_edit", fake_edit)
+    monkeypatch.setattr("blueprints.manager_api.refresh_all_groups", lambda: None)
+
+    r = client.patch("/api/manager/academy_groups/7", json={"max_cap": 14}, headers=_HDR)
+
+    assert r.status_code == 200
+    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14}
+
+
+def test_academy_group_patch_updates_schedule_time(monkeypatch, client):
+    captured = {}
+
+    def fake_schedule_edit(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "group_id": kwargs["group_id"],
+            "schedule_id": 9,
+            "training_day": kwargs["training_day"],
+            "time_start": kwargs["time_start"],
+            "time_end": None,
+        }
+
+    monkeypatch.setattr("blueprints.manager_api.on_manual_group_schedule_edit", fake_schedule_edit)
+    monkeypatch.setattr("blueprints.manager_api.refresh_all_groups", lambda: None)
+
+    r = client.patch(
+        "/api/manager/academy_groups/7",
+        json={"training_day": 2, "time_start": "16:30"},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert captured == {
+        "group_id": 7,
+        "training_day": 2,
+        "new_training_day": None,
+        "time_start": "16:30",
+        "time_end": None,
+    }
+
+
+def test_academy_group_patch_updates_schedule_weekday(monkeypatch, client):
+    captured = {}
+
+    def fake_schedule_edit(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "group_id": kwargs["group_id"],
+            "schedule_id": 9,
+            "training_day": kwargs["new_training_day"],
+            "time_start": "16:30",
+            "time_end": "18:00",
+        }
+
+    monkeypatch.setattr("blueprints.manager_api.on_manual_group_schedule_edit", fake_schedule_edit)
+    monkeypatch.setattr("blueprints.manager_api.refresh_all_groups", lambda: None)
+
+    r = client.patch(
+        "/api/manager/academy_groups/7",
+        json={"previous_training_day": 2, "training_day": 4},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert captured == {
+        "group_id": 7,
+        "training_day": 2,
+        "new_training_day": 4,
+        "time_start": None,
+        "time_end": None,
+    }
