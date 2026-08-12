@@ -24,7 +24,7 @@ from flask import Blueprint, jsonify, request
 import config
 from integrations import booking_service
 from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
-    create_or_update_group, on_manual_group_edit
+    create_or_update_group, on_manual_group_edit, on_manual_group_schedule_edit
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
     upsert_booking_row
 from integrations.repo import booking_repo as repo, postgres, history_repo
@@ -73,6 +73,13 @@ def _serialize(b: dict) -> dict:
     return out
 
 
+def _manager_request_token() -> str:
+    bearer = request.headers.get("Authorization", "")
+    if bearer.lower().startswith("bearer "):
+        return bearer[7:].strip()
+    return request.headers.get("X-API-Key", "")
+
+
 @manager_api.before_request
 def _authenticate():
     if request.method == "OPTIONS":
@@ -81,7 +88,7 @@ def _authenticate():
     if not config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "NOT_CONFIGURED",
                         "message": "Manager API is not configured."}), 503
-    if request.headers.get("X-API-Key", "") != config.X_SERVICE_TOKEN:
+    if _manager_request_token() != config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "UNAUTHORIZED", "message": "Bad API key."}), 401
     if _rate_limited(request.remote_addr or "unknown"):
         return jsonify({"ok": False, "code": "RATE_LIMITED",
@@ -563,19 +570,65 @@ def edit_academy_group(group_id: int):
 
     max_cap = body.get("max_cap")
     group_name = body.get("group_name")
+    training_day = body.get("training_day")
+    previous_training_day = body.get("previous_training_day")
+    time_start = body.get("time_start")
+    time_end = body.get("time_end")
 
     if max_cap is not None:
         max_cap = int(max_cap)
 
-    res = on_manual_group_edit(
-        group_id=group_id,
-        group_name=str(group_name),
-        max_cap=max_cap
-    )
+    group_res = None
+    schedule_res = None
 
-    if res["ok"]:
-        refresh_all_groups()
-    return jsonify(res), 200 if res["ok"] else 404
+    if group_name is not None or max_cap is not None:
+        group_res = on_manual_group_edit(
+            group_id=group_id,
+            group_name=group_name,
+            max_cap=max_cap
+        )
+        if not group_res["ok"]:
+            return jsonify(group_res), 404
+
+    if time_start is not None or time_end is not None or previous_training_day is not None:
+        if training_day is None and previous_training_day is None:
+            return jsonify({
+                "ok": False,
+                "code": "INVALID",
+                "message": "training_day is required when editing schedule fields."
+            }), 400
+
+        lookup_training_day = previous_training_day if previous_training_day is not None else training_day
+        new_training_day = training_day if previous_training_day is not None else None
+        schedule_res = on_manual_group_schedule_edit(
+            group_id=group_id,
+            training_day=int(lookup_training_day),
+            new_training_day=int(new_training_day) if new_training_day is not None else None,
+            time_start=time_start,
+            time_end=time_end,
+        )
+        if not schedule_res["ok"]:
+            if schedule_res["code"] in {"AMBIGUOUS_SCHEDULE", "SCHEDULE_CONFLICT"}:
+                status = 409
+            elif schedule_res["code"] in {"INVALID_TIME", "INVALID_WEEKDAY"}:
+                status = 400
+            else:
+                status = 404
+            return jsonify(schedule_res), status
+
+    if group_res is None and schedule_res is None:
+        return jsonify({
+            "ok": False,
+            "code": "NO_FIELDS",
+            "message": "No fields to update"
+        }), 400
+
+    refresh_all_groups()
+    return jsonify({
+        "ok": True,
+        "group_id": group_id,
+        "schedule": _serialize(schedule_res) if schedule_res else None,
+    }), 200
 
 
 @manager_api.post("/api/manager/academy_groups/<int:group_id>")

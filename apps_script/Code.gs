@@ -24,6 +24,29 @@ var GROUP_COL = {
 }
 const user = Session.getActiveUser();
 
+function _groupTrainingDayValue(value) {
+  var days = {
+    'Понедельник': 0,
+    'Вторник': 1,
+    'Среда': 2,
+    'Четверг': 3,
+    'Пятница': 4,
+    'Суббота': 5,
+    'Воскресенье': 6
+  };
+  if (typeof value === 'number') return value;
+  var text = String(value).trim();
+  if (/^[0-6]$/.test(text)) return Number(text);
+  return days[text];
+}
+
+function _groupTimeValue(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'HH:mm');
+  }
+  return String(value).trim();
+}
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Менеджер')
@@ -45,7 +68,7 @@ function onOpen() {
  * Free-edit columns (customer, notes) are PATCHed to the backend. On failure
  * the cell is reverted to its previous value.
  */
-function onEditManual() {
+function onEditManual(e) {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = spreadsheet.getActiveSheet();
   var sheetName = sheet.getName();
@@ -90,7 +113,10 @@ function onEditManual() {
 
     var allowedGroupCols = [
       GROUP_COL.GROUP_NAME,
-      GROUP_COL.MAX_CAP
+      GROUP_COL.MAX_CAP,
+      GROUP_COL.TRAINGING_DAY,
+      GROUP_COL.START_TIME,
+      GROUP_COL.END_TIME
     ];
 
     if (!allowedGroupCols.includes(col)) return;
@@ -119,10 +145,29 @@ function onEditManual() {
       } else{
         field = 'max_cap';
       }
+    } else if (col === GROUP_COL.TRAINGING_DAY) {
+      field = 'training_day';
+    } else if (col === GROUP_COL.START_TIME) {
+      field = 'time_start';
+    } else if (col === GROUP_COL.END_TIME) {
+      field = 'time_end';
     }
 
     var patch = {};
-    patch[field] = sheet.getRange(row, col).getValue();
+    if (field === 'training_day') {
+      if (!e || e.oldValue === undefined) {
+        SpreadsheetApp.getUi().alert('Не удалось определить предыдущий день недели. Таблица будет обновлена с сервера.');
+        apiRefreshGroupTables();
+        return;
+      }
+      patch.previous_training_day = _groupTrainingDayValue(e.oldValue);
+      patch.training_day = _groupTrainingDayValue(sheet.getRange(row, GROUP_COL.TRAINGING_DAY).getValue());
+    } else if (field === 'time_start' || field === 'time_end') {
+      patch.training_day = _groupTrainingDayValue(sheet.getRange(row, GROUP_COL.TRAINGING_DAY).getValue());
+      patch[field] = _groupTimeValue(sheet.getRange(row, col).getValue());
+    } else {
+      patch[field] = sheet.getRange(row, col).getValue();
+    }
     try {
       apiPatchGrouping(groupId, patch);
       spreadsheet.toast('Обновлено: ' + field, 'Менеджер', 3);

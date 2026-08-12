@@ -41,6 +41,8 @@ app = Flask(__name__)
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402
 app.register_blueprint(manager_api)
+from blueprints.manager_boxing_api import manager_boxing_api  # noqa: E402
+app.register_blueprint(manager_boxing_api)
 
 # CORS — only the manager API is browser-facing; webhooks/admin are server-to-server.
 # Origins come from config (CORS_ALLOWED_ORIGINS env, default "*"). The custom
