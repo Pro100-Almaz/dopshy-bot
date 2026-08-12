@@ -136,15 +136,34 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
-def get_group_by_id(group_id: int) -> dict:
+def get_all_groups_for_frontend() -> list[dict]:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"""
-                SELECT * FROM academy_groups WHERE id = {group_id}
-                """,
+                """
+                SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
+                       s.training_day, s.time_start AS time_start, s.time_end AS time_end
+                FROM academy_groups g
+                LEFT JOIN academy_group_schedules s
+                  ON s.group_id = g.id
+                WHERE g.is_active = TRUE
+                ORDER BY g.group_type, g.id, s.training_day, s.time_start
+                """
             )
-            return dict(cur.fetchone())
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_group_by_id(group_id: int) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM academy_groups WHERE id = %s
+                """,
+                (group_id,)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 def deactivate_group_repo(group_id: int) -> dict:
@@ -230,6 +249,273 @@ def get_trials_by_type(group_type: str):
             return [dict(trial) for trial in trials]
 
 
+def get_users_by_assigned_group(group_id: int) -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id,
+                       child_name,
+                       child_age,
+                       child_birth_date,
+                       parent_phone,
+                       total_trials,
+                       assigned_group_id,
+                       subscribed
+                FROM academy_users
+                WHERE assigned_group_id = %s
+                ORDER BY child_name, id
+                """,
+                (group_id,)
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_user_by_id(user_id: int) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id,
+                       child_name,
+                       child_age,
+                       child_birth_date,
+                       parent_phone,
+                       total_trials,
+                       assigned_group_id,
+                       subscribed
+                FROM academy_users
+                WHERE id = %s
+                """,
+                (user_id,)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+_TRIAL_WITH_USER_SELECT = """
+    SELECT t.id,
+           t.child_name,
+           t.child_age,
+           t.language,
+           t.phone,
+           t.group_id,
+           t.trial_day,
+           t.start_time,
+           t.end_time,
+           t.state,
+           t.notes,
+           t.attended,
+           t.subscribed,
+           u.id AS user_id,
+           u.child_name AS user_child_name,
+           u.child_age AS user_child_age,
+           u.child_birth_date AS user_child_birth_date,
+           u.parent_phone AS user_parent_phone,
+           u.total_trials AS user_total_trials,
+           u.assigned_group_id AS user_assigned_group_id,
+           u.subscribed AS user_subscribed
+    FROM academy_trials t
+    LEFT JOIN LATERAL (
+        SELECT au.*
+        FROM academy_users au
+        WHERE au.assigned_group_id = t.group_id
+          AND (
+              au.parent_phone = t.phone
+              OR lower(au.child_name) = lower(t.child_name)
+          )
+        ORDER BY
+          CASE WHEN au.parent_phone = t.phone THEN 0 ELSE 1 END,
+          au.id
+        LIMIT 1
+    ) u ON TRUE
+"""
+
+
+def get_trials_with_users_by_group(group_id: int) -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                _TRIAL_WITH_USER_SELECT + """
+                WHERE t.group_id = %s
+                  AND t.state = 'confirmed'
+                ORDER BY t.trial_day, t.start_time, t.id
+                """,
+                (group_id,)
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_trial_with_user_by_id(trial_id: int) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                _TRIAL_WITH_USER_SELECT + """
+                WHERE t.id = %s
+                """,
+                (trial_id,)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def update_trial_attended(trial_id: int, attended: bool) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE academy_trials
+                SET attended = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (attended, trial_id)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+    return get_trial_with_user_by_id(trial_id)
+
+
+def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM academy_trials
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (trial_id,)
+            )
+            trial = cur.fetchone()
+            if not trial:
+                return None
+
+            cur.execute(
+                """
+                UPDATE academy_users
+                SET subscribed = %s,
+                    updated_at = NOW()
+                WHERE id = (
+                    SELECT au.id
+                    FROM academy_users au
+                    WHERE au.assigned_group_id = %s
+                      AND (
+                          au.parent_phone = %s
+                          OR lower(au.child_name) = lower(%s)
+                      )
+                    ORDER BY
+                      CASE WHEN au.parent_phone = %s THEN 0 ELSE 1 END,
+                      au.id
+                    LIMIT 1
+                )
+                """,
+                (
+                    subscribed,
+                    trial["group_id"],
+                    trial["phone"],
+                    trial["child_name"],
+                    trial["phone"],
+                )
+            )
+            matched_user = cur.rowcount > 0
+
+            if subscribed and not matched_user:
+                cur.execute(
+                    """
+                    INSERT INTO academy_users (
+                        child_name,
+                        child_age,
+                        parent_phone,
+                        total_trials,
+                        assigned_group_id,
+                        subscribed
+                    )
+                    SELECT %s, %s, %s, COUNT(*), %s, TRUE
+                    FROM academy_trials
+                    WHERE group_id = %s
+                      AND (
+                          phone = %s
+                          OR lower(child_name) = lower(%s)
+                      )
+                    """,
+                    (
+                        trial["child_name"],
+                        trial["child_age"],
+                        trial["phone"],
+                        trial["group_id"],
+                        trial["group_id"],
+                        trial["phone"],
+                        trial["child_name"],
+                    )
+                )
+
+            cur.execute(
+                """
+                UPDATE academy_trials
+                SET subscribed = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (subscribed, trial_id)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+    return get_trial_with_user_by_id(trial_id)
+
+
+def update_user_subscribed(user_id: int, subscribed: bool) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE academy_users
+                SET subscribed = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id,
+                          child_name,
+                          child_age,
+                          child_birth_date,
+                          parent_phone,
+                          total_trials,
+                          assigned_group_id,
+                          subscribed
+                """,
+                (subscribed, user_id)
+            )
+            user = cur.fetchone()
+            if not user:
+                return None
+
+            cur.execute(
+                """
+                UPDATE academy_trials
+                SET subscribed = %s,
+                    updated_at = NOW()
+                WHERE group_id = %s
+                  AND (
+                      phone = %s
+                      OR lower(child_name) = lower(%s)
+                  )
+                """,
+                (
+                    subscribed,
+                    user["assigned_group_id"],
+                    user["parent_phone"],
+                    user["child_name"],
+                )
+            )
+            return dict(user)
+
+
 def confirm_trial(trial_id: int) -> bool:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -296,4 +582,3 @@ def has_active_trial(bot_name: str, phone: str) -> bool:
 
             has_confirmed_trial = cur.fetchone()
             return has_confirmed_trial['exists']
-

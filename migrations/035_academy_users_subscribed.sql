@@ -1,0 +1,2 @@
+ALTER TABLE academy_users
+    ADD COLUMN IF NOT EXISTS subscribed BOOLEAN DEFAULT FALSE;

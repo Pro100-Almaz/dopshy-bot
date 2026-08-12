@@ -73,6 +73,13 @@ def _serialize(b: dict) -> dict:
     return out
 
 
+def _manager_request_token() -> str:
+    bearer = request.headers.get("Authorization", "")
+    if bearer.lower().startswith("bearer "):
+        return bearer[7:].strip()
+    return request.headers.get("X-API-Key", "")
+
+
 @manager_api.before_request
 def _authenticate():
     if request.method == "OPTIONS":
@@ -81,7 +88,7 @@ def _authenticate():
     if not config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "NOT_CONFIGURED",
                         "message": "Manager API is not configured."}), 503
-    if request.headers.get("X-API-Key", "") != config.X_SERVICE_TOKEN:
+    if _manager_request_token() != config.X_SERVICE_TOKEN:
         return jsonify({"ok": False, "code": "UNAUTHORIZED", "message": "Bad API key."}), 401
     if _rate_limited(request.remote_addr or "unknown"):
         return jsonify({"ok": False, "code": "RATE_LIMITED",
