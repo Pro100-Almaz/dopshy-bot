@@ -14,6 +14,7 @@ from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
 
 import config
+from integrations import client_notify
 from handlers.message_batcher import enqueue_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
 from integrations.providers.payload import OutboundChannel
@@ -131,7 +132,9 @@ def _cancel_expired_bookings():
                 te = str(b["time_end"])[:5]
                 send_text_message(
                     OutboundChannel(provider="ycloud", phone_number_id=config.WHATSAPP_PHONE_NUMBER_ID_BOT_1),
-                    b["phone"],
+                    # A booking phone is not an inbound id: manager-entered rows
+                    # hold '8…' or '+7 700 …', and YCloud takes E.164 only.
+                    client_notify.normalize_recipient(b["phone"]),
                     f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
                     f"была отменена — оплата не поступила в течении 20 минут.\n"
                     f"Хотите забронировать снова? Просто напишите нам!\n\n"

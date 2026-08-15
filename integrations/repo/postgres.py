@@ -122,9 +122,16 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatb
             cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
             _prev = cur.fetchone()
             old_state = _prev["state"] if _prev else None
+            # The id/group_transition alternatives are bracketed as ONE term, so
+            # the terminal-state guard covers both. Without the brackets AND
+            # binds tighter than OR, `id = %s` matches on its own, and a second
+            # cancel re-cancels a row that is already gone: another event, another
+            # history line, another "your booking is cancelled" to the client —
+            # and a cancelled booking silently re-stated as 'unpaid' by the TTL
+            # sweeper, which passes its own target_state.
             cur.execute(
                 f"UPDATE {table_name} SET state = %s, updated_at = NOW() "
-                f"WHERE (id = %s ) {extra}"
+                f"WHERE ((id = %s) {extra}) "
                 "AND state NOT IN ('cancelled', 'failed', 'unpaid') RETURNING id",
                 (target_state,) + params,
             )
@@ -154,10 +161,15 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatb
             from integrations import apipay_service  # local import avoids import cycle
             apipay_service.on_bookings_cancelled(
                 [object_id], reason=reason or target_state)
-        return _ok({"object_id": object_id})
+        # `cancelled` says this call is what moved the row, as opposed to
+        # finding it already gone. Callers that notify the client key on it:
+        # both branches answer ok, and a second DELETE must not send a second
+        # "your booking is cancelled" message.
+        return _ok({"object_id": object_id, "cancelled": True})
     if not row:
         return _err("NOT_FOUND", "Запись не найдена.")
-    return _ok({"object_id": object_id}, message="Запись уже была отменена.")
+    return _ok({"object_id": object_id, "cancelled": False},
+               message="Запись уже была отменена.")
 
 
 # ---------------------------------------------------------------------------

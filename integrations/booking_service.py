@@ -369,10 +369,15 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "chatbot:Бот",
         # AFTER commit — see cancel_booking_trial. Never raises.
         from integrations import apipay_service  # local import avoids import cycle
         apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason or "cancelled")
-        return _ok({"booking_id": booking_id})
+        # `cancelled_ids` is every occurrence this call took down, so a caller
+        # notifying the client can list the dates instead of saying "some of
+        # your bookings"; empty means the series was already cancelled and no
+        # message is owed.
+        return _ok({"booking_id": booking_id, "cancelled_ids": cancelled_ids})
     if not row:
         return _err("NOT_FOUND", "Бронь не найдена.")
-    return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+    return _ok({"booking_id": booking_id, "cancelled_ids": []},
+               message="Бронь уже была отменена.")
 
 
 # Fields a client may patch via the self-service edit flow.
@@ -731,7 +736,12 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                             _record_history(cur, booking_id, src, key=key,
                                             old_amount=_fmt_amount(old.get(f)),
                                             new_amount=_fmt_amount(patch[f]))
-                    return _ok({"booking_id": booking_id})
+                    # `old_state` (None unless `state` was patched) lets the
+                    # caller tell a real transition from a manager re-saving the
+                    # status it already had — only the former is worth a message
+                    # to the client.
+                    return _ok({"booking_id": booking_id,
+                                "old_state": old.get("state")})
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")

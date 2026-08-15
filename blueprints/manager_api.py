@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import apipay_client, apipay_service, booking_service
+from integrations import apipay_client, apipay_service, booking_service, client_notify
 from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
     create_or_update_group, on_manual_group_edit, on_manual_group_schedule_edit
@@ -41,6 +41,15 @@ manager_api = Blueprint("manager_api", __name__)
 
 # States in which a booking no longer occupies a slot on the week sheet.
 _TERMINAL_BOOKING_STATES = {"cancelled", "unpaid", "failed"}
+
+# Manager status changes the client is told about, and what they are told.
+# 'failed' and 'draft' are absent on purpose: the first is our own bookkeeping
+# for a booking that never became one, the second was never visible to anybody.
+_STATE_NOTIFICATIONS = {
+    "confirmed": "manager_confirmed",
+    "cancelled": "manager_cancelled",
+    "unpaid": "manager_unpaid",
+}
 
 _rate_lock = threading.Lock()
 _rate_hits: dict[str, list[float]] = {}
@@ -553,6 +562,16 @@ def patch_booking(booking_id: int):
     if res["ok"]:
         booking_row = repo.get_booking(booking_id)
         if booking_row:
+            # The client is not in the room for a manager edit, so a status
+            # change has to reach them — otherwise "confirmed" and "cancelled"
+            # are known to everyone but the person they concern. Only a real
+            # transition sends: re-saving the status a booking already had is a
+            # manager's bookkeeping, not news. Off-thread, so the manager UI
+            # never waits on WhatsApp.
+            notification = _STATE_NOTIFICATIONS.get(patch.get("state"))
+            if notification and patch["state"] != (res.get("data") or {}).get("old_state"):
+                client_notify.notify_booking(booking_row, notification)
+
             upsert_booking_row(booking_row)
             # Sheet is a best-effort view; never fail the committed DB mutation on it.
             try:
@@ -580,6 +599,10 @@ def delete_booking(booking_id: int):
     if res["ok"]:
         booking_row = repo.get_booking(booking_id)
         if booking_row:
+            # Only when THIS call did the cancelling — a repeated DELETE also
+            # answers ok, and must not send the client a second cancellation.
+            if (res.get("data") or {}).get("cancelled"):
+                client_notify.notify_booking(booking_row, "manager_cancelled")
             upsert_booking_row(booking_row)
             _single_table_erase(booking_row)
 
@@ -591,6 +614,13 @@ def delete_repetitive_booking(booking_id: int):
         booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
+        # Every occurrence that came down, listed in one message — a client with
+        # a weekly slot should not get eight separate cancellations.
+        cancelled_ids = (res.get("data") or {}).get("cancelled_ids") or []
+        rows = repo.get_bookings(cancelled_ids)
+        if rows:
+            client_notify.notify_bookings(rows, "manager_series_cancelled")
+
         booking_row = repo.get_booking(booking_id)
         if booking_row:
             upsert_booking_row(booking_row)

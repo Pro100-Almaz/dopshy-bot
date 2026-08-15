@@ -1188,16 +1188,118 @@ def test_bot_paid_webhook_confirms_and_notifies_the_client(hook_client, apipay_o
 
     assert len(sent_messages) == 1
     channel, to, text = sent_messages[0]
-    assert to == "87001234567"
+    assert to == "+77001234567", "E.164 — YCloud rejects the local '8…' form"
     assert channel.phone_number_id == "7770001"
     assert "Төлем қабылданды" in text, "must answer in the language the client used"
 
 
-def test_manager_invoices_notify_nobody(apipay_on):
-    """Manager-created invoices are reported in the UI, not pushed to WhatsApp."""
-    from integrations import apipay_service
+def _wait_for(messages, count=1, timeout=2.5):
+    """The webhook answers inside its 5-second budget and notifies off-thread,
+    so the message lands just after the response."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and len(messages) < count:
+        time.sleep(0.02)
+    return messages
 
-    apipay_service.notify_paid({"notify_chat_id": None, "amount": 10000}, [1])  # no raise
+
+def test_manager_invoice_paid_notifies_the_billed_number(client, hook_client,
+                                                         apipay_on, monkeypatch):
+    """A manager-created invoice carries no chat — but the client was still
+    charged in their Kaspi app, so they still have to hear it landed."""
+    sent = []
+    monkeypatch.setattr("handlers.whatsapp_client.send_text_message",
+                        lambda channel, to, text: sent.append((channel, to, text)))
+
+    data = _make_batch(client, date="2027-09-01")
+    _post_webhook(hook_client, data["invoice"]["id"], "paid")
+
+    _wait_for(sent)
+    assert len(sent) == 1
+    _, to, text = sent[0]
+    # The invoice row holds ApiPay's '8XXXXXXXXXX'; the provider takes E.164.
+    assert normalize_phone(_PHONE) == "87001234567"
+    assert to == "+77001234567"
+    assert "Оплата получена" in text and "Төлем қабылданды" in text, \
+        "nobody chose a language for this invoice — send both"
+
+
+def test_expired_invoice_tells_the_client_the_slot_is_gone(client, hook_client,
+                                                           apipay_on, monkeypatch):
+    """The slot goes back on the market either way; the client learning that
+    from us is the difference between rebooking and turning up."""
+    sent = []
+    monkeypatch.setattr("handlers.whatsapp_client.send_text_message",
+                        lambda channel, to, text: sent.append((channel, to, text)))
+
+    data = _make_batch(client, date="2027-09-02")
+    _post_webhook(hook_client, data["invoice"]["id"], "expired")
+
+    assert set(_states(data["booking_ids"]).values()) == {"unpaid"}
+    _wait_for(sent)
+    assert len(sent) == 1
+    text = sent[0][2]
+    assert "Срок оплаты" in text
+    assert "10:00–11:00" in text and "12:00–13:00" in text, \
+        "both slots of the batch, in one message"
+
+
+def test_failed_invoice_is_worded_as_a_failure_not_a_timeout(client, hook_client,
+                                                             apipay_on, monkeypatch):
+    sent = []
+    monkeypatch.setattr("handlers.whatsapp_client.send_text_message",
+                        lambda channel, to, text: sent.append((channel, to, text)))
+
+    data = _make_batch(client, date="2027-09-04")
+    _post_webhook(hook_client, data["invoice"]["id"], "error")
+
+    _wait_for(sent)
+    assert len(sent) == 1
+    assert "Оплата не прошла" in sent[0][2]
+
+
+def test_a_payment_that_released_nothing_says_nothing(client, hook_client,
+                                                      apipay_on, monkeypatch):
+    """The invoice died, but a manager had already confirmed the bookings by
+    hand. Telling that client their slot is gone would be a lie."""
+    sent = []
+    monkeypatch.setattr("handlers.whatsapp_client.send_text_message",
+                        lambda channel, to, text: sent.append((channel, to, text)))
+
+    data = _make_batch(client, date="2027-09-05")
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE bookings SET state = 'confirmed' WHERE id = ANY(%s)",
+                        (data["booking_ids"],))
+
+    _post_webhook(hook_client, data["invoice"]["id"], "expired")
+
+    _wait_for(sent)
+    assert sent == []
+    assert set(_states(data["booking_ids"]).values()) == {"confirmed"}
+
+
+def test_refund_reaches_the_client_though_no_booking_moves(client, hook_client,
+                                                           apipay_on, monkeypatch):
+    """A refund transitions nothing — under a 'did any booking change?' gate it
+    would reach nobody, which is exactly the message a client is waiting for."""
+    sent = []
+    monkeypatch.setattr("handlers.whatsapp_client.send_text_message",
+                        lambda channel, to, text: sent.append((channel, to, text)))
+
+    data = _make_batch(client, date="2027-09-03")
+    _post_webhook(hook_client, data["invoice"]["id"], "paid")
+    _wait_for(sent)
+    sent.clear()
+
+    r = _post_webhook(hook_client, data["invoice"]["id"], "refunded",
+                      event="invoice.refunded")
+
+    assert r.status_code == 200
+    assert r.get_json()["bookings"] == []
+    _wait_for(sent)
+    assert len(sent) == 1
+    assert "Возврат оформлен" in sent[0][2]
+    assert "20 000₸" in sent[0][2]
 
 
 def test_receipt_payment_retires_the_apipay_invoice(apipay_on, monkeypatch):

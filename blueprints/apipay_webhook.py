@@ -81,12 +81,17 @@ def receive_apipay_webhook():
         return jsonify({"status": "ok", "duplicate": True}), 200
 
     changed = result["changed"]
-    if changed:
+    # A refund moves no booking — the slot was settled long before the money
+    # went back — so it would never reach the client under a `changed`-only
+    # gate, while it is exactly the kind of thing they are waiting to hear.
+    # 'processing' → 'pending' stays out: nothing to tell, and a needless
+    # week-sheet repaint on the way.
+    if changed or status == STATUS_REFUNDED:
         # Off the 5-second budget. Shared with the reconciliation poller, so a
         # payment found by polling notifies and syncs identically.
         threading.Thread(target=apipay_service.after_transition,
-                         args=(result["invoice"], changed,
-                               result["released"], result["paid"]),
+                         args=(result["invoice"], changed, result["released"],
+                               result["paid"], result["status"]),
                          daemon=True).start()
 
     return jsonify({"status": "ok", "bookings": changed}), 200

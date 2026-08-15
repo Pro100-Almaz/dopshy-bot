@@ -35,7 +35,7 @@ import uuid
 import psycopg2.extras
 
 import config
-from integrations import apipay_client
+from integrations import apipay_client, client_notify
 from integrations.apipay_client import ApiPayError
 from integrations.repo import apipay_repo
 from integrations.repo.history_repo import _record_history
@@ -517,51 +517,74 @@ def apply_paid(cur, invoice_row: dict) -> list[int]:
     return confirmed
 
 
-_PAID_MESSAGE = {
-    "ru": ("✅ Оплата получена — бронь подтверждена!\n\n"
-           "💰 Аванс: {amount}\n"
-           "⚠️ Возврат при неявке не производится.\n\n"
-           "До встречи на поле! ⚽"),
-    "kk": ("✅ Төлем қабылданды — брондау расталды!\n\n"
-           "💰 Аванс: {amount}\n"
-           "⚠️ Келмесеңіз төлем қайтарылмайды.\n\n"
-           "Алаңда кездескенше! ⚽"),
-}
+def _notify_invoice_client(invoice_row: dict, key: str, **fields) -> None:
+    """Send `key` to whoever this invoice belongs to.
+
+    Two ways in, because invoices are raised two ways:
+
+      * A BOT invoice carries `notify_chat_id` ("{phone_number_id}:{sender_id}")
+        and `notify_lang` — the conversation that asked for the slot, and the
+        language it was held in. The answer goes back down that exact channel.
+      * A MANAGER invoice carries neither: it was raised from the sheet, and the
+        client never wrote to us about it. It goes to the number that was
+        billed, on the default channel, bilingually — they were still charged in
+        their Kaspi app, so they still need to hear what became of it.
+
+    Never raises — `client_notify.send` swallows everything, and the booking
+    transition this reports is already committed.
+    """
+    chat_id = invoice_row.get("notify_chat_id") or ""
+    phone_number_id, _, recipient = chat_id.partition(":")
+    if chat_id and not recipient:
+        logger.warning("[APIPAY] Некорректный notify_chat_id=%s — уведомляем по номеру",
+                       chat_id)
+    if recipient:
+        client_notify.send(recipient, key, invoice_row.get("notify_lang"),
+                           provider=invoice_row.get("notify_provider"),
+                           phone_number_id=phone_number_id, **fields)
+        return
+    client_notify.send(invoice_row.get("phone"), key, **fields)
 
 
 def notify_paid(invoice_row: dict, confirmed_ids: list[int]) -> None:
-    """Tell a bot-created invoice's client that their payment landed.
-
-    Manager-created invoices carry no `notify_chat_id` — those are reported in
-    the manager UI — so this is a no-op for them. Never raises: the booking is
-    already confirmed, and a failed WhatsApp send must not undo that or make
-    the webhook retry.
-    """
-    chat_id = invoice_row.get("notify_chat_id")
-    if not chat_id or not confirmed_ids:
+    """Tell the client their payment landed and the slots are theirs."""
+    if not confirmed_ids:
         return
-    try:
-        # chat_id is "{phone_number_id}:{sender_id}" — see message_handler.
-        phone_number_id, _, recipient = chat_id.partition(":")
-        if not recipient:
-            logger.warning("[APIPAY] Некорректный notify_chat_id=%s", chat_id)
-            return
-        from handlers.whatsapp_client import send_text_message
-        from integrations.providers.payload import OutboundChannel
+    _notify_invoice_client(invoice_row, "apipay_paid",
+                           amount=client_notify.fmt_amount(invoice_row.get("amount")))
 
-        lang = invoice_row.get("notify_lang") or "ru"
-        text = _PAID_MESSAGE.get(lang, _PAID_MESSAGE["ru"]).format(
-            amount=f"{int(invoice_row['amount']):,}₸".replace(",", " "))
-        send_text_message(
-            OutboundChannel(provider=invoice_row.get("notify_provider") or "ycloud",
-                            phone_number_id=phone_number_id),
-            recipient, text,
-        )
-        logger.info("[APIPAY] Клиенту %s отправлено подтверждение оплаты броней %s",
-                    recipient, confirmed_ids)
-    except Exception:
-        logger.exception("[APIPAY] Не удалось уведомить клиента об оплате счёта %s",
-                         invoice_row.get("invoice_id"))
+
+def notify_unpaid(invoice_row: dict, released_ids: list[int], status: str) -> None:
+    """Tell the client an invoice died and took their reservation with it.
+
+    Only for slots this actually released: a booking already confirmed another
+    way (receipt, manager) keeps its slot, and telling that client it was
+    cancelled would be worse than saying nothing.
+
+    'expired' is the payment window running out; 'cancelled'/'error' is the
+    payment itself failing — different wording, since only one of them is
+    something the client can fix by paying faster next time.
+    """
+    if not released_ids:
+        return
+    from integrations.repo import booking_repo
+
+    key = ("apipay_expired" if status == apipay_client.STATUS_EXPIRED
+           else "apipay_failed")
+    _notify_invoice_client(
+        invoice_row, key,
+        slots=client_notify.fmt_slots(booking_repo.get_bookings(released_ids)))
+
+
+def notify_refunded(invoice_row: dict) -> None:
+    """Tell the client the money came back.
+
+    Refunds are issued by hand from the ApiPay dashboard, so the webhook is the
+    first moment anything automated knows one happened — and the client is
+    otherwise left watching their account for a return nobody confirmed.
+    """
+    _notify_invoice_client(invoice_row, "apipay_refunded",
+                           amount=client_notify.fmt_amount(invoice_row.get("amount")))
 
 
 def apply_failed(cur, invoice_row: dict, status: str) -> list[int]:
@@ -609,8 +632,11 @@ def apply_webhook_status(invoice_id, status: str, paid_at=None,
     """Claim a webhook's status transition and apply its booking effect — atomically.
 
     Returns None when there is nothing to do: an unknown invoice, or a status
-    the row already holds (i.e. a redelivery). Otherwise
-    ``{"invoice": row, "changed": [booking_id, ...], "released": bool, "paid": bool}``.
+    the row already holds (i.e. a redelivery). Otherwise ``{"invoice": row,
+    "changed": [booking_id, ...], "released": bool, "paid": bool,
+    "status": str}`` — `status` is the NEW one, since `row` is deliberately the
+    pre-update snapshot (the caller needs the booking_ids and amount the invoice
+    was raised for) and the client's message depends on which way it went.
 
     ONE transaction, deliberately. Claiming in a transaction of its own and
     applying in another leaves a window — a crash, a DB blip, or any error
@@ -631,25 +657,33 @@ def apply_webhook_status(invoice_id, status: str, paid_at=None,
                 return None
             if status == apipay_client.STATUS_PAID:
                 return {"invoice": row, "changed": apply_paid(cur, row),
-                        "released": False, "paid": True}
+                        "released": False, "paid": True, "status": status}
             if status in apipay_client.FAILED_STATUSES:
                 return {"invoice": row, "changed": apply_failed(cur, row, status),
-                        "released": True, "paid": False}
+                        "released": True, "paid": False, "status": status}
             # processing → pending and refunds: recorded on the invoice, no
             # booking transition (a refund is settled with the client, not here).
-            return {"invoice": row, "changed": [], "released": False, "paid": False}
+            return {"invoice": row, "changed": [], "released": False,
+                    "paid": False, "status": status}
 
 
 def after_transition(invoice_row: dict, booking_ids: list[int],
-                     released: bool, paid: bool) -> None:
+                     released: bool, paid: bool, status: str | None = None) -> None:
     """Everything a status change triggers beyond the booking rows themselves.
 
     Shared by the webhook and the reconciliation poller: a payment discovered
     by polling must reach the client and the sheet exactly like one announced
     by a webhook. Never raises — the booking state is already committed.
+
+    `status` is the invoice's new status; without it only the paid case can be
+    told apart, which is why the two callers always pass it.
     """
     if paid:
         notify_paid(invoice_row, booking_ids)
+    elif released:
+        notify_unpaid(invoice_row, booking_ids, status or "")
+    elif status == apipay_client.STATUS_REFUNDED:
+        notify_refunded(invoice_row)
     sync_sheets(booking_ids, released)
 
 
@@ -748,7 +782,7 @@ def reconcile_open_invoices() -> int:
             "не дошёл. Брони %s", row["invoice_id"], status, row["status"],
             result["changed"] or "не затронуты")
         after_transition(result["invoice"], result["changed"],
-                         result["released"], result["paid"])
+                         result["released"], result["paid"], result["status"])
 
     return changed
 

@@ -269,6 +269,29 @@ def get_booking(booking_id: int) -> dict | None:
             return dict(row) if row else None
 
 
+def get_bookings(booking_ids: list[int]) -> list[dict]:
+    """`get_booking` for a set of ids, in one round trip.
+
+    Exists for the callers that describe a whole batch to the client — a
+    cancelled repeating series can run to hundreds of occurrences, and looping
+    `get_booking` over them is that many queries inside a request. Ordered by
+    slot so the message reads as a calendar; missing ids are simply absent.
+    """
+    if not booking_ids:
+        return []
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
+                       group_transition
+                FROM bookings WHERE id = ANY(%s)
+                ORDER BY date, time_start, field
+            """, (list(booking_ids),))
+            return [dict(r) for r in cur.fetchall()]
+
+
 
 def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
     """
