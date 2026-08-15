@@ -42,18 +42,20 @@ def test_an_international_number_is_left_alone():
 # Rendering
 # ---------------------------------------------------------------------------
 
-def test_a_known_language_answers_only_in_it():
-    text = client_notify.render("apipay_paid", "kk", amount="10 000₸")
-    assert "Төлем қабылданды" in text
-    assert "Оплата получена" not in text
+def test_every_message_is_russian_only():
+    """The catalogue carries one language; a stray key would ship untranslated
+    text to a client."""
+    for key, texts in client_notify.MESSAGES.items():
+        assert set(texts) == {"ru"}, key
 
 
-def test_an_unknown_language_answers_in_both():
+def test_any_language_answers_in_russian():
     """Manager actions carry no language — nobody asked the client anything —
-    and a bad `notify_lang` must not cost them the notification either."""
-    for lang in (None, "en", ""):
+    and a `notify_lang` with no entry (including 'kk', still stored against
+    older invoices) must not cost them the notification."""
+    for lang in (None, "ru", "kk", "en", ""):
         text = client_notify.render("apipay_paid", lang, amount="10 000₸")
-        assert "Оплата получена" in text and "Төлем қабылданды" in text
+        assert "Оплата получена" in text
 
 
 def test_amounts_read_as_money():

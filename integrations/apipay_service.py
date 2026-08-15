@@ -142,7 +142,6 @@ def _avans_description(count: int, customer: str | None = None) -> str:
 
 
 def ensure_kaspi_client(phone: str) -> str | None:
-    return "1"
     """Check `phone` can actually receive an invoice. Returns the Kaspi name.
 
     Called by both entry points BEFORE anything is reserved, because this is the

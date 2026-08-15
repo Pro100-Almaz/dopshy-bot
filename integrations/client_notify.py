@@ -16,10 +16,10 @@ Two rules the whole module is built around:
     call to a daemon thread, which is what the manager API uses — its response
     must not wait on Meta/YCloud, and the ApiPay webhook has a 5-second budget.
 
-Language: bot-created invoices carry the language the client actually used
-(`notify_lang`), so those answer in it. Manager actions carry no language at all
-— nobody asked the client anything — so those go out bilingual (RU + KK), the
-same shape as the reservation-TTL notice in `app.py`.
+Language: every notification goes out in Russian. `notify_lang` is still
+accepted and carried by bot-created invoices, but the catalogue holds only RU,
+so it currently changes nothing — re-adding a language means adding its key to
+`MESSAGES`, not touching the senders.
 """
 
 import logging
@@ -44,43 +44,31 @@ def _default_phone_number_id() -> str:
 # Message catalogue
 # ---------------------------------------------------------------------------
 #
-# One entry per event, `{token}` formatted by the caller. Kazakh is not
-# optional here: these are the messages a client gets without having written to
-# us first, so the one they can read has to be in the message itself.
+# One entry per event, `{token}` formatted by the caller. Russian only — the
+# nesting by language is kept so a second language is a new key here rather than
+# a change to `render` and its callers.
 
 MESSAGES: dict[str, dict[str, str]] = {
     # ── Manager actions ───────────────────────────────────────────────────
     "manager_cancelled": {
         "ru": ("❌ Ваша бронь отменена.\n\n"
                "{slots}\n\n"
-               "Если это ошибка — напишите нам, мы поможем."),
-        "kk": ("❌ Брондауыңыз жойылды.\n\n"
-               "{slots}\n\n"
-               "Қате болса — бізге жазыңыз, көмектесеміз."),
+               "Если это ошибка — позвоните администратору"),
     },
     "manager_series_cancelled": {
         "ru": ("❌ Все повторяющиеся брони отменены.\n\n"
                "{slots}\n\n"
-               "Если это ошибка — напишите нам, мы поможем."),
-        "kk": ("❌ Барлық қайталанатын брондаулар жойылды.\n\n"
-               "{slots}\n\n"
-               "Қате болса — бізге жазыңыз, көмектесеміз."),
+               "Если это ошибка — позвоните администратору"),
     },
     "manager_confirmed": {
         "ru": ("✅ Ваша бронь подтверждена!\n\n"
                "{slots}\n\n"
                "До встречи на поле! ⚽"),
-        "kk": ("✅ Брондауыңыз расталды!\n\n"
-               "{slots}\n\n"
-               "Алаңда кездескенше! ⚽"),
     },
     "manager_unpaid": {
         "ru": ("⚠️ Бронь снята — оплата не поступила.\n\n"
                "{slots}\n\n"
                "Слот снова свободен. Хотите забронировать заново? Напишите нам!"),
-        "kk": ("⚠️ Брондау алынып тасталды — төлем түспеді.\n\n"
-               "{slots}\n\n"
-               "Уақыт қайта бос. Қайта брондау үшін бізге жазыңыз!"),
     },
 
     # ── ApiPay ────────────────────────────────────────────────────────────
@@ -89,36 +77,22 @@ MESSAGES: dict[str, dict[str, str]] = {
                "💰 Аванс: {amount}\n"
                "⚠️ Возврат при неявке не производится.\n\n"
                "До встречи на поле! ⚽"),
-        "kk": ("✅ Төлем қабылданды — брондау расталды!\n\n"
-               "💰 Аванс: {amount}\n"
-               "⚠️ Келмесеңіз төлем қайтарылмайды.\n\n"
-               "Алаңда кездескенше! ⚽"),
     },
     "apipay_expired": {
         "ru": ("⏰ Срок оплаты счёта истёк — бронь снята.\n\n"
                "{slots}\n\n"
                "Слот снова свободен. Хотите забронировать заново? Напишите нам!"),
-        "kk": ("⏰ Шот төлеу мерзімі өтті — брондау алынып тасталды.\n\n"
-               "{slots}\n\n"
-               "Уақыт қайта бос. Қайта брондау үшін бізге жазыңыз!"),
     },
     "apipay_failed": {
         "ru": ("❌ Оплата не прошла — бронь снята.\n\n"
                "{slots}\n\n"
                "Слот снова свободен. Попробуйте забронировать заново — "
                "или напишите нам, если нужна помощь."),
-        "kk": ("❌ Төлем өтпеді — брондау алынып тасталды.\n\n"
-               "{slots}\n\n"
-               "Уақыт қайта бос. Қайта брондап көріңіз — "
-               "немесе көмек керек болса, бізге жазыңыз."),
     },
     "apipay_refunded": {
         "ru": ("↩️ Возврат оформлен: {amount}.\n\n"
                "Деньги вернутся на карту, с которой была оплата. "
                "Если возникнут вопросы — напишите нам."),
-        "kk": ("↩️ Қайтарым рәсімделді: {amount}.\n\n"
-               "Ақша төлем жасалған картаға қайтарылады. "
-               "Сұрақ туындаса — бізге жазыңыз."),
     },
 }
 
@@ -160,7 +134,7 @@ def fmt_slots(bookings: list[dict]) -> str:
     listed = "\n".join(fmt_slot(b) for b in rows[:_MAX_LISTED_SLOTS])
     hidden = len(rows) - _MAX_LISTED_SLOTS
     if hidden > 0:
-        listed += f"\n… и ещё {hidden} / тағы {hidden}"
+        listed += f"\n… и ещё {hidden}"
     return listed
 
 
@@ -173,15 +147,15 @@ def fmt_amount(value) -> str:
 
 
 def render(key: str, lang: str | None = None, **fields) -> str:
-    """Render `key`. `lang=None` → RU and KK in one message.
+    """Render `key`. The catalogue is Russian-only, so `lang` currently only
+    matters if a second language is added back to `MESSAGES`.
 
-    An unknown language falls back to Russian rather than raising: a bad
-    `notify_lang` must not cost the client their notification.
+    A language with no entry falls back to Russian rather than raising: a bad
+    `notify_lang` — or one left over from when Kazakh was carried — must not
+    cost the client their notification.
     """
     texts = MESSAGES[key]
-    if lang in texts:
-        return texts[lang].format(**fields)
-    return f"{texts['ru'].format(**fields)}\n\n{texts['kk'].format(**fields)}"
+    return texts.get(lang or "", texts["ru"]).format(**fields)
 
 
 # ---------------------------------------------------------------------------
