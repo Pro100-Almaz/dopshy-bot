@@ -65,7 +65,11 @@ Success handlers usually return just `{"ok": true, "data": ...}`.
 ### Error codes (`code` field)
 `INVALID`, `NOT_FOUND`, `SLOT_TAKEN`, `TIME_IN_PAST`, `INVALID_TIME`,
 `INVALID_FIELD`, `INVALID_STATE`, `BOOKING_WRONG_STATE`, `NO_CHANGE`,
-`PAYMENT_DUPLICATE`, plus auth codes.
+`PAYMENT_DUPLICATE`, `NO_KASPI`, `PAYMENT_PROVIDER_ERROR`, plus auth codes.
+
+`NO_KASPI` (400, batch only): the `phone` is not registered in Kaspi, so the
+avans cannot be pushed to it. Checked **before** anything is inserted — nothing
+was created, and the request can be repeated with another number.
 
 ### Booking state machine
 `draft → awaiting_payment → confirmed`; exits `cancelled`, `unpaid`, `failed`.
@@ -97,16 +101,15 @@ Slot overlap enforced by a DB `EXCLUDE` constraint scoped to
 | `created_at` | ISO datetime | |
 | `updated_at` | ISO datetime | |
 | `group_transition` | uuid string | **links cross-midnight halves** (§4) |
-| `payment_current` | number | sum of payment amounts (added by endpoint; default `0`) |
+| `paid_avans` | float | avans **requested** at booking time — not money received; do not sum with `paid_api` |
+| `paid_api` | number | sum of all accepted payments for the booking (added by endpoint; default `0`) |
 | `last_receipt_date` | date/`""` | latest receipt date across payments |
 
 ### `BookingDetail` — **GET one** (`/bookings/{id}`)
-⚠️ **Smaller shape.** No payments join, fewer columns:
-`id, field, date, time_start, time_end, customer_name, phone, notes, state,
-price_total, source, created_at, group_transition`.
-Absent: `reserved_until, paid_kaspi_qr, paid_cash, updated_at, payment_current,
-last_receipt_date`. (Also note: GET-one is **not** filtered for completeness, so
-it can return a row with empty slot fields if you fetch such an id directly.)
+Same enrichment as the list endpoints — `paid_api`, `last_receipt_date` and the
+manual buckets are all present. (Note: GET-one is **not** filtered for
+completeness, so it can return a row with empty slot fields if you fetch such an
+id directly.)
 
 ### `FieldRow` — `GET /fields` → `data.fields[]`
 `id`:int, `name`:string, `description`:string(`""`), `format`:string(`"5x5"`/`"6x6"`),

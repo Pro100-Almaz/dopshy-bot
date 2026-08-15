@@ -307,7 +307,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                         _confirm, _ready_draft["id"],
                     )
                     reply = LlmBookingFlowHandler().handle(
-                        {}, chat_id, user_text, sender_id, _lang
+                        {}, chat_id, user_text, sender_id, _lang, channel.provider
                     )
                     append_message(chat_id, "user", user_text)
                     append_message(chat_id, "assistant", reply)
@@ -359,7 +359,8 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 extracted_data = extract_booking_details(history, user_text)
                 logger.info("[BOOKING] Data Extracted: %s", extracted_data)
                 handler = LlmBookingFlowHandler()
-                reply = handler.handle(extracted_data, chat_id, user_text, sender_id, lang)
+                reply = handler.handle(extracted_data, chat_id, user_text, sender_id, lang,
+                                       channel.provider)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", reply)
                 logger.info("[LLM2] reply: %s", reply)
@@ -373,7 +374,8 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 target = get_existing_draft(sender_id)
                 if target:
                     handler = LlmBookingFlowHandler()
-                    reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
+                    reply = handler.handle(extracted, chat_id, user_text, sender_id, lang,
+                                           channel.provider)
                     send_text_message(channel, sender_id, reply)
                     return
 
@@ -535,7 +537,8 @@ def _handle_payment_receipt(channel: OutboundChannel, sender_phone: str,
         send_text_message(
             channel,
             sender_phone,
-            "Оплата принята! Спасибо. ✅\nТөлем қабылданды! Рахмет. ✅",
+            "У вас нет активной брони. Если это ошибка, свяжитесь с администратором."
+            "\n\nСізде белсенді бронь табылмады. Егер бұл қателік болса администратормен хабарласыңыз.",
         )
         return
 

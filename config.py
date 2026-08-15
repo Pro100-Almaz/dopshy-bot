@@ -100,7 +100,7 @@ BOOKING_FIELDS: list = _json.loads(
                                 '{"id":3,"format":"5x5"}]')
 )
 BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
-BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1800"))  # seconds
+BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1200"))  # seconds
 PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "1200"))  # 20 minutes
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
 
@@ -108,6 +108,30 @@ KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pa
 PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
 PAYMENT_RECEIPT_MAX_AGE_HOURS: int = int(os.getenv("PAYMENT_RECEIPT_MAX_AGE_HOURS", "24"))
 PAYMENT_MIN: int = 10000
+
+# ---------------------------------------------------------------------------
+# ApiPay.kz — online avans via Kaspi Pay (https://apipay.kz)
+# ---------------------------------------------------------------------------
+# Server-side only: the API key must never reach a browser or the Apps Script.
+APIPAY_API_KEY: str = os.getenv("APIPAY_API_KEY", "")
+APIPAY_WEBHOOK_SECRET: str = os.getenv("APIPAY_WEBHOOK_SECRET", "")
+APIPAY_BASE_URL: str = os.getenv("APIPAY_BASE_URL", "https://api.apipay.kz/api/v1")
+APIPAY_TIMEOUT: float = float(os.getenv("APIPAY_TIMEOUT", "10"))
+# Avans charged per non-repeating booking in a bookings/batch request. Repeating
+# slots are never charged an avans (one invoice per batch = this x slot count).
+APIPAY_AVANS_PER_BOOKING: int = int(os.getenv("APIPAY_AVANS_PER_BOOKING", "10000"))
+
+# Ask `POST /clients/check` whether the number is registered in Kaspi before
+# any invoice is raised for it. On by default: an invoice to a number Kaspi does
+# not know fails only later, via webhook, so neither the client nor the manager
+# would learn about it in the request that asked — and it still costs one of the
+# account's daily invoices. Set to 0 only if the endpoint itself misbehaves.
+APIPAY_CHECK_CLIENT: bool = os.getenv("APIPAY_CHECK_CLIENT", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
+# The whole integration is inert until both secrets are present, so a machine
+# without them keeps the old manual-receipt flow instead of failing batches.
+APIPAY_ENABLED: bool = bool(APIPAY_API_KEY and APIPAY_WEBHOOK_SECRET)
 
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:

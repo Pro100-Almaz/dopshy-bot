@@ -7,6 +7,11 @@
   "manager_kaspi_qr_change": "Изменен сумма оплаты через KaspiQR c [OLD_AMOUNT] на [NEW_AMOUNT]",
   "manager_cash_change": "Изменен сумма оплаты наличными с [OLD_AMOUNT] на [NEW_AMOUNT]",
 
+  "apipay_paid": "Оплата аванса [AMOUNT]тг через Kaspi (ApiPay), счёт №[INVOICE_ID].",
+  "apipay_cancelled": "Счёт ApiPay №[INVOICE_ID] отменён. Причина: [REASON].",
+  "apipay_ttl": "Время на оплату истекло — счёт ApiPay №[INVOICE_ID] закрыт, бронь освобождена.",
+  "apipay_send_failed": "Счёт ApiPay выставить не удалось ([REASON]) — бронь снята, слот освобождён.",
+
   "booking_created": "Создание брони.",
   "payment_rejected": "Оплата отклонена. [REJECT_REASON]",
   "cancel_all_bookings": "Все последующие брони начиная с [DATE] отменены для клиента [CUSTOMER_NAME] [CUSTOMER_PHONE]"

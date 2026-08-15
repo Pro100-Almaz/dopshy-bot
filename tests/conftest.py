@@ -37,12 +37,26 @@ def _migrated_schema():
 
 
 @pytest.fixture(autouse=True)
+def clean_rate_limit():
+    """Forget the manager API's per-IP request counter between tests.
+
+    It is a process-global dict with a 60-second window, so without this the
+    calls of one test file count against the next one — adding a test anywhere
+    can push an unrelated file over the limit and turn its assertions into
+    unexplained 429s.
+    """
+    from blueprints.manager_api import _rate_hits
+    _rate_hits.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def clean_db(_migrated_schema):
     from integrations.repo.postgres import _conn
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE bookings, booking_events, payments, booking_sessions "
-                "RESTART IDENTITY CASCADE"
+                "TRUNCATE bookings, booking_events, payments, booking_sessions, "
+                "apipay_invoices RESTART IDENTITY CASCADE"
             )
     yield

@@ -22,7 +22,8 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import booking_service
+from integrations import apipay_client, apipay_service, booking_service
+from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
     create_or_update_group, on_manual_group_edit, on_manual_group_schedule_edit
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
@@ -97,14 +98,26 @@ def _authenticate():
 
 
 def _combine_bookings_payments(bookings: list[dict], payments: list[dict]) -> list[dict]:
+    """Attach aggregated payment info to each booking row.
+
+    `paid_api` is the SUM of every accepted payment on the booking, matched on
+    payments.booking_id — WhatsApp receipts and ApiPay avans alike. A booking
+    settled in several parts reports its full total, and one with no payments
+    at all reports 0 rather than omitting the key.
+    """
+    totals: dict[int, Decimal] = {}
+    latest_receipt: dict[int, datetime] = {}
+    for payment in payments:
+        bid = payment["booking_id"]
+        totals[bid] = totals.get(bid, Decimal(0)) + Decimal(str(payment.get("amount") or 0))
+        rd = payment.get("receipt_date")
+        if rd and (latest_receipt.get(bid) is None or rd > latest_receipt[bid]):
+            latest_receipt[bid] = rd
+
     for booking in bookings:
-        booking.setdefault("last_receipt_date", None)
-        for payment in payments:
-            if payment['booking_id'] == booking["id"]:
-                booking["paid_bot"] = payment.get("amount") or 0
-                rd = payment.get("receipt_date")
-                if rd and (booking["last_receipt_date"] is None or rd > booking["last_receipt_date"]):
-                    booking["last_receipt_date"] = rd
+        bid = booking["id"]
+        booking["paid_api"] = totals.get(bid, Decimal(0))
+        booking["last_receipt_date"] = latest_receipt.get(bid)
         for p in ("paid_kaspi_qr", "paid_cash", "paid_avans"):
             booking[p] = booking.get(p) or 0
     return bookings
@@ -157,8 +170,8 @@ def list_all_bookings():
 def get_booking(booking_id: int):
     """Full detail for a single booking, with aggregated payment info.
 
-    Mirrors the list endpoints: the raw booking row is enriched with the
-    bot-collected payment total (`paid_bot`), the latest receipt date
+    Mirrors the list endpoints: the raw booking row is enriched with the total
+    of all accepted payments (`paid_api`), the latest receipt date
     (`last_receipt_date`) and the manual payment buckets, so a manager can see
     everything about one booking in a single round trip.
     """
@@ -238,8 +251,9 @@ def list_history():
     """Booking change history (newest first), paginated.
 
     Optional filters:
-      ?source=<exact>            exact source ('whatsapp' or a manager id/email)
-      ?channel=whatsapp|manager  bot-driven vs any manager-driven
+      ?source=<exact>            exact source (a bot source such as 'whatsapp',
+                                 'chatbot:Бот' or 'bot:ApiPay', or a manager id/email)
+      ?channel=whatsapp|manager  bot-driven (incl. 'bot:*') vs manager-driven
     Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
     Without a filter, returns every history row.
     """
@@ -273,8 +287,8 @@ def get_history_in_range(start_date: str, end_date: str):
 
 @manager_api.get("/api/manager/history/source/<string:source>")
 def get_history_by_source(source: str):
-    """History rows from one exact source ('whatsapp' or a manager id/email),
-    newest first, paginated.
+    """History rows from one exact source (a bot source such as 'whatsapp',
+    'chatbot:Бот' or 'bot:ApiPay', or a manager id/email), newest first, paginated.
 
     Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
     """
@@ -349,6 +363,14 @@ def create_bookings_batch():
     (none|daily|weekly|monthly, until `repeat_until`) into one booking per
     occurrence. Creation is atomic: a single conflict rejects the whole batch.
     See booking_service.manager_create_bookings_batch.
+
+    AVANS: when ApiPay is configured, ONE invoice is created for the whole
+    batch — APIPAY_AVANS_PER_BOOKING (10 000 ₸) x the number of non-repeating
+    slots — and pushed to `phone`'s Kaspi app. Repeating slots carry no avans.
+    The invoice row is committed WITH the bookings and sent immediately after,
+    so a reservation never exists without a record of what it owes. A send that
+    fails leaves the batch created and the invoice queued for retry, reported
+    as `invoice.status = "created"` — not as an error.
     """
     body = request.get_json(silent=True) or {}
     slots = body.get("slots")
@@ -385,19 +407,89 @@ def create_bookings_batch():
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "too many occurrences (max 1000); shorten the repeat range."}), 400
 
-    res = booking_service.manager_create_bookings_batch(
-        slots,
-        customer=body.get("customer"),
-        phone=body.get("phone"),
-        notes=body.get("notes"),
-        price_total=body.get("price_total"),
-        prepayment=body.get("prepayment"),
-        actor_id=_api_key_actor(),
-        reserved_until=body.get("reserved_until", 30),
-        updated_by=body.get("source", "Неизвестен"),
-    )
+    # ── Avans invoice (ApiPay) ────────────────────────────────────────────────
+    # Only non-repeating slots are charged, so a batch of pure repeats needs no
+    # phone. Validate the number here, before anything is inserted: a phone
+    # ApiPay would reject with a 422 must not cost us a rolled-back batch.
+    phone = body.get("phone")
+    chargeable_slots = sum(1 for s in slots if (s.get("repeat_mode") or "none") == "none")
+    invoice_hook = None
+    avans_per_booking = None
+    if config.APIPAY_ENABLED and chargeable_slots:
+        if not phone:
+            return jsonify({"ok": False, "code": "INVALID",
+                            "message": "phone обязателен: на него выставляется аванс."}), 400
+        try:
+            apipay_client.normalize_phone(phone)
+        except ApiPayError as exc:
+            return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+        # And ask Kaspi whether it knows the number at all. An invoice to an
+        # unknown one is accepted and only dies later as a webhook, so the
+        # manager would get a 200 here and never hear that it failed — while the
+        # dead invoice still counts against the daily creation quota.
+        try:
+            apipay_service.ensure_kaspi_client(phone)
+        except KaspiClientMissing as exc:
+            logger.warning("[MANAGER_API] Пакет отклонён: %s", exc)
+            return jsonify({"ok": False, "code": "NO_KASPI", "error": "no_kaspi_client",
+                            "message": f"{exc}"}), 400
+        except ApiPayError as exc:
+            logger.error("[MANAGER_API] Проверка номера в Kaspi не удалась: %s", exc)
+            return jsonify({"ok": False, "code": "PAYMENT_PROVIDER_ERROR",
+                            "error": "apipay_error", "error_message": str(exc),
+                            "message": f"Не удалось проверить номер в Kaspi: {exc}. "
+                                       "Брони не созданы, попробуйте ещё раз."}), 502
+        invoice_hook = apipay_service.batch_invoice_hook(phone, body.get("customer"))
+        avans_per_booking = config.APIPAY_AVANS_PER_BOOKING
+
+    try:
+        res = booking_service.manager_create_bookings_batch(
+            slots,
+            customer=body.get("customer"),
+            phone=phone,
+            notes=body.get("notes"),
+            price_total=body.get("price_total"),
+            prepayment=body.get("prepayment"),
+            actor_id=_api_key_actor(),
+            reserved_until=body.get("reserved_until", 30),
+            updated_by=body.get("source", "Неизвестен"),
+            on_created=invoice_hook,
+            avans_per_booking=avans_per_booking,
+        )
+    except ApiPayError as exc:
+        # Only reachable before the invoice row is written (a phone ApiPay
+        # rejects outright); the batch transaction was rolled back.
+        logger.error("[MANAGER_API] ApiPay отклонил счёт, пакет отменён: %s", exc)
+        return jsonify({"ok": False, "code": "PAYMENT_PROVIDER_ERROR",
+                        "message": f"Не удалось выставить аванс: {exc}. "
+                                   "Брони не созданы, попробуйте ещё раз."}), 502
 
     if res["ok"]:
+        # Bookings and invoice row are committed — now ask ApiPay to push it.
+        # No invoice means no bookings: the whole batch is taken back (repeating
+        # slots included — one request, one outcome) and the failure is reported
+        # with ApiPay's own wording, so the manager can act on it or retry.
+        queued = (res.get("data") or {}).get("invoice")
+        if queued:
+            try:
+                res["data"]["invoice"] = apipay_service.send_invoice(queued)
+            except ApiPayError as exc:
+                cancelled = apipay_service.rollback_failed_send(
+                    queued, str(exc),
+                    booking_ids=(res.get("data") or {}).get("booking_ids") or [],
+                )
+                logger.error("[MANAGER_API] ApiPay не выставил счёт, брони %s "
+                             "отменены: %s", cancelled, exc)
+                return jsonify({
+                    "ok": False,
+                    "code": "PAYMENT_PROVIDER_ERROR",
+                    "error": "apipay_error",
+                    "error_message": str(exc),
+                    "message": f"Не удалось выставить аванс: {exc}. "
+                               "Брони отменены — попробуйте ещё раз.",
+                    "cancelled_booking_ids": cancelled,
+                }), 502
+
         for r in res.get("data", {}).get("created", []):
             if r.get("booking_id"):
                 booking_row = repo.get_booking(r["booking_id"])
@@ -406,6 +498,9 @@ def create_bookings_batch():
         return jsonify({"ok": True,
                         "created_count": data.get("created_count", 0),
                         "booking_ids": data.get("booking_ids", []),
+                        # Present only when an avans was charged; the client
+                        # confirms in their Kaspi app, we get a webhook.
+                        "invoice": data.get("invoice"),
                         "data": data}), 200
 
     # Conflict ->  409 with the precise collision list the FE renders.
@@ -476,15 +571,17 @@ def patch_booking(booking_id: int):
 
 
 @manager_api.delete("/api/manager/bookings/<int:booking_id>")
-def delete_booking(object_id: int):
+def delete_booking(booking_id: int):
+    # NB: the parameter name must match the <int:booking_id> route variable —
+    # Flask passes it by keyword.
     res = postgres.cancel_booking_trial(bot_name="dopsy_bot",
-        object_id=object_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
+        object_id=booking_id, actor_type="manager", actor_id=_api_key_actor(), reason="manager_cancel"
     )
     if res["ok"]:
-        booking_row = repo.get_booking(object_id)
+        booking_row = repo.get_booking(booking_id)
         if booking_row:
             upsert_booking_row(booking_row)
-        _single_table_erase(booking_row)
+            _single_table_erase(booking_row)
 
     return jsonify(res), (200 if res["ok"] else 404)
 

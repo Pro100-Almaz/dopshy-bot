@@ -312,10 +312,41 @@ This drops and recreates the ChromaDB collection (to avoid duplicate chunks) and
 | `GET` | `/health` | `{"status": "healthy"}` |
 | `GET` | `/api/manager/bookings?from=&to=` | List bookings (manager) |
 | `POST` | `/api/manager/bookings` | Create booking (manager) |
+| `POST` | `/api/manager/bookings/batch` | Create a batch of bookings + one ApiPay avans invoice |
 | `PATCH` | `/api/manager/bookings/<id>` | Update booking |
 | `DELETE` | `/api/manager/bookings/<id>` | Cancel booking |
+| `POST` | `/webhooks/apipay` | ApiPay.kz payment notifications (HMAC-signed) |
 
 All `/api/manager/*` endpoints require `X-API-Key: $X_SERVICE_TOKEN`.
+
+---
+
+## Online avans via ApiPay.kz (Kaspi Pay)
+
+`POST /api/manager/bookings/batch` charges the client an avans through
+[ApiPay.kz](https://apipay.kz) — see [docs/apipay.md](docs/apipay.md) for setup
+and the full flow. In short:
+
+- **One invoice per request**, never one per booking:
+  `APIPAY_AVANS_PER_BOOKING` (10 000 ₸) × the number of **non-repeating** slots.
+  Repeating slots carry no avans.
+- The invoice is pushed to `phone` (body field) as a payment request in their Kaspi app.
+- The number is checked against Kaspi first (`POST /clients/check`): one that is
+  not registered gets `400 NO_KASPI` **before** anything is created. Without the
+  check the invoice would be accepted and only fail later as a webhook — too late
+  to tell the manager or the client, and one invoice of the daily quota gone.
+- Created **inside the booking transaction** — if ApiPay refuses, the whole batch
+  is rolled back (`502 PAYMENT_PROVIDER_ERROR`) and no slot is reserved.
+- `POST /webhooks/apipay` with `status=paid` flips the covered bookings
+  `awaiting_payment → confirmed`; `cancelled`/`expired`/`error` flips them to
+  `unpaid` and frees the slot.
+- The 5-minute TTL sweeper cancels any still-open invoice before releasing a slot.
+- **Cancelling** an unpaid booking (manager, client or sweeper) cancels its invoice
+  and re-issues one for the rest of the batch. A payment that lands after
+  cancellation is flagged `paid_after_cancellation` for a **manual** refund.
+
+Leaving `APIPAY_API_KEY` / `APIPAY_WEBHOOK_SECRET` empty disables the integration
+entirely and keeps the manual receipt flow.
 
 ---
 

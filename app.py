@@ -44,6 +44,11 @@ app.register_blueprint(manager_api)
 from blueprints.manager_boxing_api import manager_boxing_api  # noqa: E402
 app.register_blueprint(manager_boxing_api)
 
+# ApiPay.kz payment webhook (POST /webhooks/apipay) — self-disables when the
+# APIPAY_* env vars are absent.
+from blueprints import apipay_webhook as _apipay_webhook  # noqa: E402
+_apipay_webhook.register(app)
+
 # CORS — only the manager API is browser-facing; webhooks/admin are server-to-server.
 # Origins come from config (CORS_ALLOWED_ORIGINS env, default "*"). The custom
 # X-API-Key header must be allow-listed so browsers don't strip it on preflight.
@@ -84,6 +89,20 @@ def _cancel_expired_bookings():
         expired = booking_repo.get_expired_bookings(config.BOOKING_SESSION_TTL)
         if not expired:
             return
+
+        # Cancel the ApiPay invoices BEFORE releasing the slots — otherwise the
+        # client could still confirm the payment in their Kaspi app for a
+        # booking that no longer exists.
+        #
+        # Done in bulk here, deliberately: cancel_booking_trial below also
+        # cancels invoices, but re-issues one for any booking of the batch that
+        # is still awaiting payment. In a TTL sweep the whole batch expires
+        # together, so the per-booking path would raise a new invoice for a
+        # booking that is about to expire microseconds later — a pointless Kaspi
+        # push to the client. Cancelling up front makes those calls no-ops.
+        from integrations import apipay_service
+        apipay_service.cancel_invoices_for_bookings(
+            [b["id"] for b in expired], reason="ttl_expired")
 
         for b in expired:
             target = "unpaid" if b["state"] == "awaiting_payment" else "cancelled"
@@ -128,6 +147,40 @@ def _cancel_expired_bookings():
         logger.error("[PAYMENT] Auto-cancel job failed: %s", exc)
 
 
+def _sweep_apipay_outbox():
+    """Re-send invoices committed but never delivered to ApiPay.
+
+    Without this a crash or an ApiPay outage between the booking commit and the
+    send would leave a client holding a reserved slot they were never asked to
+    pay for — until the TTL silently dropped it.
+    """
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import apipay_service
+        apipay_service.sweep_pending_sends()
+    except Exception as exc:
+        logger.error("[APIPAY] Outbox sweep failed: %s", exc)
+
+
+def _reconcile_apipay():
+    """Pull the status of invoices whose webhook never arrived.
+
+    The webhook is the fast path, not the only one: a deploy, a certificate or
+    DNS problem, or an outage longer than ApiPay's ~2h of retries silently
+    swallows a delivery. Without this, a paid invoice would sit 'processing'
+    until the TTL released the slot — the client pays, loses the booking, and
+    nothing in the system knows.
+    """
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import apipay_service
+        apipay_service.reconcile_open_invoices()
+    except Exception as exc:
+        logger.error("[APIPAY] Reconciliation failed: %s", exc)
+
+
 _scheduler = BackgroundScheduler(timezone=config.BOOKING_TIMEZONE)
 _scheduler.add_job(
     _scheduled_sheet_refresh,
@@ -140,6 +193,21 @@ _scheduler.add_job(
     _cancel_expired_bookings,
     trigger="interval",
     minutes=5,
+)
+# Tighter than the TTL sweep: an unsent invoice is a client waiting for a
+# payment request that never arrived, inside a 20-minute reservation window.
+_scheduler.add_job(
+    _sweep_apipay_outbox,
+    trigger="interval",
+    minutes=1,
+)
+# Each pass only looks at invoices quiet for 5+ minutes, so a paid-but-lost
+# webhook is found well inside the 30-minute reservation window — the client
+# keeps the slot they paid for instead of it being released under them.
+_scheduler.add_job(
+    _reconcile_apipay,
+    trigger="interval",
+    minutes=2,
 )
 _scheduler.start()
 

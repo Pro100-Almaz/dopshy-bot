@@ -104,6 +104,8 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatb
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
     table_name = "bookings" if bot_name == "dopsy_bot" else "academy_trials"
+    cancelled = False
+    row = None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             extra = ""
@@ -139,9 +141,20 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatb
                 cur.execute(
                     f"DELETE FROM {table_del} WHERE {types_string}_id = {object_id}"
                 )
-                return _ok({"object_id": object_id})
-            cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
-            row = cur.fetchone()
+                cancelled = True
+            else:
+                cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
+                row = cur.fetchone()
+
+    if cancelled:
+        if bot_name == "dopsy_bot":
+            # AFTER commit: cancels any open ApiPay invoice covering this booking
+            # (and re-issues for the rest of its batch), so the client can no
+            # longer pay for a slot that was just released. Never raises.
+            from integrations import apipay_service  # local import avoids import cycle
+            apipay_service.on_bookings_cancelled(
+                [object_id], reason=reason or target_state)
+        return _ok({"object_id": object_id})
     if not row:
         return _err("NOT_FOUND", "Запись не найдена.")
     return _ok({"object_id": object_id}, message="Запись уже была отменена.")

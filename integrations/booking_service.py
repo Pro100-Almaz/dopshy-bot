@@ -76,11 +76,17 @@ def _record_status_change(cur, booking_id: int, old_status, new_status,
 # ---------------------------------------------------------------------------
 
 
-def request_payment(booking_id: int, client_token: str) -> dict:
+def request_payment(booking_id: int, client_token: str,
+                    on_reserved=None) -> dict:
     """Transition DRAFT → AWAITING_PAYMENT: reserve the slot and start the TTL.
 
     The EXCLUDE constraint atomically rejects a slot already held by another
     awaiting_payment/confirmed booking → SLOT_TAKEN.
+
+    ``on_reserved(cur, booking_ids)`` runs inside this transaction once the slot
+    is held, and whatever it returns is merged into the result. The bot uses it
+    to queue an ApiPay invoice, so the reservation and the record of what the
+    client owes are committed together — the send itself happens afterwards.
 
     TRANSITIVE BOOKING: if time_start > time_end (day transition, e.g. 23:00→01:00),
     the draft is split into two bookings linked by group_transition UUID:
@@ -182,11 +188,27 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                                       "awaiting_payment", "chatbot:Бот")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
                 reserved_until = cur.fetchone()["reserved_until"]
+
+                hook_data = {}
+                if on_reserved is not None:
+                    # Both halves of a day-crossing booking, so an invoice
+                    # covers the whole slot the client actually reserved.
+                    cur.execute(
+                        "SELECT id FROM bookings "
+                        " WHERE id = %s OR (group_transition IS NOT NULL "
+                        "   AND group_transition = (SELECT group_transition FROM bookings "
+                        "                            WHERE id = %s)) "
+                        " ORDER BY id",
+                        (booking_id, booking_id),
+                    )
+                    covered = [r["id"] for r in cur.fetchall()]
+                    hook_data = on_reserved(cur, covered) or {}
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] request_payment id=%d — slot taken (exclusion)", booking_id)
         return _err("SLOT_TAKEN", "К сожалению, этот слот только что заняли.")
 
-    return _ok({"booking_id": booking_id, "reserved_until": reserved_until})
+    return _ok({"booking_id": booking_id, "reserved_until": reserved_until,
+                **hook_data})
 
 
 def submit_payment_proof(booking_id: int, parsed: dict | None = None,
@@ -240,6 +262,21 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
         logger.warning("[BOOKING_SERVICE] duplicate receipt ref=%s for booking %d",
                        parsed.get("ref"), booking_id)
         return _err("PAYMENT_DUPLICATE", "Этот чек уже был использован.")
+
+    # Paid by receipt — so retire any ApiPay invoice still standing for this
+    # booking. Both payment paths stay available (ApiPay push and Kaspi link +
+    # receipt), and without this the client could settle by receipt and then
+    # also confirm the Kaspi push, paying twice for one slot. Runs after the
+    # commit: cancellation reads the booking back. Never raises — the payment
+    # is already accepted.
+    try:
+        from integrations import apipay_service
+        apipay_service.cancel_invoices_for_bookings(
+            [booking_id], reason="paid_by_receipt")
+    except Exception:
+        logger.exception("[BOOKING_SERVICE] Не удалось снять счёт ApiPay для брони %d",
+                         booking_id)
+
     return _ok({"booking_id": booking_id})
 
 
@@ -292,6 +329,8 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "chatbot:Бот",
                    actor_id: str | None = None, reason: str | None = None) -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
+    cancelled_ids: list[int] = []
+    row = None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -309,7 +348,8 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "chatbot:Бот",
                 "RETURNING bookings.id",
                 (booking_id,),
             )
-            if cur.fetchone():
+            cancelled_ids = [r["id"] for r in cur.fetchall()]
+            if cancelled_ids:
                 _record_event(cur, booking_id, "cancelled", actor_type, actor_id, reason)
                 _record_history(
                     cur, booking_id, _history_source(actor_type, actor_id),
@@ -321,9 +361,15 @@ def cancel_all_bookings(booking_id: int, actor_type: str = "chatbot:Бот",
                 cur.execute(
                     "DELETE FROM booking_sessions WHERE booking_id = %s", (booking_id,)
                 )
-                return _ok({"booking_id": booking_id})
-            cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
-            row = cur.fetchone()
+            else:
+                cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
+                row = cur.fetchone()
+
+    if cancelled_ids:
+        # AFTER commit — see cancel_booking_trial. Never raises.
+        from integrations import apipay_service  # local import avoids import cycle
+        apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason or "cancelled")
+        return _ok({"booking_id": booking_id})
     if not row:
         return _err("NOT_FOUND", "Бронь не найдена.")
     return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
@@ -730,8 +776,9 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
         if row_price is None:
             row_price = calculate_booking_price(format_, d_str, st, et)
         skip_reserved = is_repetitive or is_latter
-        # The prepayment/avans belongs to the MAIN booking only
-        row_avans = prepayment if i == 0 else 0
+        # The prepayment/avans belongs to the MAIN booking only.
+        # Coalesce: paid_avans is NOT NULL, and callers routinely omit prepayment.
+        row_avans = (prepayment or 0) if i == 0 else 0
         row_notes = notes if i == 0 else None
 
         cur.execute(
@@ -910,7 +957,8 @@ def _conflict(conflicts: list[dict]) -> dict:
 
 def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
                                   notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
-                                  reserved_until: int = 30, updated_by: str = 'manager'
+                                  reserved_until: int = 30, updated_by: str = 'manager',
+                                  on_created=None, avans_per_booking=None
                                   ) -> dict:
     """Create bookings for a batch of (possibly repeating) merged intervals.
 
@@ -922,6 +970,14 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
 
     Request-shape validation (enum, required repeat_until, occurrence cap) is
     done by the endpoint; this layer assumes normalized input.
+
+    AVANS / ONLINE PAYMENT
+    ``avans_per_booking`` overrides `prepayment` for NON-repeating slots only —
+    a repeating slot carries no avans. ``on_created(cur, ctx)`` then runs inside
+    the same transaction, after every row is inserted but before commit, with
+    ``ctx = {booking_ids, chargeable_booking_ids, chargeable_count}``; it is
+    where the ApiPay invoice is created. Anything it raises rolls the whole
+    batch back, so bookings never outlive a failed invoice.
     """
     from integrations.booking import check_range_free  # local import avoids import cycle
 
@@ -955,6 +1011,8 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
 
     created: list[dict] = []
     booking_ids: list[int] = []
+    chargeable_ids: list[int] = []     # bookings the batch avans invoice pays for
+    chargeable_count = 0               # non-repeating slots → invoice = count x avans
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -980,19 +1038,39 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                     return _conflict(conflicts)
 
                 for e in expanded:
+                    # A repeating slot is not charged an avans, so it keeps
+                    # whatever prepayment the caller sent.
+                    is_chargeable = (avans_per_booking is not None
+                                     and e["repeat_mode"] == "none")
                     ids = _insert_booking_rows(
                         cur, field=e["field"], date=e["bases"][0].strftime("%Y-%m-%d"),
                         time_start=e["ts"], time_end=e["te_raw"],
                         end_date=e["repeat_until"], repeat=e["repeat_mode"],
                         customer=customer, phone=phone, notes=notes,
-                        price_total=price_total, prepayment=prepayment, actor_id=actor_id,
+                        price_total=price_total,
+                        # prepayment=avans_per_booking if is_chargeable else prepayment,
+                        actor_id=actor_id,
                         reserved_until=reserved_until, updated_by=updated_by,
                     )
                     booking_ids.extend(ids)
                     created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
+                    if is_chargeable:
+                        # Both halves of a day-crossing booking are covered by
+                        # the one avans charged for the slot.
+                        chargeable_ids.extend(ids)
+                        chargeable_count += 1
+
+                if on_created is not None:
+                    hook_data = on_created(cur, {
+                        "booking_ids": booking_ids,
+                        "chargeable_booking_ids": chargeable_ids,
+                        "chargeable_count": chargeable_count,
+                    }) or {}
+                else:
+                    hook_data = {}
     except psycopg2.errors.ExclusionViolation:
         # Lost the race with a concurrent booking after the pre-check passed.
         return _conflict([])
 
     return _ok({"created": created, "booking_ids": booking_ids,
-                "created_count": len(booking_ids)})
+                "created_count": len(booking_ids), **hook_data})
