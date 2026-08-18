@@ -158,7 +158,7 @@ def refresh_all_groups() -> None:
 # ------------ Trials
 
 def upsert_trial_row(trial: dict) -> None:
-    """Insert or update the row for a single grouping (matched by booking_id in col A)."""
+    """Insert or update the row for a single trial (matched by trial_id in col A)."""
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
@@ -169,7 +169,7 @@ def upsert_trial_row(trial: dict) -> None:
         target = str(trial["id"])
         try:
             idx = col_a.index(target) + 1  # 1-based sheet row
-            ws.update(f"A{idx}:{_last_col_letter(_GROUP_COL_COUNT)}{idx}", [row_values],
+            ws.update(f"A{idx}:{_last_col_letter(_TRIAL_COL_COUNT)}{idx}", [row_values],
                       value_input_option="USER_ENTERED")
         except ValueError:
             ws.append_row(row_values, value_input_option="USER_ENTERED")
@@ -194,7 +194,6 @@ def refresh_all_trials() -> None:
             logger.info("Refreshed TRIAL sheets — %d rows.", len(rows))
     except Exception as exc:
         logger.error("Sheets refresh_all_trials failed: %s", exc)
-
 
 
 

@@ -17,6 +17,7 @@ After confirming "да":
   - Session deleted
 """
 import logging
+import re
 import uuid
 from datetime import date, datetime
 
@@ -26,7 +27,7 @@ from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
 from integrations import trial as trial_logic
 from integrations.repo import postgres, academy_repo
 from integrations.repo.academy_repo import has_active_trial, check_trial_limits
-from integrations.sheets.trial_sheets import refresh_all_trials
+from integrations.sheets.trial_sheets import upsert_trial_row
 from integrations.trial import get_trial_daytime
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ _T = {
                  "kk": "Балаңыздың есімін жазыңыз:"},
     "ask_age": {"ru": "Сколько лет вашему ребенку?",
                 "kk": "Балаңызды жасы нешеде?"},
+    "ask_age_invalid": {
+        "ru": "Пожалуйста, укажите возраст ребенка числом от 5 до 15. Например: *10* или *10 лет*.",
+        "kk": "Балаңыздың жасын 5 пен 15 аралығындағы санмен жазыңыз. Мысалы: *10* немесе *10 жас*.",
+    },
     "summary": {
         "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n🎂 Возраст ребенка: {child_age}\n\nПодтвердить? Ответьте *да* или *нет*.",
         "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n🎂 Балаңыздың жасы: {child_age}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
@@ -96,7 +101,8 @@ _LOGGER_MESSAGES = {
     "step_time_reject_not_found": "[TRIAL:step_time] REJECTED — time range not found: time_start=%s time_end=%s",
     "step_time_reject_inverted": "[TRIAL:step_time] REJECTED — inverted range %s >= %s",
     "step_time_advance": "[TRIAL:step_time] advancing to step_name",
-    "step_age": "[TRIAL:step_name] child_age=%r — creating trial lesson for %r",
+    "step_age": "[TRIAL:step_age] child_age=%r — creating trial lesson for %r",
+    "step_age_rejected": "[TRIAL:step_age] REJECTED — user_text=%r",
 }
 
 # Substring stems for "show me my existing booking". Stems are intentionally
@@ -112,6 +118,17 @@ _NEW_TRIAL_KW = (
     "хочу зани", "хочу прой",
     "жазылу", "тегін", "қатыс", "келу", "көру",
 )
+
+_TRIAL_MIN_AGE = 5
+_TRIAL_MAX_AGE = 15
+_AGE_RE = re.compile(r"\b\d{1,2}\b")
+
+
+def _extract_child_age(text: str) -> int | None:
+    """Return the last valid age in a possibly batched user message."""
+    ages = [int(match.group(0)) for match in _AGE_RE.finditer(text or "")]
+    valid = [age for age in ages if _TRIAL_MIN_AGE <= age <= _TRIAL_MAX_AGE]
+    return valid[-1] if valid else None
 
 
 def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str = "ru") -> str:
@@ -292,7 +309,13 @@ class TrialStepHandler(BaseStepHandler):
         return self.builder.data_localization(lang, "ask_name")
 
     def handle_step_age(self, chat_id: str, user_text: str, params: dict) -> str:
-        params["child_age"] = user_text.strip()
+        lang = params.get("lang", "ru")
+        child_age = _extract_child_age(user_text)
+        if child_age is None:
+            logger.info(self.LOGGER_MESSAGES["step_age_rejected"], user_text)
+            return self.builder.data_localization(lang, "ask_age_invalid")
+
+        params["child_age"] = child_age
         logger.info(self.LOGGER_MESSAGES["step_age"], params["child_age"], self.builder.bot_name)
         postgres.update_draft(self.builder.bot_name, object_id=params["trial_id"], child_age=params["child_age"])
         self.save_session(chat_id, "step_confirm", params)
@@ -328,7 +351,9 @@ class TrialPromptBuilder(BasePromptBuilder):
 
         postgres.update_draft(self.bot_name, object_id=params["trial_id"], **trial_row)
         academy_repo.confirm_trial(params["trial_id"])
-        refresh_all_trials()
+        confirmed_trial = academy_repo.get_trial_with_user_by_id(params["trial_id"])
+        if confirmed_trial:
+            upsert_trial_row(confirmed_trial)
         postgres.delete_session(self.bot_name, chat_id)
         clear_history(chat_id)
 

@@ -44,7 +44,7 @@ BOT_CONFIGS = {
     },
     WHATSAPP_PHONE_NUMBER_ID_BOT_2: {
         "name": "dopsy_fs_school",
-        "access_token": WHATSAPP_SECOND_TOKEN,
+        "access_token": WHATSAPP_TOKEN,
         "phone_number_id": WHATSAPP_PHONE_NUMBER_ID_BOT_2,
         "ycloud_api_key": YCLOUD_API_KEY_2,
         "ycloud_from": YCLOUD_FROM_BOT_2,
