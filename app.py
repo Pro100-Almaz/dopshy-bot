@@ -282,7 +282,7 @@ def receive_ycloud_message():
     (Meta requires a 200 response within 20 seconds or it retries).
     """
     payload = request.get_json(silent=True)
-    logger.info({'INCOMING MESSAGE'})
+    logger.info("[YCLOUD] webhook received type=%s", (payload or {}).get("type"))
     if not payload:
         abort(400)
 
@@ -301,19 +301,27 @@ def receive_ycloud_message():
 
     # Confirm this is a WhatsApp Business Account event
     if payload.get("type") != "whatsapp.inbound_message.received":
+        logger.info("[YCLOUD] ignored webhook type=%s", payload.get("type"))
         return jsonify({"status": "ignored"}), 200
 
     try:
         data = parser_ycloud(payload)
+        logger.info(
+            "[YCLOUD] parsed inbound message type=%s from=%s to=%s",
+            data.message_type,
+            data.customer.phone,
+            data.business.phone,
+        )
         # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
         #     logger.info({f'IGNORED phone number {data.customer.phone}'})
         #     return jsonify({"status": "ignored"}), 200
 
     except WhatsappPayloadParserError:
-        logger.error({'Failed to parse YCloud webhook'})
+        logger.exception("Failed to parse YCloud webhook")
         return jsonify({"status": "ignored"}), 200
 
     if data is None:
+        logger.info("[YCLOUD] parser returned no message")
         return jsonify({"status": "ignored"}), 200
 
     # Buffer + debounce: fragments sent in quick succession are combined into a
