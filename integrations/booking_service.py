@@ -1075,6 +1075,7 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                         "booking_ids": booking_ids,
                         "chargeable_booking_ids": chargeable_ids,
                         "chargeable_count": chargeable_count,
+                        "prepayment": prepayment,
                     }) or {}
                 else:
                     hook_data = {}

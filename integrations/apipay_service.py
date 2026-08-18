@@ -178,7 +178,7 @@ def queue_invoice(cur, phone: str, booking_ids: list[int], slot_count: int,
                   description: str, source: str = "manager",
                   notify_chat_id: str | None = None,
                   notify_provider: str | None = None,
-                  notify_lang: str | None = None) -> dict:
+                  notify_lang: str | None = None, prepayment: int | None = None) -> dict:
     """Write the invoice row on the caller's cursor. No network call.
 
     The returned dict is everything `send_invoice` needs, so the caller can
@@ -187,6 +187,8 @@ def queue_invoice(cur, phone: str, booking_ids: list[int], slot_count: int,
     from becoming a second charge.
     """
     amount = slot_count * config.APIPAY_AVANS_PER_BOOKING
+    if prepayment:
+        amount = prepayment
     external_order_id = f"{source}-{booking_ids[0]}-{uuid.uuid4().hex[:8]}"
     normalized = apipay_client.normalize_phone(phone)
 
@@ -227,7 +229,7 @@ def batch_invoice_hook(phone: str, customer: str | None = None):
 
         queued = queue_invoice(cur, phone, booking_ids, count,
                                _avans_description(count, customer),
-                               source="manager")
+                               source="manager", prepayment=ctx.get("prepayment", None))
         logger.info("[APIPAY] Счёт %s на %s₸ поставлен в очередь для броней %s",
                     queued["external_order_id"], queued["amount"], booking_ids)
         return {"invoice": queued}
