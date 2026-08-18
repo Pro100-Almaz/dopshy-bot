@@ -33,7 +33,7 @@ draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "arena": _ARENA_DRAFT_FIELDS}
 
 _DRAFTS_BY_BOTS = {
     "dopsy_bot": "arena",
-    "chatbot_2": "academy",
+    "dopsy_fs_school": "academy",
     "dopsy_boxing": "academy",
 }
 
