@@ -316,7 +316,7 @@ def get_trials_by_curriculum(curriculum: str) -> list[dict] | None:
                 SELECT *
                 FROM academy_trials
                 WHERE curriculum = %s
-                """, (curriculum)
+                """, (curriculum,)
             )
             trials = cur.fetchall()
             return [dict(trial) for trial in trials]
@@ -327,10 +327,29 @@ def get_all_user_trials(user_id: int) -> list[dict] | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT *
-                FROM academy_trials
-                WHERE user_id = %s
-                """, (user_id)
+                SELECT t.id,
+                       t.child_name,
+                       t.child_age,
+                       t.language,
+                       t.phone,
+                       t.group_id,
+                       t.trial_day,
+                       t.start_time,
+                       t.end_time,
+                       t.state,
+                       t.notes,
+                       t.attended,
+                       t.subscribed
+                FROM academy_users u
+                JOIN academy_trials t
+                  ON t.group_id = u.assigned_group_id
+                 AND (
+                     t.phone = u.parent_phone
+                     OR lower(t.child_name) = lower(u.child_name)
+                 )
+                WHERE u.id = %s
+                ORDER BY t.trial_day, t.start_time, t.id
+                """, (user_id,)
             )
             trials = cur.fetchall()
             return [dict(trial) for trial in trials]
@@ -462,6 +481,26 @@ def get_trials_with_users_by_group(group_id: int) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
+def get_trials_with_users_by_type(group_type: str | None = None) -> list[dict]:
+    where = ["t.state = 'confirmed'"]
+    params: list = []
+    if group_type is not None:
+        where.append("g.group_type = %s")
+        params.append(group_type)
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                _TRIAL_WITH_USER_SELECT + f"""
+                JOIN academy_groups g ON g.id = t.group_id
+                WHERE {" AND ".join(where)}
+                ORDER BY g.group_type, t.trial_day, t.start_time, t.id
+                """,
+                params,
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
 def get_trial_with_user_by_id(trial_id: int) -> dict | None:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -473,6 +512,36 @@ def get_trial_with_user_by_id(trial_id: int) -> dict | None:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def get_users_by_type(group_type: str | None = None) -> list[dict]:
+    where = []
+    params: list = []
+    if group_type is not None:
+        where.append("g.group_type = %s")
+        params.append(group_type)
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT u.id,
+                       u.child_name,
+                       u.child_age,
+                       u.child_birth_date,
+                       u.parent_phone,
+                       u.total_trials,
+                       u.assigned_group_id,
+                       u.subscribed
+                FROM academy_users u
+                LEFT JOIN academy_groups g ON g.id = u.assigned_group_id
+                {where_sql}
+                ORDER BY g.group_type, u.child_name, u.id
+                """,
+                params,
+            )
+            return [dict(row) for row in cur.fetchall()]
 
 
 def update_trial_attended(trial_id: int, attended: bool) -> dict | None:
