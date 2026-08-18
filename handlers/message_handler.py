@@ -7,6 +7,8 @@ import re
 import threading
 from typing import Union
 
+import requests
+
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
 from handlers.extractor import extract_booking_details
@@ -19,7 +21,7 @@ from integrations.repo.bot_pause_repo import is_bot_paused
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
-from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
+from handlers.whatsapp_client import send_text_message as _send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
@@ -35,6 +37,26 @@ import config
 logger = logging.getLogger(__name__)
 
 RESET_COMMANDS = {"/reset", "/сброс", "/тазалау", "сброс", "reset"}
+
+
+def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict | None:
+    """Best-effort outbound send for inbound handling.
+
+    A provider-side delivery failure, such as YCloud denying access to the
+    configured `from` number, must not make the inbound message processing look
+    failed after the bot has already updated sessions, bookings, or history.
+    """
+    try:
+        return _send_text_message(channel, to, text)
+    except requests.RequestException as exc:
+        logger.error(
+            "Outbound WhatsApp delivery failed via %s/%s to %s: %s",
+            channel.provider,
+            channel.phone_number_id,
+            to,
+            exc,
+        )
+        return None
 
 
 # ── Pre-LLM confirmation short-circuit helpers ────────────────────────────────
@@ -167,10 +189,11 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
     sender_id = ""
     # channel = None
     try:
-        if payload.provider == 'ycloud':
-            phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
-        else:
-            phone_number_id = payload.business.phone_number_id
+        phone_number_id = config.resolve_inbound_phone_number_id(
+            payload.provider,
+            payload.business.phone_number_id,
+            payload.business.phone,
+        )
 
         bot_config = config.get_bot_config(phone_number_id)
 
@@ -473,17 +496,18 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         append_message(chat_id, "assistant", reply)
 
         # 7. Send reply
-        send_text_message(channel, sender_id, reply)
-        logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
+        if send_text_message(channel, sender_id, reply) is not None:
+            logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
         logger.exception("Error handling message: %s", exc)
         # Best-effort fallback reply
         try:
-            if payload.provider == 'ycloud':
-                phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
-            else:
-                phone_number_id = payload.business.phone_number_id
+            phone_number_id = config.resolve_inbound_phone_number_id(
+                payload.provider,
+                payload.business.phone_number_id,
+                payload.business.phone,
+            )
 
             bot_config = config.get_bot_config(phone_number_id)
 
