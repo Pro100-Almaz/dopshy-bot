@@ -15,13 +15,19 @@ EMBEDDING_MODEL: str = "text-embedding-3-small"
 
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]
+WHATSAPP_SECOND_TOKEN: str = os.environ["WHATSAPP_SECOND_TOKEN"]
+
 WHATSAPP_PHONE_NUMBER_ID_BOT_1: str = os.environ["WHATSAPP_PHONE_NUMBER_ID_BOT_1"]
 WHATSAPP_PHONE_NUMBER_ID_BOT_2: str = os.environ["WHATSAPP_PHONE_NUMBER_ID_BOT_2"]
 WHATSAPP_PHONE_NUMBER_ID_BOT_3: str = os.environ["WHATSAPP_PHONE_NUMBER_ID_BOT_3"]
 WHATSAPP_VERIFY_TOKEN: str = os.environ["WHATSAPP_VERIFY_TOKEN"]
 
-YCLOUD_API_KEY: str = os.environ["YCLOUD_API_KEY"]
+YCLOUD_API_KEY: str = os.environ["YCLOUD_API_KEY_1"]
+YCLOUD_API_KEY_2: str = os.environ["YCLOUD_API_KEY_2"]
+
 YCLOUD_FROM_BOT_1: str = os.environ["YCLOUD_FROM_BOT_1"]
+YCLOUD_FROM_BOT_2: str = os.environ["YCLOUD_FROM_BOT_2"]
+YCLOUD_FROM_BOT_3: str = os.environ["YCLOUD_FROM_BOT_3"]
 
 MESSAGE_BATCH_WINDOW_SECONDS: float = float(
     os.getenv("MESSAGE_BATCH_WINDOW_SECONDS", "4")
@@ -37,21 +43,48 @@ BOT_CONFIGS = {
         "system_prompt": sp_1.SYSTEM_PROMPT,
     },
     WHATSAPP_PHONE_NUMBER_ID_BOT_2: {
-        "name": "chatbot_2",
+        "name": "dopsy_fs_school",
         "access_token": WHATSAPP_TOKEN,
         "phone_number_id": WHATSAPP_PHONE_NUMBER_ID_BOT_2,
+        "ycloud_api_key": YCLOUD_API_KEY_2,
+        "ycloud_from": YCLOUD_FROM_BOT_2,
         "system_prompt": sp_2.SYSTEM_PROMPT,
     },
     WHATSAPP_PHONE_NUMBER_ID_BOT_3: {
         "name": "dopsy_boxing",
-        "access_token": WHATSAPP_TOKEN,
+        "access_token": WHATSAPP_SECOND_TOKEN,
         "phone_number_id": WHATSAPP_PHONE_NUMBER_ID_BOT_3,
+        "ycloud_api_key": YCLOUD_API_KEY,
+        "ycloud_from": YCLOUD_FROM_BOT_3,
         "system_prompt": sp_3.SYSTEM_PROMPT,
     },
 }
 
 def get_bot_config(phone_number_id: str) -> dict | None:
     return BOT_CONFIGS.get(phone_number_id)
+
+
+def _normalize_phone(value: str | None) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def get_phone_number_id_for_ycloud_from(ycloud_from: str | None) -> str | None:
+    """Resolve YCloud's inbound `to` number to this app's bot config key."""
+    normalized = _normalize_phone(ycloud_from)
+    if not normalized:
+        return None
+
+    for phone_number_id, bot_config in BOT_CONFIGS.items():
+        if _normalize_phone(bot_config.get("ycloud_from")) == normalized:
+            return phone_number_id
+    return None
+
+
+def resolve_inbound_phone_number_id(provider: str, business_phone_number_id: str | None,
+                                    business_phone: str | None = None) -> str | None:
+    if provider == "ycloud":
+        return get_phone_number_id_for_ycloud_from(business_phone)
+    return business_phone_number_id
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +133,7 @@ BOOKING_FIELDS: list = _json.loads(
                                 '{"id":3,"format":"5x5"}]')
 )
 BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
-BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1800"))  # seconds
+BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1200"))  # seconds
 PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "1200"))  # 20 minutes
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
 
@@ -108,6 +141,30 @@ KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pa
 PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
 PAYMENT_RECEIPT_MAX_AGE_HOURS: int = int(os.getenv("PAYMENT_RECEIPT_MAX_AGE_HOURS", "24"))
 PAYMENT_MIN: int = 10000
+
+# ---------------------------------------------------------------------------
+# ApiPay.kz — online avans via Kaspi Pay (https://apipay.kz)
+# ---------------------------------------------------------------------------
+# Server-side only: the API key must never reach a browser or the Apps Script.
+APIPAY_API_KEY: str = os.getenv("APIPAY_API_KEY", "")
+APIPAY_WEBHOOK_SECRET: str = os.getenv("APIPAY_WEBHOOK_SECRET", "")
+APIPAY_BASE_URL: str = os.getenv("APIPAY_BASE_URL", "https://api.apipay.kz/api/v1")
+APIPAY_TIMEOUT: float = float(os.getenv("APIPAY_TIMEOUT", "10"))
+# Avans charged per non-repeating booking in a bookings/batch request. Repeating
+# slots are never charged an avans (one invoice per batch = this x slot count).
+APIPAY_AVANS_PER_BOOKING: int = int(os.getenv("APIPAY_AVANS_PER_BOOKING", "10000"))
+
+# Ask `POST /clients/check` whether the number is registered in Kaspi before
+# any invoice is raised for it. On by default: an invoice to a number Kaspi does
+# not know fails only later, via webhook, so neither the client nor the manager
+# would learn about it in the request that asked — and it still costs one of the
+# account's daily invoices. Set to 0 only if the endpoint itself misbehaves.
+APIPAY_CHECK_CLIENT: bool = os.getenv("APIPAY_CHECK_CLIENT", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
+# The whole integration is inert until both secrets are present, so a machine
+# without them keeps the old manual-receipt flow instead of failing batches.
+APIPAY_ENABLED: bool = bool(APIPAY_API_KEY and APIPAY_WEBHOOK_SECRET)
 
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:

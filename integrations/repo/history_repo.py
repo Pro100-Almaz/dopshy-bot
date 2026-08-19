@@ -1,9 +1,9 @@
 """Booking change history — templated descriptions + read/write helpers.
 
 `booking_history` rows carry a human-readable `description` rendered from the
-dynamic templates in integrations/repo/history_descriptions.json, and a `source` that is
-either the literal 'whatsapp' (bot-driven change) or the manager's email
-address (manager-driven change).
+dynamic templates in integrations/repo/history_descriptions.json, and a `source`
+that is either a bot source ('whatsapp', 'chatbot:Бот', or 'bot:<integration>'
+— ApiPay writes 'bot:ApiPay') or the manager's email address.
 
 Write path:
     - _record_history(cur, ...)  runs on an existing cursor, for use inside a
@@ -22,9 +22,15 @@ import psycopg2.extras
 
 from integrations.repo.utils import _conn
 
-# Bot-driven changes use this literal source; manager-driven changes use the
-# manager's email address, so `source != WHATSAPP_SOURCE` means "a manager".
+# Bot-driven changes carry a machine source; manager-driven changes carry the
+# manager's id/email, so "not a bot source" means "a manager".
 WHATSAPP_SOURCE = "whatsapp"
+
+# Every machine-written source: the two literals the WhatsApp bot uses plus the
+# 'bot:<integration>' family (ApiPay writes 'bot:ApiPay'). Kept here so the
+# manager channel below cannot quietly start reporting a robot as a manager.
+BOT_SOURCES = (WHATSAPP_SOURCE, "chatbot:Бот")
+_BOT_WHERE = "(source = ANY(%s) OR source LIKE 'bot:%%')"
 
 # Colocated with this module (NOT under data/, which is a persistent named
 # volume in docker-compose that would shadow the image-shipped file).
@@ -157,16 +163,18 @@ def get_history_by_source(source: str, limit: int | None = None,
 
 def get_whatsapp_history(limit: int | None = None,
                          offset: int = 0) -> tuple[list[dict], int]:
-    """All bot-driven (WhatsApp) history rows, newest first."""
-    return get_history_by_source(WHATSAPP_SOURCE, limit, offset)
+    """All bot-driven history rows, newest first — the WhatsApp bot AND the
+    'bot:<integration>' sources (ApiPay payments, cancellations, TTL)."""
+    return _fetch(_BOT_WHERE, (list(BOT_SOURCES),), "created_at DESC", limit, offset)
 
 
 def get_manager_history(email: str | None = None, limit: int | None = None,
                         offset: int = 0) -> tuple[list[dict], int]:
-    """Manager-driven history rows (source is an email, not 'whatsapp').
+    """Manager-driven history rows (source is an id/email, not a bot source).
 
     Pass `email` to scope to one manager; omit for every manager.
     """
     if email is not None:
         return get_history_by_source(email, limit, offset)
-    return _fetch("source <> %s", (WHATSAPP_SOURCE,), "created_at DESC", limit, offset)
+    return _fetch(f"NOT {_BOT_WHERE}", (list(BOT_SOURCES),),
+                  "created_at DESC", limit, offset)

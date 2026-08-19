@@ -1,8 +1,9 @@
 -- History of booking changes.
 --
 -- One row per human-readable change event. `description` is a rendered string
--- (see data/history_descriptions.json for the dynamic templates) and `source`
--- is either the literal 'whatsapp' (bot-driven change) or the manager's email
+-- (see integrations/repo/history_descriptions.json for the dynamic templates)
+-- and `source` is either a bot source ('whatsapp', 'chatbot:Бот', or
+-- 'bot:<integration>' — ApiPay writes 'bot:ApiPay') or the manager's email
 -- address (manager-driven change).
 
 CREATE TABLE IF NOT EXISTS booking_history (

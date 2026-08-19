@@ -14,6 +14,7 @@ from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
 
 import config
+from integrations import client_notify
 from handlers.message_batcher import enqueue_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
 from integrations.providers.payload import OutboundChannel
@@ -41,6 +42,13 @@ app = Flask(__name__)
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402
 app.register_blueprint(manager_api)
+from blueprints.manager_boxing_api import manager_boxing_api  # noqa: E402
+app.register_blueprint(manager_boxing_api)
+
+# ApiPay.kz payment webhook (POST /webhooks/apipay) — self-disables when the
+# APIPAY_* env vars are absent.
+from blueprints import apipay_webhook as _apipay_webhook  # noqa: E402
+_apipay_webhook.register(app)
 
 # CORS — only the manager API is browser-facing; webhooks/admin are server-to-server.
 # Origins come from config (CORS_ALLOWED_ORIGINS env, default "*"). The custom
@@ -83,6 +91,20 @@ def _cancel_expired_bookings():
         if not expired:
             return
 
+        # Cancel the ApiPay invoices BEFORE releasing the slots — otherwise the
+        # client could still confirm the payment in their Kaspi app for a
+        # booking that no longer exists.
+        #
+        # Done in bulk here, deliberately: cancel_booking_trial below also
+        # cancels invoices, but re-issues one for any booking of the batch that
+        # is still awaiting payment. In a TTL sweep the whole batch expires
+        # together, so the per-booking path would raise a new invoice for a
+        # booking that is about to expire microseconds later — a pointless Kaspi
+        # push to the client. Cancelling up front makes those calls no-ops.
+        from integrations import apipay_service
+        apipay_service.cancel_invoices_for_bookings(
+            [b["id"] for b in expired], reason="ttl_expired")
+
         for b in expired:
             target = "unpaid" if b["state"] == "awaiting_payment" else "cancelled"
             postgres.cancel_booking_trial(
@@ -110,7 +132,9 @@ def _cancel_expired_bookings():
                 te = str(b["time_end"])[:5]
                 send_text_message(
                     OutboundChannel(provider="ycloud", phone_number_id=config.WHATSAPP_PHONE_NUMBER_ID_BOT_1),
-                    b["phone"],
+                    # A booking phone is not an inbound id: manager-entered rows
+                    # hold '8…' or '+7 700 …', and YCloud takes E.164 only.
+                    client_notify.normalize_recipient(b["phone"]),
                     f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
                     f"была отменена — оплата не поступила в течении 20 минут.\n"
                     f"Хотите забронировать снова? Просто напишите нам!\n\n"
@@ -126,6 +150,40 @@ def _cancel_expired_bookings():
         logger.error("[PAYMENT] Auto-cancel job failed: %s", exc)
 
 
+def _sweep_apipay_outbox():
+    """Re-send invoices committed but never delivered to ApiPay.
+
+    Without this a crash or an ApiPay outage between the booking commit and the
+    send would leave a client holding a reserved slot they were never asked to
+    pay for — until the TTL silently dropped it.
+    """
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import apipay_service
+        apipay_service.sweep_pending_sends()
+    except Exception as exc:
+        logger.error("[APIPAY] Outbox sweep failed: %s", exc)
+
+
+def _reconcile_apipay():
+    """Pull the status of invoices whose webhook never arrived.
+
+    The webhook is the fast path, not the only one: a deploy, a certificate or
+    DNS problem, or an outage longer than ApiPay's ~2h of retries silently
+    swallows a delivery. Without this, a paid invoice would sit 'processing'
+    until the TTL released the slot — the client pays, loses the booking, and
+    nothing in the system knows.
+    """
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import apipay_service
+        apipay_service.reconcile_open_invoices()
+    except Exception as exc:
+        logger.error("[APIPAY] Reconciliation failed: %s", exc)
+
+
 _scheduler = BackgroundScheduler(timezone=config.BOOKING_TIMEZONE)
 _scheduler.add_job(
     _scheduled_sheet_refresh,
@@ -138,6 +196,21 @@ _scheduler.add_job(
     _cancel_expired_bookings,
     trigger="interval",
     minutes=5,
+)
+# Tighter than the TTL sweep: an unsent invoice is a client waiting for a
+# payment request that never arrived, inside a 20-minute reservation window.
+_scheduler.add_job(
+    _sweep_apipay_outbox,
+    trigger="interval",
+    minutes=1,
+)
+# Each pass only looks at invoices quiet for 5+ minutes, so a paid-but-lost
+# webhook is found well inside the 30-minute reservation window — the client
+# keeps the slot they paid for instead of it being released under them.
+_scheduler.add_job(
+    _reconcile_apipay,
+    trigger="interval",
+    minutes=2,
 )
 _scheduler.start()
 
@@ -212,7 +285,7 @@ def receive_ycloud_message():
         return jsonify({"status": "ignored"}), 200
 
     payload = request.get_json(silent=True)
-    logger.info({'INCOMING MESSAGE'})
+    logger.info("[YCLOUD] webhook received type=%s", (payload or {}).get("type"))
     if not payload:
         abort(400)
 
@@ -231,19 +304,27 @@ def receive_ycloud_message():
 
     # Confirm this is a WhatsApp Business Account event
     if payload.get("type") != "whatsapp.inbound_message.received":
+        logger.info("[YCLOUD] ignored webhook type=%s", payload.get("type"))
         return jsonify({"status": "ignored"}), 200
 
     try:
         data = parser_ycloud(payload)
+        logger.info(
+            "[YCLOUD] parsed inbound message type=%s from=%s to=%s",
+            data.message_type,
+            data.customer.phone,
+            data.business.phone,
+        )
         # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
         #     logger.info({f'IGNORED phone number {data.customer.phone}'})
         #     return jsonify({"status": "ignored"}), 200
 
     except WhatsappPayloadParserError:
-        logger.error({'Failed to parse YCloud webhook'})
+        logger.exception("Failed to parse YCloud webhook")
         return jsonify({"status": "ignored"}), 200
 
     if data is None:
+        logger.info("[YCLOUD] parser returned no message")
         return jsonify({"status": "ignored"}), 200
 
     # Buffer + debounce: fragments sent in quick succession are combined into a

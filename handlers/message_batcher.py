@@ -112,10 +112,12 @@ def _keys(key: str) -> tuple[str, str, str]:
 def _conversation_key(payload: IncomingWhatsAppMessage) -> str:
     """Stable per-sender, per-bot key. Mirrors phone_number_id resolution in
     handle_incoming_message so batching lines up with how messages are routed."""
-    if payload.provider == "ycloud":
-        phone_number_id = config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
-    else:
-        phone_number_id = payload.business.phone_number_id
+    phone_number_id = config.resolve_inbound_phone_number_id(
+        payload.provider,
+        payload.business.phone_number_id,
+        payload.business.phone,
+    )
+
     sender = payload.customer.phone if payload.customer else None
     return f"{phone_number_id}:{sender}"
 
@@ -169,6 +171,10 @@ def _handle_non_text(payload: IncomingWhatsAppMessage) -> None:
 
     def _run():
         try:
+            # Ensure the client and Lua scripts are registered. A non-text
+            # message can be the first thing a worker handles, in which case
+            # enqueue_incoming_message() never ran and _drain_now is still None.
+            _redis()
             raw = _drain_now(keys=[seq_key, buf_key, tpl_key])
             _dispatch_drained(raw)
         except Exception:
