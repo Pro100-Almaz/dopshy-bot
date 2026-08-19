@@ -886,3 +886,24 @@ def list_contacts():
 
     result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
     return result
+
+
+# ------------GLOBAL BOT SWITCH
+
+@manager_api.get("/api/manager/is_messaging_enabled")
+def is_messaging_enabled():
+    return jsonify({"is_enabled": postgres.is_ycloud_enabled()}), 200
+
+
+@manager_api.post("/api/manager/change_messaging_enabled")
+def change_enabledness():
+    body = request.get_json(silent=True) or {}
+    enabled = body.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "enabled must be a boolean."}), 400
+
+    new_state = postgres.set_ycloud_enabled(enabled, actor=_api_key_actor())
+    logger.info("[BOT SWITCH] messaging %s by %s",
+                "enabled" if new_state else "disabled", _api_key_actor())
+    return jsonify({"is_enabled": new_state}), 200

@@ -281,6 +281,9 @@ def receive_ycloud_message():
     Process each message in a background thread so we return 200 fast
     (Meta requires a 200 response within 20 seconds or it retries).
     """
+    if not postgres.is_ycloud_enabled():
+        return jsonify({"status": "ignored"}), 200
+
     payload = request.get_json(silent=True)
     logger.info("[YCLOUD] webhook received type=%s", (payload or {}).get("type"))
     if not payload:
