@@ -156,6 +156,100 @@ def test_boxing_patch_attended_updates(monkeypatch):
     assert data["data"]["attended"] is True
 
 
+def test_lists_football_trials(monkeypatch):
+    seen = {}
+
+    def fake_trials(group_type):
+        seen["group_type"] = group_type
+        return [_trial_row(id=21, child_name="Dias")]
+
+    monkeypatch.setattr(
+        "blueprints.manager_boxing_api.academy_repo.get_trials_with_users_by_type",
+        fake_trials,
+    )
+
+    r = _app().test_client().get(
+        "/api/manager/academy_trials?group_type=football",
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert seen["group_type"] == "football"
+    assert data["ok"]
+    assert data["data"]["trials"][0]["trial_id"] == 21
+    assert data["data"]["trials"][0]["child_name"] == "Dias"
+
+
+def test_lists_trials_rejects_unknown_group_type():
+    r = _app().test_client().get(
+        "/api/manager/academy_trials?group_type=tennis",
+        headers=_HDR,
+    )
+
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "INVALID"
+
+
+def test_get_trial_detail(monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_boxing_api.academy_repo.get_trial_with_user_by_id",
+        lambda trial_id: _trial_row(id=trial_id, user_id=7, user_child_name="Ali"),
+    )
+
+    r = _app().test_client().get("/api/manager/academy_trials/10", headers=_HDR)
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"]
+    assert data["data"]["trial_id"] == 10
+    assert data["data"]["user"]["id"] == 7
+
+
+def test_lists_football_users(monkeypatch):
+    seen = {}
+
+    def fake_users(group_type):
+        seen["group_type"] = group_type
+        return [_user_row(id=12, child_name="Dias")]
+
+    monkeypatch.setattr(
+        "blueprints.manager_boxing_api.academy_repo.get_users_by_type",
+        fake_users,
+    )
+
+    r = _app().test_client().get(
+        "/api/manager/academy_users?group_type=football",
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert seen["group_type"] == "football"
+    assert data["ok"]
+    assert data["data"]["users"][0]["id"] == 12
+    assert data["data"]["users"][0]["name"] == "Dias"
+
+
+def test_get_user_detail_with_trials(monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_boxing_api.academy_repo.get_user_by_id",
+        lambda user_id: _user_row(id=user_id),
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_boxing_api.academy_repo.get_all_user_trials",
+        lambda user_id: [_trial_row(id=31, child_name="Ali")],
+    )
+
+    r = _app().test_client().get("/api/manager/academy_users/7", headers=_HDR)
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"]
+    assert data["data"]["user"]["id"] == 7
+    assert data["data"]["trials"][0]["trial_id"] == 31
+
+
 def test_boxing_patch_user_subscribed_updates(monkeypatch):
     monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
     monkeypatch.setattr(

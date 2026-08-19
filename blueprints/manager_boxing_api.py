@@ -23,6 +23,15 @@ def _invalid(message: str):
     return jsonify({"ok": False, "code": "INVALID", "message": message}), 400
 
 
+def _group_type_arg() -> tuple[str | None, tuple | None]:
+    group_type = request.args.get("group_type")
+    if group_type is None:
+        return None, None
+    if group_type not in {"boxing", "football"}:
+        return None, _invalid("group_type must be boxing or football.")
+    return group_type, None
+
+
 def _sheet_group(row: dict) -> dict:
     training_day = row.get("training_day")
     return {
@@ -131,6 +140,63 @@ def get_group_trials(group_id: int):
             "trial_headers": _HEADERS["trials"],
             "users": [_serialize(_academy_user(user)) for user in users],
             "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
+    })
+
+
+@manager_boxing_api.get("/api/manager/academy_trials")
+def list_academy_trials():
+    group_type, error = _group_type_arg()
+    if error:
+        return error
+
+    trials = academy_repo.get_trials_with_users_by_type(group_type)
+    return _ok({
+        "trial_headers": _HEADERS["trials"],
+        "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
+    })
+
+
+@manager_boxing_api.get("/api/manager/academy_trials/<int:trial_id>")
+def get_academy_trial(trial_id: int):
+    trial = academy_repo.get_trial_with_user_by_id(trial_id)
+    if not trial:
+        return _not_found("Trial not found.")
+
+    return _ok(_serialize(_sheet_trial(trial)))
+
+
+@manager_boxing_api.get("/api/manager/academy_users")
+def list_academy_users():
+    group_type, error = _group_type_arg()
+    if error:
+        return error
+
+    users = academy_repo.get_users_by_type(group_type)
+    return _ok({
+        "user_fields": [
+            "name",
+            "age",
+            "birthdate",
+            "parent_phone",
+            "total_trials",
+            "assigned_group_id",
+            "subscribed",
+        ],
+        "users": [_serialize(_academy_user(user)) for user in users],
+    })
+
+
+@manager_boxing_api.get("/api/manager/academy_users/<int:user_id>")
+def get_academy_user(user_id: int):
+    user = academy_repo.get_user_by_id(user_id)
+    if not user:
+        return _not_found("User not found.")
+
+    trials = academy_repo.get_all_user_trials(user_id)
+    return _ok({
+        "user": _serialize(_academy_user(user)),
+        "trial_headers": _HEADERS["trials"],
+        "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
     })
 
 
