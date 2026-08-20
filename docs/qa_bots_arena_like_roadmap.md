@@ -386,6 +386,8 @@ KK:
 
 ## Phase 6: Trial Service Layer
 
+Implemented.
+
 Purpose: make QA mutations reliable like Arena's `booking_service.py`.
 
 Create:
@@ -405,6 +407,18 @@ cancel_trial
 enforce_trial_limits
 sync_trial_sheets
 ```
+
+Current implementation centralizes the gated trial flow's mutations:
+
+```text
+create_or_get_draft
+update_intake
+assign_slot
+confirm_trial
+cancel_trial
+```
+
+Legacy edit/cancel handlers are still deferred to Phase 7.
 
 Use a typed result envelope:
 
@@ -428,6 +442,8 @@ trial_service.py owns trial state changes
 ```
 
 ## Phase 7: Status / Edit / Cancel Upgrade
+
+Implemented.
 
 Purpose: make trial self-service closer to Arena.
 
@@ -465,7 +481,35 @@ trial_edit
 └── re-confirm if group/time changes
 ```
 
+Current implementation:
+
+```text
+trial_status
+└── shows active draft/confirmed trials for the phone and bot type
+
+trial_cancel
+├── cancels one trial directly when only one exists
+├── asks the user to choose when multiple trials exist
+└── no longer deletes all trials blindly
+
+trial_edit
+├── updates child_name directly when there is one confirmed trial
+├── eligibility-changing edits reopen the confirmed trial as draft
+├── clears group/date/time for reassignment
+└── sends the user back through gated group/slot selection
+```
+
+Still deferred:
+
+```text
+multi-trial edit selection
+more detailed edit confirmation copy
+full DB-backed edit history
+```
+
 ## Phase 8: RAG / QA Knowledge Upgrade
+
+Implemented.
 
 Purpose: improve factual QA answers.
 
@@ -496,6 +540,19 @@ documents/*.md + availability context + system prompt
 
 QA target:
 academy-specific docs + gated availability context + stricter answer policy
+```
+
+Current implementation:
+
+```text
+RAG documents are scoped by source filename:
+├── academy_football_* -> football academy bot
+├── academy_boxing_* -> boxing academy bot
+├── academy_shared_* -> both academy bots
+└── all other documents -> Arena bot
+
+retrieve_context() now accepts bot_name and filters context by bot scope.
+Academy prompts and schedule context warn that exact availability requires gated eligibility checks.
 ```
 
 ## Phase 9: Manager Handoff / Needs Manager
@@ -583,3 +640,58 @@ document final QA flow
 ```
 
 Recommended next task: Phase 5, because it directly affects the correctness of group selection.
+
+## Manager-Side UI/API Notes
+
+Implemented:
+
+```text
+Group level
+├── academy_groups.level exists in DB
+├── group list API includes level
+├── group Sheets sync includes level
+├── inline group edit can PATCH level
+└── new group sidebar includes level selector
+
+Multiple schedules per group
+├── POST /api/manager/academy_groups accepts schedules[]
+├── old single training_day/time_start/time_end payload still works
+├── new group sidebar lets manager add multiple day/time rows
+└── each schedule row is inserted into academy_group_schedules
+```
+
+New group create payload:
+
+```json
+{
+  "group_type": "football",
+  "group_name": "Football Beginners B",
+  "max_cap": 16,
+  "level": "Beginner",
+  "schedules": [
+    {"training_day": 1, "time_start": "16:30", "time_end": "18:00"},
+    {"training_day": 3, "time_start": "16:30", "time_end": "18:00"}
+  ]
+}
+```
+
+UI change offers / next manager work:
+
+```text
+Group editor
+├── show level as dropdown, not free text
+├── allow adding/removing schedule rows from a group detail screen
+├── display all schedules grouped under one group
+└── validate max_cap >= curr_cap before submit
+
+Trial queue
+├── show preferred_date / preferred_weekday / preferred_time_start / preferred_time_end
+├── show no-eligible-group and fallback-rejected cases
+├── add needs_manager queue
+└── allow manager to manually assign group/date/time
+
+Bot handoff
+├── pause/unpause bot per contact
+├── show why bot handed off
+└── let manager resolve and optionally resume bot
+```

@@ -46,7 +46,8 @@ def create_or_update_group(
 def on_manual_group_edit(
         group_id: int,
         group_name: str | None = None,
-        max_cap : str | None = None
+        max_cap : str | None = None,
+        level: str | None = None,
 ) -> dict:
     fields = []
     values = []
@@ -57,6 +58,15 @@ def on_manual_group_edit(
     if max_cap is not None:
         fields.append("max_cap = %s")
         values.append(max_cap)
+    if level is not None:
+        if level not in {"Beginner", "Intermediate", "Advanced"}:
+            return {
+                'ok': False,
+                'code': 'INVALID_LEVEL',
+                'message': 'level must be Beginner, Intermediate, or Advanced'
+            }
+        fields.append("level = %s")
+        values.append(level)
 
     if not fields:
         return {
@@ -209,6 +219,10 @@ def on_manual_group_schedule_edit(
 
 
 def setting_training_time(group_id: int, training_day: int, time_start: str, time_end: str):
+    if training_day < 0 or training_day > 6:
+        raise ValueError("training_day must be between 0 and 6")
+    if datetime.strptime(str(time_start)[:5], "%H:%M") >= datetime.strptime(str(time_end)[:5], "%H:%M"):
+        raise ValueError("time_start must be before time_end")
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -224,6 +238,8 @@ def setting_training_time(group_id: int, training_day: int, time_start: str, tim
 
                 """, (group_id, training_day, time_start, time_end,)
             )
+            row = cur.fetchone()
+            return row["id"] if row else None
 
 
 def get_groups_info(bot_name: str):
@@ -769,9 +785,16 @@ def get_all_active_trials(sender_phone: str, bot_name: str) -> list[dict] | None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"""SELECT * FROM academy_trials 
-                WHERE state IN ('confirmed', 'draft') AND phone = '{sender_phone}' 
-                AND group_id IN (SELECT id FROM academy_groups WHERE group_type = '{group_type}')"""
+                """
+                SELECT t.*
+                FROM academy_trials t
+                LEFT JOIN academy_groups g ON g.id = t.group_id
+                WHERE t.state IN ('confirmed', 'draft')
+                  AND t.phone = %s
+                  AND (t.group_id IS NULL OR g.group_type = %s)
+                ORDER BY t.trial_day NULLS LAST, t.start_time NULLS LAST, t.id
+                """,
+                (sender_phone, group_type),
             )
             trials = cur.fetchall()
             return [dict(t) for t in trials]

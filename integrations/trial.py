@@ -158,7 +158,10 @@ def format_availability_context(free_windows: list[dict]) -> str:
     for w in free_windows:
         by_date.setdefault(w["date"], []).append(w)
 
-    lines = ["Пробные занятия на ближайшие 7 дней:"]
+    lines = [
+        "Общее расписание пробных занятий на ближайшие 7 дней.",
+        "Не обещай точную доступность без года рождения, уровня подготовки и школьной смены ребенка:",
+    ]
     for d in sorted(by_date):
         day_label = f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = set()

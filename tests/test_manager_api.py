@@ -246,7 +246,51 @@ def test_academy_group_patch_omits_group_name(monkeypatch, client):
     r = client.patch("/api/manager/academy_groups/7", json={"max_cap": 14}, headers=_HDR)
 
     assert r.status_code == 200
-    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14}
+    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14, "level": None}
+
+
+def test_academy_group_create_accepts_multiple_schedules(monkeypatch, client):
+    seen = {"schedules": []}
+
+    def fake_create(**kwargs):
+        seen["group"] = kwargs
+        return 7
+
+    def fake_schedule(group_id, training_day, time_start, time_end):
+        seen["schedules"].append({
+            "group_id": group_id,
+            "training_day": training_day,
+            "time_start": time_start,
+            "time_end": time_end,
+        })
+        return len(seen["schedules"])
+
+    monkeypatch.setattr("blueprints.manager_api.create_or_update_group", fake_create)
+    monkeypatch.setattr("blueprints.manager_api.setting_training_time", fake_schedule)
+    monkeypatch.setattr("blueprints.manager_api.refresh_all_groups", lambda: None)
+
+    r = client.post(
+        "/api/manager/academy_groups",
+        json={
+            "group_type": "football",
+            "group_name": "Kids",
+            "max_cap": 12,
+            "level": "Beginner",
+            "schedules": [
+                {"training_day": 0, "time_start": "16:00", "time_end": "17:30"},
+                {"training_day": 2, "time_start": "18:00", "time_end": "19:30"},
+            ],
+        },
+        headers=_HDR,
+    )
+
+    assert r.status_code == 201
+    assert seen["group"]["level"] == "Beginner"
+    assert seen["schedules"] == [
+        {"group_id": 7, "training_day": 0, "time_start": "16:00", "time_end": "17:30"},
+        {"group_id": 7, "training_day": 2, "time_start": "18:00", "time_end": "19:30"},
+    ]
+    assert len(r.get_json()["data"]["schedules"]) == 2
 
 
 def test_academy_group_patch_updates_schedule_time(monkeypatch, client):

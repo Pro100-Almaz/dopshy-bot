@@ -1,12 +1,10 @@
 import logging
-import uuid
 from datetime import date, datetime
 
-from chat.conversation import clear_history
 from handlers.academy_extractor import extract_trial_details
+from integrations import trial_service
 from integrations import trial as trial_logic
 from integrations.repo import academy_repo, postgres
-from integrations.sheets.trial_sheets import upsert_trial_row
 
 logger = logging.getLogger(__name__)
 
@@ -213,18 +211,14 @@ class LlmTrialFlowHandler:
     ) -> str:
         draft = academy_repo.get_existing_trial_draft(sender_phone, bot_name)
         if not draft:
-            if not academy_repo.check_trial_limits(bot_name, sender_phone):
-                return _loc(lang, "reached_limits")
-            if academy_repo.has_active_trial(bot_name, sender_phone):
-                return _loc(lang, "has_active_trial")
-            result = postgres.create_draft(
-                bot_name,
-                chat_id=chat_id,
-                phone=sender_phone,
-                client_token=str(uuid.uuid4()),
-                language=lang,
-            )
-            draft = academy_repo.get_trial(result["data"]["trial_id"])
+            result = trial_service.create_or_get_draft(bot_name, chat_id, sender_phone, lang)
+            if not result["ok"]:
+                if result["code"] == "LIMIT_REACHED":
+                    return _loc(lang, "reached_limits")
+                if result["code"] == "HAS_ACTIVE_TRIAL":
+                    return _loc(lang, "has_active_trial")
+                return result.get("message") or _loc(lang, "no_groups")
+            draft = result["data"]["trial"]
 
         extracted = extract_trial_details(history, user_text)
         active = postgres.get_active_session(bot_name, chat_id)
@@ -233,8 +227,10 @@ class LlmTrialFlowHandler:
             extracted[waiting_for] = _normalize_manual_value(waiting_for, user_text)
 
         data = _merge(_draft_to_data(draft), extracted)
-        postgres.update_draft(bot_name, draft["id"], **data, language=lang)
-        draft = academy_repo.get_trial(draft["id"])
+        result = trial_service.update_intake(bot_name, draft["id"], {**data, "language": lang})
+        if not result["ok"]:
+            return result.get("message") or _loc(lang, "no_groups")
+        draft = result["data"]["trial"]
 
         missing = _missing_prerequisite(draft)
         if missing:
@@ -325,22 +321,10 @@ class LlmTrialFlowHandler:
     def _assign_slot_and_confirm(
         self, chat_id: str, bot_name: str, draft: dict, slot: dict, lang: str
     ) -> str:
-        postgres.update_draft(
-            bot_name,
-            draft["id"],
-            trial_day=str(slot["date"]),
-            start_time=str(slot["time_start"])[:5],
-            end_time=str(slot["time_end"])[:5],
-            group_id=slot["group_id"],
-        )
-        draft = academy_repo.get_trial(draft["id"])
-        postgres.upsert_session(
-            bot_name,
-            chat_id,
-            "trial_confirm",
-            {"trial_id": draft["id"], "lang": lang},
-            draft["id"],
-        )
+        result = trial_service.assign_slot(bot_name, chat_id, draft["id"], slot, lang)
+        if not result["ok"]:
+            return result.get("message") or _loc(lang, "no_groups")
+        draft = result["data"]["trial"]
         return _confirmation(draft, lang)
 
     def handle_session_turn(
@@ -396,13 +380,10 @@ class LlmTrialFlowHandler:
             lower = user_text.lower().strip()
             decision = "yes" if any(w in lower for w in _YES) else "no" if any(w in lower for w in _NO) else ""
             if decision == "yes":
-                academy_repo.confirm_trial(trial_id)
-                confirmed = academy_repo.get_trial_with_user_by_id(trial_id)
-                if confirmed:
-                    upsert_trial_row(confirmed)
-                postgres.delete_session(bot_name, chat_id)
-                clear_history(chat_id)
-                trial = academy_repo.get_trial(trial_id)
+                result = trial_service.confirm_trial(bot_name, chat_id, trial_id)
+                if not result["ok"]:
+                    return result.get("message") or _confirmation(academy_repo.get_trial(trial_id), lang)
+                trial = result["data"]["trial"]
                 return _loc(
                     lang,
                     "confirmed",
@@ -412,15 +393,9 @@ class LlmTrialFlowHandler:
                     name=trial.get("child_name", ""),
                 )
             if decision == "no":
-                postgres.cancel_booking_trial(
-                    bot_name,
-                    trial_id,
-                    actor_type="chatbot:Бот",
-                    actor_id=chat_id,
-                    reason="user_declined_gated_trial",
+                trial_service.cancel_trial(
+                    bot_name, chat_id, trial_id, "user_declined_gated_trial"
                 )
-                postgres.delete_session(bot_name, chat_id)
-                clear_history(chat_id)
                 return _loc(lang, "declined")
             return _confirmation(academy_repo.get_trial(trial_id), lang)
 

@@ -47,6 +47,17 @@ def get_vector_store() -> Chroma:
     )
 
 
+def _document_scope(file_path: Path) -> str:
+    name = file_path.name.lower()
+    if name.startswith("academy_football_"):
+        return "academy_football"
+    if name.startswith("academy_boxing_"):
+        return "academy_boxing"
+    if name.startswith("academy_shared_"):
+        return "academy_shared"
+    return "arena"
+
+
 def ingest_documents(documents_path: str = config.DOCUMENTS_PATH) -> int:
     """
     Load all .md and .txt files from documents_path, split them into chunks,
@@ -68,6 +79,7 @@ def ingest_documents(documents_path: str = config.DOCUMENTS_PATH) -> int:
         # Tag each document with its source filename
         for doc in loaded:
             doc.metadata["source"] = file_path.name
+            doc.metadata["scope"] = _document_scope(file_path)
         docs.extend(loaded)
 
     splitter = RecursiveCharacterTextSplitter(

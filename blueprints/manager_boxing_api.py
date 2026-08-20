@@ -42,6 +42,7 @@ def _sheet_group(row: dict) -> dict:
         "curr_cap": row.get("curr_cap", 0),
         "birth_years": row.get("birth_years") or [],
         "location": row.get("location"),
+        "level": row.get("level"),
         "training_day": training_day,
         "training_day_label": WEEKDAY_RU.get(training_day, ""),
         "start_time": row.get("time_start"),

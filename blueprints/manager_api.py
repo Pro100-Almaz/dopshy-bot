@@ -648,21 +648,48 @@ def create_academy_group_with_time():
     # this group's id as a Foreign Key
 
     body = request.get_json(silent=True) or {}
-    required = ("group_type", "group_name",  "time_start", "time_end", "training_day", "max_cap")
+    schedules = body.get("schedules")
+    if schedules is None:
+        schedules = [{
+            "training_day": body.get("training_day"),
+            "time_start": body.get("time_start"),
+            "time_end": body.get("time_end"),
+        }]
 
-    if not all(body.get(k) for k in required):
+    required = ("group_type", "group_name", "max_cap")
+
+    if not all(body.get(k) for k in required) or not isinstance(schedules, list) or not schedules:
         return jsonify({"ok": False, "code": "INVALID",
-                        "message": "group_type, group_name, max_cap, training_day, time_start, time_end are required."}), 400
+                        "message": "group_type, group_name, max_cap and at least one schedule are required."}), 400
 
-    training_day = int(body["training_day"])
-    time_start = body["time_start"]
-    time_end = body["time_end"]
+    normalized_schedules = []
+    for schedule in schedules:
+        if not isinstance(schedule, dict) or not all(schedule.get(k) for k in ("training_day", "time_start", "time_end")):
+            return jsonify({"ok": False, "code": "INVALID",
+                            "message": "each schedule needs training_day, time_start, time_end."}), 400
+        try:
+            training_day = int(schedule["training_day"])
+            time_start = str(schedule["time_start"])[:5]
+            time_end = str(schedule["time_end"])[:5]
+            if training_day < 0 or training_day > 6:
+                raise ValueError("weekday")
+            if datetime.strptime(time_start, "%H:%M") >= datetime.strptime(time_end, "%H:%M"):
+                raise ValueError("time")
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "code": "INVALID",
+                            "message": "invalid schedule day/time."}), 400
+        normalized_schedules.append({
+            "training_day": training_day,
+            "time_start": time_start,
+            "time_end": time_end,
+        })
 
     group_id = create_or_update_group(
         group_name = body['group_name'],
         group_type = body['group_type'],
         max_cap = body['max_cap'],
-        is_active = body.get('is_active', True)
+        is_active = body.get('is_active', True),
+        level=body.get("level"),
     )
 
     if not group_id:
@@ -672,13 +699,18 @@ def create_academy_group_with_time():
             'message': "Could not create group."
         }), 409
 
-    scheduled_time_id = setting_training_time(group_id, training_day, time_start, time_end)
-
-    group_row = get_group_by_id(group_id)
-    if group_row:
-        group_row['training_day'] = training_day
-        group_row['time_start'] = time_start
-        group_row['time_end'] = time_end
+    created_schedules = []
+    try:
+        for schedule in normalized_schedules:
+            schedule_id = setting_training_time(
+                group_id,
+                schedule["training_day"],
+                schedule["time_start"],
+                schedule["time_end"],
+            )
+            created_schedules.append({"schedule_id": schedule_id, **schedule})
+    except ValueError as exc:
+        return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
 
     refresh_all_groups()
 
@@ -686,7 +718,8 @@ def create_academy_group_with_time():
         'ok' : True,
         'data' : {
             'group_id' : group_id,
-            "schedule_id": scheduled_time_id
+            "schedules": created_schedules,
+            "schedule_id": created_schedules[0]["schedule_id"] if created_schedules else None,
         }
     }), 201
 
@@ -697,6 +730,7 @@ def edit_academy_group(group_id: int):
 
     max_cap = body.get("max_cap")
     group_name = body.get("group_name")
+    level = body.get("level")
     training_day = body.get("training_day")
     previous_training_day = body.get("previous_training_day")
     time_start = body.get("time_start")
@@ -708,14 +742,15 @@ def edit_academy_group(group_id: int):
     group_res = None
     schedule_res = None
 
-    if group_name is not None or max_cap is not None:
+    if group_name is not None or max_cap is not None or level is not None:
         group_res = on_manual_group_edit(
             group_id=group_id,
             group_name=group_name,
-            max_cap=max_cap
+            max_cap=max_cap,
+            level=level,
         )
         if not group_res["ok"]:
-            return jsonify(group_res), 404
+            return jsonify(group_res), 400 if group_res.get("code") == "INVALID_LEVEL" else 404
 
     if time_start is not None or time_end is not None or previous_training_day is not None:
         if training_day is None and previous_training_day is None:
