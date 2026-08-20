@@ -36,6 +36,14 @@ T = {
         "ru": "Указанное время не подходит для группы ребенка. Выберите один из доступных вариантов:",
         "kk": "Көрсетілген уақыт балаңызға сәйкес топқа келмейді. Қолжетімді нұсқалардың бірін таңдаңыз:",
     },
+    "fallback_offer": {
+        "ru": "Подходящей группы уровня {requested} сейчас нет.\nЕсть группа уровнем ниже — {offered}, по возрасту и времени подходит.\nЗаписать на пробное туда?",
+        "kk": "Қазір {requested} деңгейіне сәйкес топ жоқ.\nБір деңгей төмен {offered} тобы бар, жасы мен уақыты сәйкес.\nСынақ сабағына сол топқа жазайын ба?",
+    },
+    "fallback_declined": {
+        "ru": "Понял. Администратор поможет подобрать подходящую группу вручную.",
+        "kk": "Түсіндім. Әкімші сәйкес топты қолмен таңдауға көмектеседі.",
+    },
     "choose_slot": {
         "ru": "Выберите время пробного занятия:",
         "kk": "Сынақ сабағының уақытын таңдаңыз:",
@@ -246,8 +254,43 @@ class LlmTrialFlowHandler:
             bot_name,
             int(draft["child_birth_year"]),
             draft["school_shift"],
+            experience=draft.get("experience"),
         )
         if not slots:
+            fallback_slots = trial_logic.get_fallback_trial_slots(
+                bot_name,
+                int(draft["child_birth_year"]),
+                draft["school_shift"],
+                draft["experience"],
+            )
+            if fallback_slots:
+                offered = fallback_slots[0].get("level") or "lower"
+                postgres.upsert_session(
+                    bot_name,
+                    chat_id,
+                    "trial_fallback_offer",
+                    {
+                        "trial_id": draft["id"],
+                        "lang": lang,
+                        "requested_level": draft["experience"],
+                        "offered_level": offered,
+                        "slots": [
+                            {
+                                "group_id": s["group_id"],
+                                "date": str(s["date"]),
+                                "time_start": str(s["time_start"])[:5],
+                                "time_end": str(s["time_end"])[:5],
+                                "level": s.get("level"),
+                            }
+                            for s in fallback_slots
+                        ],
+                    },
+                    draft["id"],
+                )
+                return _loc(
+                    lang, "fallback_offer",
+                    requested=draft["experience"], offered=offered,
+                )
             postgres.delete_session(bot_name, chat_id)
             return _loc(lang, "no_groups")
 
@@ -326,6 +369,28 @@ class LlmTrialFlowHandler:
                 return _loc(lang, "slot_invalid")
             draft = academy_repo.get_trial(trial_id)
             return self._assign_slot_and_confirm(chat_id, bot_name, draft, slots[idx], lang)
+
+        if state == "trial_fallback_offer":
+            lower = user_text.lower().strip()
+            decision = "yes" if any(w in lower for w in _YES) else "no" if any(w in lower for w in _NO) else ""
+            slots = params.get("slots") or []
+            if decision == "yes":
+                postgres.upsert_session(
+                    bot_name,
+                    chat_id,
+                    "trial_select_slot",
+                    {"trial_id": trial_id, "slots": slots, "lang": lang},
+                    trial_id,
+                )
+                return f"{_loc(lang, 'choose_slot')}\n\n{_slot_lines(slots, lang)}"
+            if decision == "no":
+                postgres.delete_session(bot_name, chat_id)
+                return _loc(lang, "fallback_declined")
+            return _loc(
+                lang, "fallback_offer",
+                requested=params.get("requested_level", ""),
+                offered=params.get("offered_level", ""),
+            )
 
         if state == "trial_confirm":
             lower = user_text.lower().strip()

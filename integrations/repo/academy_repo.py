@@ -19,23 +19,25 @@ def create_or_update_group(
     is_active: bool = True,
     birth_years: list[int] | None = None,
     location: str | None = None,
+    level: str | None = None,
 ) -> int:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 INSERT INTO academy_groups
-                    (group_name, group_type, max_cap, is_active, birth_years, location)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (group_name, group_type, max_cap, is_active, birth_years, location, level)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (group_name, group_type)
                 DO UPDATE SET
                     max_cap = EXCLUDED.max_cap,
                     is_active = EXCLUDED.is_active,
                     birth_years = COALESCE(EXCLUDED.birth_years, academy_groups.birth_years),
-                    location = COALESCE(EXCLUDED.location, academy_groups.location)
+                    location = COALESCE(EXCLUDED.location, academy_groups.location),
+                    level = COALESCE(EXCLUDED.level, academy_groups.level)
                 RETURNING id
                 """,
-                (group_name, group_type, max_cap, is_active, birth_years, location),
+                (group_name, group_type, max_cap, is_active, birth_years, location, level),
             )
 
             row = cur.fetchone()
@@ -232,7 +234,7 @@ def get_groups_info(bot_name: str):
                 """
                 SELECT s.group_id, s.training_day, s.time_start, s.time_end,
                        g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location
+                       g.birth_years, g.location, g.level
                 FROM academy_group_schedules s
                 JOIN academy_groups g ON g.id = s.group_id
                 WHERE g.group_type = %s AND g.is_active = TRUE
@@ -267,7 +269,7 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location,
+                SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location, g.level,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -288,7 +290,7 @@ def get_all_groups_for_frontend() -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location,
+                       g.birth_years, g.location, g.level,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s

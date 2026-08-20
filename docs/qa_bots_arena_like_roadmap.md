@@ -271,6 +271,8 @@ Current limitation:
 
 ## Phase 5: Smart Eligibility + Fallback
 
+Implemented.
+
 Purpose: handle no exact group match intelligently.
 
 No eligible group can mean:
@@ -331,7 +333,14 @@ Intermediate
 Advanced
 ```
 
-Proposed implementation:
+Important rollout note:
+
+```text
+Managers/data seeders must populate academy_groups.level.
+Without group levels, experience-based exact/fallback matching cannot work correctly.
+```
+
+Implemented components:
 
 ```text
 Phase 5A: DB + repo
@@ -340,23 +349,25 @@ Phase 5A: DB + repo
 ├── include level in group queries
 └── include level in Sheets group sync
 
-Phase 5B: structured eligibility result
-├── exact slots
-├── fallback slots
-└── rejection reasons
-
-Phase 5C: fallback matching
+Phase 5B: fallback matching
 ├── exact level first
 ├── then lower level
 └── preserve age/type/capacity rules
 
-Phase 5D: fallback consent state
+Phase 5C: fallback consent state
 └── trial_fallback_offer
 
-Phase 5E: unresolved handling
+Phase 5D: unresolved handling
 ├── admin handoff
-├── optional needs_manager state
-└── optional bot pause
+└── session cleanup
+```
+
+Still deferred:
+
+```text
+structured rejection reason object
+needs_manager state
+bot pause on unresolved cases
 ```
 
 Fallback offer example:
