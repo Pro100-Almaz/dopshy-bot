@@ -50,15 +50,23 @@ _T = {
                       "kk": "Аяқталу уақыты басталу уақытынан кейін болуы керек. Мысалы: *10:00 - 12:00*"},
     "ask_name": {"ru": "Укажите имя вашего ребенка:",
                  "kk": "Балаңыздың есімін жазыңыз:"},
-    "ask_age": {"ru": "Сколько лет вашему ребенку?",
-                "kk": "Балаңызды жасы нешеде?"},
-    "ask_age_invalid": {
-        "ru": "Пожалуйста, укажите возраст ребенка числом от 5 до 15. Например: *10* или *10 лет*.",
-        "kk": "Балаңыздың жасын 5 пен 15 аралығындағы санмен жазыңыз. Мысалы: *10* немесе *10 жас*.",
+    "ask_birth_year": {"ru": "Укажите год рождения ребенка. Например: *2016*.",
+                        "kk": "Балаңыздың туған жылын жазыңыз. Мысалы: *2016*."},
+    "birth_year_invalid": {
+        "ru": "Пожалуйста, укажите год рождения ребенка четырьмя цифрами.",
+        "kk": "Балаңыздың туған жылын төрт цифрмен жазыңыз.",
     },
+    "ask_experience": {"ru": "Выберите уровень опыта:\n1. Beginner (начальный)\n2. Intermediate (средний)\n3. Advanced (продвинутый)",
+                       "kk": "Тәжірибе деңгейін таңдаңыз:\n1. Beginner (бастапқы)\n2. Intermediate (орта)\n3. Advanced (жоғары)"},
+    "experience_invalid": {"ru": "Введите номер 1, 2 или 3 либо название уровня: Beginner, Intermediate, Advanced.",
+                            "kk": "1, 2 немесе 3 нөмірін не деңгей атауын жазыңыз: Beginner, Intermediate, Advanced."},
+    "ask_school_shift": {"ru": "Выберите школьную смену:\n1. Утренняя (morning)\n2. Дневная (afternoon)",
+                         "kk": "Мектеп ауысымын таңдаңыз:\n1. Таңғы (morning)\n2. Түскі (afternoon)"},
+    "school_shift_invalid": {"ru": "Введите 1 для morning или 2 для afternoon.",
+                              "kk": "morning үшін 1, afternoon үшін 2 нөмірін жазыңыз."},
     "summary": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n🎂 Возраст ребенка: {child_age}\n\nПодтвердить? Ответьте *да* или *нет*.",
-        "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n🎂 Балаңыздың жасы: {child_age}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n📆 Год рождения: {child_birth_year}\n🎯 Опыт: {experience}\n🏫 Школьная смена: {school_shift}\n\nПодтвердить? Ответьте *да* или *нет*.",
+        "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n📆 Туған жылы: {child_birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Мектеп ауысымы: {school_shift}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "confirm_reshow": {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
                        "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "declined": {"ru": "Запись отменена. Если захотите снова — просто напишите, что хотите записаться на пробное занятие. 🙂",
@@ -67,8 +75,8 @@ _T = {
         "ru": "К сожалению, свободных слотов на ближайшие 7 дней нет. Пожалуйста, свяжитесь с администратором.",
         "kk": "Өкінішке орай, келесі 7 күнде бос слот жоқ. Әкімшімен хабарласыңыз."},
     "confirmed_trial": {
-        "ru": "Вы записаны на пробный урок, будем вас ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n🎂 Возраст ребенка: {child_age}\n",
-        "kk": "Жазылым сәтті аяқталды, сізді қуана күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n🎂 Балаңыздың жасы: {child_age}\n"},
+        "ru": "Вы записаны на пробный урок, будем вас ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {child_name}\n📆 Год рождения: {child_birth_year}\n",
+        "kk": "Жазылым сәтті аяқталды, сізді қуана күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {child_name}\n📆 Туған жылы: {child_birth_year}\n"},
     "reached_limits": {
         "ru": "Вы достигли максимум попыток пробных занятие",
         "kk": "Сіз сынақ сабағының қатысу саны шегіне жеттіңіз"
@@ -94,15 +102,17 @@ _LOGGER_MESSAGES = {
     "step_date_parse_2": "[TRIAL:step_date] parsed dd.mm → %s",
     "step_date_rejected": "[TRIAL:step_date] REJECTED — chosen=%s not in available_days=%s",
     "step_date_accepted": "[TRIAL:step_date] ACCEPTED date=%s — %d free windows → advancing to step_time",
-    "step_name": "[TRIAL:step_name] child_name=%r — advancing to step_age",
+    "step_name": "[TRIAL:step_name] child_name=%r — advancing to step_birth_year",
     "step_time_info": "[TRIAL:step_time] date=%s free_windows=%s | user_text=%.80s",
     "step_time_reject_regex": "[TRIAL:step_time] REJECTED — regex did not match user_text=%.80s",
     "step_time_parse": "[TRIAL:step_time] parsed time_start=%s time_end=%s",
     "step_time_reject_not_found": "[TRIAL:step_time] REJECTED — time range not found: time_start=%s time_end=%s",
     "step_time_reject_inverted": "[TRIAL:step_time] REJECTED — inverted range %s >= %s",
-    "step_time_advance": "[TRIAL:step_time] advancing to step_name",
-    "step_age": "[TRIAL:step_age] child_age=%r — creating trial lesson for %r",
-    "step_age_rejected": "[TRIAL:step_age] REJECTED — user_text=%r",
+        "step_time_advance": "[TRIAL:step_time] advancing to step_confirm",
+    "step_birth_year": "[TRIAL:step_birth_year] child_birth_year=%r",
+    "step_experience": "[TRIAL:step_experience] experience=%r",
+    "step_school_shift": "[TRIAL:step_school_shift] school_shift=%r",
+    "step_birth_year_rejected": "[TRIAL:step_birth_year] REJECTED — user_text=%r",
 }
 
 # Substring stems for "show me my existing booking". Stems are intentionally
@@ -119,21 +129,30 @@ _NEW_TRIAL_KW = (
     "жазылу", "тегін", "қатыс", "келу", "көру",
 )
 
-_TRIAL_MIN_AGE = 5
-_TRIAL_MAX_AGE = 15
-_AGE_RE = re.compile(r"\b\d{1,2}\b")
+_TRIAL_MIN_BIRTH_YEAR = datetime.now().year - 15
+_TRIAL_MAX_BIRTH_YEAR = datetime.now().year - 5
+_BIRTH_YEAR_RE = re.compile(r"\b\d{4}\b")
+_EXPERIENCE_OPTIONS = {
+    "1": "Beginner",
+    "beginner": "Beginner",
+    "2": "Intermediate",
+    "intermediate": "Intermediate",
+    "3": "Advanced",
+    "advanced": "Advanced",
+}
+_SCHOOL_SHIFT_OPTIONS = {"1": "morning", "morning": "morning", "2": "afternoon", "afternoon": "afternoon"}
 
 
-def _extract_child_age(text: str) -> int | None:
-    """Return the last valid age in a possibly batched user message."""
-    ages = [int(match.group(0)) for match in _AGE_RE.finditer(text or "")]
-    valid = [age for age in ages if _TRIAL_MIN_AGE <= age <= _TRIAL_MAX_AGE]
+def _extract_birth_year(text: str) -> int | None:
+    """Return a valid four-digit birth year from the user's message."""
+    years = [int(match.group(0)) for match in _BIRTH_YEAR_RE.finditer(text or "")]
+    valid = [year for year in years if _TRIAL_MIN_BIRTH_YEAR <= year <= _TRIAL_MAX_BIRTH_YEAR]
     return valid[-1] if valid else None
 
 
 def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str = "ru") -> str:
     """
-    Create a new trial session (step_date) and return the date-selection prompt.
+    Create a new trial session (step_name) and return the name prompt.
     Called from message_handler when the LLM calls the start_trial tool, or
     directly from handle_trial_turn on a deterministic trial-intent match.
     `lang` is stored in the session so every subsequent step reuses it.
@@ -150,10 +169,12 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
     if not check_trial_limits(bot_name, sender_phone):
         logger.info("[TRIAL: start_flow] User reached trial limits sender_phone=%s, bot_name=%s",
                     sender_phone, bot_name)
+        return builder.data_localization(lang, "reached_limits")
 
     if has_active_trial(bot_name, sender_phone):
         logger.info("[TRIAL: start_flow] User already has confirmed trial sender_phone=%s, bot_name=%s",
                     sender_phone, bot_name)
+        return builder.data_localization(lang, "has_active_trial")
 
     if not available_days:
         logger.warning("[TRIAL:start_flow] No available days — aborting flow")
@@ -165,7 +186,7 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
 
     handler.save_session(
         chat_id,
-        "step_date",
+        "step_name",
         {
             "sender_phone": sender_phone,
             "available_days": [str(d) for d in available_days],
@@ -175,10 +196,10 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
         },
     )
     logger.info(
-        "[TRIAL:start_flow] Draft trial_id=%d created — step_date. Showing %d days",
+        "[TRIAL:start_flow] Draft trial_id=%d created — step_name. Available days=%d",
         trial_id, len(available_days),
     )
-    return builder.ask_date(available_days, lang)
+    return builder.data_localization(lang, "ask_name")
 
 
 def handle_trial_turn(
@@ -207,6 +228,14 @@ def handle_trial_turn(
             chat_id, state, params, user_text,
         )
 
+        if state in ("trial_intake", "trial_select_slot", "trial_confirm"):
+            from chat.conversation import get_history
+            from handlers.llm_trial_flow import LlmTrialFlowHandler
+
+            return LlmTrialFlowHandler().handle_session_turn(
+                chat_id, sender_phone, bot_name, user_text, get_history(chat_id), session
+            )
+
         if builder.is_cancel_intent(user_text):
             tid = params.get("trial_id")
             if tid:
@@ -231,8 +260,12 @@ def handle_trial_turn(
             return handler.handle_step_time(chat_id, user_text, params)
         if state == "step_name":
             return handler.handle_step_name(chat_id, user_text, params)
-        if state == "step_age":
-            return handler.handle_step_age(chat_id, user_text, params)
+        if state == "step_birth_year":
+            return handler.handle_step_birth_year(chat_id, user_text, params)
+        if state == "step_experience":
+            return handler.handle_step_experience(chat_id, user_text, params)
+        if state == "step_school_shift":
+            return handler.handle_step_school_shift(chat_id, user_text, params)
         if state == "step_confirm":
             return handler.handle_step_confirm(chat_id, phone_number_id, sender_phone, user_text, params, "trial_id")
         logger.warning("[TRIAL] Unknown session state=%s — falling through", state)
@@ -248,8 +281,13 @@ def handle_trial_turn(
 
     if intent == "new_trial":
         lang = builder.detect_lang(user_text)
-        logger.info("[TRIAL] new_trial intent — starting deterministic flow (lang=%s)", lang)
-        return start_trial_flow(chat_id, sender_phone, bot_name, lang)
+        logger.info("[TRIAL] new_trial intent — starting gated flow (lang=%s)", lang)
+        from chat.conversation import get_history
+        from handlers.llm_trial_flow import LlmTrialFlowHandler
+
+        return LlmTrialFlowHandler().handle(
+            chat_id, sender_phone, bot_name, user_text, get_history(chat_id), lang
+        )
 
     # availability and other intents fall through to the RAG/LLM pipeline.
     # The LLM may still call the start_trial tool for phrasings the keyword
@@ -262,16 +300,41 @@ class TrialStepHandler(BaseStepHandler):
         self.builder = TrialPromptBuilder(bot_name)
         super().__init__(logger_messages=_LOGGER_MESSAGES, builder=self.builder)
 
-    def get_free_now(self, days: list | None = None):
-        return trial_logic.get_trial_daytime(self.builder.bot_name, None)
+    def get_free_now(self, days: list | None = None, params: dict | None = None):
+        school_shift = (params or {}).get("school_shift")
+        return trial_logic.get_trial_daytime(self.builder.bot_name, days, school_shift=school_shift)
 
     def handle_step_name(self, chat_id: str, user_text: str, params: dict) -> str:
         lang = params.get("lang", "ru")
         params["child_name"] = user_text.strip()
         logger.info(self.LOGGER_MESSAGES["step_name"], params["child_name"])
         postgres.update_draft(self.builder.bot_name, object_id=params["trial_id"], child_name=params["child_name"])
-        self.save_session(chat_id, "step_age", params)
-        return self.builder.data_localization(lang, "ask_age")
+        self.save_session(chat_id, "step_birth_year", params)
+        return self.builder.data_localization(lang, "ask_birth_year")
+
+    def handle_step_experience(self, chat_id: str, user_text: str, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        experience = _EXPERIENCE_OPTIONS.get(user_text.strip().lower())
+        if experience is None:
+            return self.builder.data_localization(lang, "experience_invalid")
+        params["experience"] = experience
+        logger.info(self.LOGGER_MESSAGES["step_experience"], experience)
+        postgres.update_draft(self.builder.bot_name, object_id=params["trial_id"], experience=experience)
+        self.save_session(chat_id, "step_school_shift", params)
+        return self.builder.data_localization(lang, "ask_school_shift")
+
+    def handle_step_school_shift(self, chat_id: str, user_text: str, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        school_shift = _SCHOOL_SHIFT_OPTIONS.get(user_text.strip().lower())
+        if school_shift is None:
+            return self.builder.data_localization(lang, "school_shift_invalid")
+        params["school_shift"] = school_shift
+        logger.info(self.LOGGER_MESSAGES["step_school_shift"], school_shift)
+        postgres.update_draft(self.builder.bot_name, object_id=params["trial_id"], school_shift=school_shift)
+        self.save_session(chat_id, "step_date", params)
+        return self.builder.ask_date(
+            sorted({w["date"] for w in self.get_free_now(params=params)}), lang
+        )
 
     def handle_step_time(self, chat_id: str, user_text: str, params: dict) -> str:
         helper_response = self.step_time_helper(user_text, params)
@@ -305,21 +368,21 @@ class TrialStepHandler(BaseStepHandler):
             time_end=time_end,
             group_id=group_ids[0]
         )
-        self.save_session(chat_id, "step_name", params)
-        return self.builder.data_localization(lang, "ask_name")
-
-    def handle_step_age(self, chat_id: str, user_text: str, params: dict) -> str:
-        lang = params.get("lang", "ru")
-        child_age = _extract_child_age(user_text)
-        if child_age is None:
-            logger.info(self.LOGGER_MESSAGES["step_age_rejected"], user_text)
-            return self.builder.data_localization(lang, "ask_age_invalid")
-
-        params["child_age"] = child_age
-        logger.info(self.LOGGER_MESSAGES["step_age"], params["child_age"], self.builder.bot_name)
-        postgres.update_draft(self.builder.bot_name, object_id=params["trial_id"], child_age=params["child_age"])
         self.save_session(chat_id, "step_confirm", params)
         return self.builder.format_summary(params)
+
+    def handle_step_birth_year(self, chat_id: str, user_text: str, params: dict) -> str:
+        lang = params.get("lang", "ru")
+        child_birth_year = _extract_birth_year(user_text)
+        if child_birth_year is None:
+            logger.info(self.LOGGER_MESSAGES["step_birth_year_rejected"], user_text)
+            return self.builder.data_localization(lang, "birth_year_invalid")
+
+        params["child_birth_year"] = child_birth_year
+        logger.info(self.LOGGER_MESSAGES["step_birth_year"], child_birth_year)
+        postgres.update_draft(self.builder.bot_name, object_id=params["trial_id"], child_birth_year=child_birth_year)
+        self.save_session(chat_id, "step_experience", params)
+        return self.builder.data_localization(lang, "ask_experience")
 
 
 class TrialPromptBuilder(BasePromptBuilder):
@@ -346,7 +409,9 @@ class TrialPromptBuilder(BasePromptBuilder):
             "end_time": time_end_str,
             "child_name": params.get("child_name", ""),
             "phone": sender_phone,
-            "child_age": params.get("child_age", ""),
+            "child_birth_year": params.get("child_birth_year"),
+            "experience": params.get("experience", ""),
+            "school_shift": params.get("school_shift", ""),
         }
 
         postgres.update_draft(self.bot_name, object_id=params["trial_id"], **trial_row)
@@ -364,7 +429,9 @@ class TrialPromptBuilder(BasePromptBuilder):
             start=time_start_str,
             end=time_end_str,
             child_name=params.get("child_name", ""),
-            child_age=params["child_age"],
+            child_birth_year=params["child_birth_year"],
+            experience=params.get("experience", ""),
+            school_shift=params.get("school_shift", ""),
         )
 
     def ask_time(self, chosen_date: date, day_windows: list[dict], lang: str = "ru") -> str:
@@ -393,7 +460,9 @@ class TrialPromptBuilder(BasePromptBuilder):
             start=params.get("time_start", "?"),
             end=params.get("time_end", "?"),
             child_name=params.get("child_name", "?"),
-            child_age=params.get("child_age", "?"),
+            child_birth_year=params.get("child_birth_year", "?"),
+            experience=params.get("experience", "?"),
+            school_shift=params.get("school_shift", "?"),
         )
         return self.get_buttons(
             formatted_response + append_message,

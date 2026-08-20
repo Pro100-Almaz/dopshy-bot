@@ -82,14 +82,14 @@ def _format_success(result_data: dict) -> str:
         f"📅 {result_data['trial_day']}\n"
         f"⏰ {ts}–{te}\n"
         f"👤 Имя: {result_data.get('child_name', '')}\n"
-        f"🎂 Возраст: {result_data.get('child_age', '')}"
+        f"📆 Год рождения: {result_data.get('child_birth_year', '')}"
     )
     summary_kk = (
         f"✅ Жазылым жаңартылды!\n\n"
         f"📅 {result_data['trial_day']}\n"
         f"⏰ {ts}–{te}\n"
         f"👤 Аты: {result_data.get('child_name', '')}\n"
-        f"🎂 Жасы: {result_data.get('child_age', '')}\n\n"
+        f"📆 Туған жылы: {result_data.get('child_birth_year', '')}\n\n"
     )
     return _bilingual(summary_ru, summary_kk)
 

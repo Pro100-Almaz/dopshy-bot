@@ -10,11 +10,12 @@ from typing import Union
 import requests
 
 from chat.conversation import append_message, get_history, clear_history
-from chat.llm import get_ai_response, route_incoming_message
+from chat.llm import get_ai_response, route_incoming_message, route_trial_message
 from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
+from handlers.llm_trial_flow import LlmTrialFlowHandler
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.bot_pause_repo import is_bot_paused
@@ -465,6 +466,36 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
+            trial_intent, trial_lang = route_trial_message(history, user_text)
+            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
+                        trial_intent, trial_lang)
+
+            if trial_intent in ("trial_new", "trial_continue"):
+                handle_reply = LlmTrialFlowHandler().handle(
+                    chat_id, sender_id, bot_config["name"], user_text, history, trial_lang
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
+            if trial_intent == "trial_cancel":
+                handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
+            if trial_intent == "human_help":
+                handle_reply = (
+                    "Передам администратору. Он сможет уточнить детали по записи.\n\n"
+                    "Әкімшіге жіберемін. Ол жазылым бойынша нақтылап береді."
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
         # 4. Generate response
         reply, tool_call = get_ai_response(
             phone_number_id=phone_number_id,
@@ -480,8 +511,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             handle_reply = reply
             if tool_call["name"] == "start_trial":
                 lang = builder.detect_lang(user_text)
-                logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
-                handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
+                logger.info("[TRIAL] LLM called start_trial tool — starting gated trial flow (lang=%s)", lang)
+                handle_reply = LlmTrialFlowHandler().handle(
+                    chat_id, sender_id, bot_config["name"], user_text, history, lang
+                )
 
             elif tool_call["name"] == "edit_trial":
                 logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])

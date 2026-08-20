@@ -345,7 +345,7 @@ class BookingStepHandler(BaseStepHandler):
         self.builder = BookingPromptBuilder(bot_name)
         super().__init__(logger_messages=_LOGGER_MESSAGES, builder=self.builder)
 
-    def get_free_now(self, days: list | None = None):
+    def get_free_now(self, days: list | None = None, params: dict | None = None):
         return booking_logic.get_free_windows()
 
     def handle_step_await_date(self, chat_id: str, sender_phone: str, user_text: str, params: dict) -> str:
