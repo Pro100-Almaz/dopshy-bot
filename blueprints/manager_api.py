@@ -671,8 +671,12 @@ def create_academy_group_with_time():
             training_day = int(schedule["training_day"])
             time_start = str(schedule["time_start"])[:5]
             time_end = str(schedule["time_end"])[:5]
+            field = schedule.get("field")
+            field = int(field) if field not in (None, "") else None
             if training_day < 0 or training_day > 6:
                 raise ValueError("weekday")
+            if field is not None and (field < 1 or field > 3):
+                raise ValueError("field")
             if datetime.strptime(time_start, "%H:%M") >= datetime.strptime(time_end, "%H:%M"):
                 raise ValueError("time")
         except (TypeError, ValueError):
@@ -682,6 +686,7 @@ def create_academy_group_with_time():
             "training_day": training_day,
             "time_start": time_start,
             "time_end": time_end,
+            "field": field,
         })
 
     group_id = create_or_update_group(
@@ -690,6 +695,7 @@ def create_academy_group_with_time():
         max_cap = body['max_cap'],
         is_active = body.get('is_active', True),
         level=body.get("level"),
+        levels=body.get("levels"),
     )
 
     if not group_id:
@@ -707,6 +713,7 @@ def create_academy_group_with_time():
                 schedule["training_day"],
                 schedule["time_start"],
                 schedule["time_end"],
+                schedule["field"],
             )
             created_schedules.append({"schedule_id": schedule_id, **schedule})
     except ValueError as exc:
@@ -731,28 +738,42 @@ def edit_academy_group(group_id: int):
     max_cap = body.get("max_cap")
     group_name = body.get("group_name")
     level = body.get("level")
+    levels = body.get("levels")
     training_day = body.get("training_day")
     previous_training_day = body.get("previous_training_day")
     time_start = body.get("time_start")
     time_end = body.get("time_end")
+    field = body.get("field")
 
     if max_cap is not None:
         max_cap = int(max_cap)
+    if field not in (None, ""):
+        try:
+            field = int(field)
+            if field < 1 or field > 3:
+                raise ValueError("field")
+        except (TypeError, ValueError):
+            return jsonify({
+                "ok": False,
+                "code": "INVALID",
+                "message": "field must be between 1 and 3."
+            }), 400
 
     group_res = None
     schedule_res = None
 
-    if group_name is not None or max_cap is not None or level is not None:
+    if group_name is not None or max_cap is not None or level is not None or levels is not None:
         group_res = on_manual_group_edit(
             group_id=group_id,
             group_name=group_name,
             max_cap=max_cap,
             level=level,
+            levels=levels,
         )
         if not group_res["ok"]:
             return jsonify(group_res), 400 if group_res.get("code") == "INVALID_LEVEL" else 404
 
-    if time_start is not None or time_end is not None or previous_training_day is not None:
+    if time_start is not None or time_end is not None or previous_training_day is not None or field is not None:
         if training_day is None and previous_training_day is None:
             return jsonify({
                 "ok": False,
@@ -768,6 +789,8 @@ def edit_academy_group(group_id: int):
             new_training_day=int(new_training_day) if new_training_day is not None else None,
             time_start=time_start,
             time_end=time_end,
+            field=field if field != "" else None,
+            field_provided=field is not None,
         )
         if not schedule_res["ok"]:
             if schedule_res["code"] in {"AMBIGUOUS_SCHEDULE", "SCHEDULE_CONFLICT"}:

@@ -9,6 +9,8 @@
       button { margin-top: 14px; padding: 8px 14px; cursor: pointer; }
       .schedule { border: 1px solid #ddd; padding: 8px; margin-top: 8px; }
       .schedule button { margin-top: 8px; }
+      .checks label { font-weight: normal; display: block; margin-top: 4px; }
+      .checks input { width: auto; margin-right: 6px; }
       #msg { margin-top: 12px; padding: 8px; border-radius: 4px; display: none; }
       .ok { background: #e6f4ea; color: #137333; }
       .err { background: #fce8e6; color: #c5221f; }
@@ -24,13 +26,12 @@
     <label>Название Группы</label>
     <input type='text' id='group_name'>
 
-    <label>Уровень группы</label>
-    <select id="level">
-      <option value="">Не указан</option>
-      <option value="Beginner">Beginner</option>
-      <option value="Intermediate">Intermediate</option>
-      <option value="Advanced">Advanced</option>
-    </select>
+    <label>Уровни группы</label>
+    <div class="checks">
+      <label><input type="checkbox" name="level" value="Beginner">Beginner</label>
+      <label><input type="checkbox" name="level" value="Intermediate">Intermediate</label>
+      <label><input type="checkbox" name="level" value="Advanced">Advanced</label>
+    </div>
 
     <label>Расписание</label>
     <div id="schedules"></div>
@@ -70,6 +71,13 @@
           '<input type="time" class="start" step="300">' +
           '<label>Конец</label>' +
           '<input type="time" class="end" step="300">' +
+          '<label>Поле</label>' +
+          '<select class="field">' +
+            '<option value="">—</option>' +
+            '<option value="1">Field 1</option>' +
+            '<option value="2">Field 2</option>' +
+            '<option value="3">Field 3</option>' +
+          '</select>' +
           '<button type="button" onclick="this.parentNode.remove()">Удалить</button>';
         document.getElementById('schedules').appendChild(wrap);
       }
@@ -80,9 +88,15 @@
           return {
             training_day: row.querySelector('.training_day').value,
             time_start: row.querySelector('.start').value,
-            time_end: row.querySelector('.end').value
+            time_end: row.querySelector('.end').value,
+            field: row.querySelector('.field').value
           };
         });
+      }
+
+      function collectLevels() {
+        return Array.prototype.slice.call(document.querySelectorAll('input[name="level"]:checked'))
+          .map(function (input) { return input.value; });
       }
 
       function submit() {
@@ -90,7 +104,7 @@
         var form = {
           group_type: document.getElementById('group_type').value,
           group_name: document.getElementById('group_name').value,
-          level: document.getElementById('level').value,
+          level: collectLevels(),
           schedules: schedules,
           max_cap: document.getElementById('max_cap').value,
 

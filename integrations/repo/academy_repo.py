@@ -19,8 +19,11 @@ def create_or_update_group(
     is_active: bool = True,
     birth_years: list[int] | None = None,
     location: str | None = None,
-    level: str | None = None,
+    level: str | list[str] | None = None,
+    levels: list[str] | None = None,
 ) -> int:
+    if levels is None and level is not None:
+        levels = [level] if isinstance(level, str) else level
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -37,7 +40,7 @@ def create_or_update_group(
                     level = COALESCE(EXCLUDED.level, academy_groups.level)
                 RETURNING id
                 """,
-                (group_name, group_type, max_cap, is_active, birth_years, location, level),
+                (group_name, group_type, max_cap, is_active, birth_years, location, levels),
             )
 
             row = cur.fetchone()
@@ -47,7 +50,8 @@ def on_manual_group_edit(
         group_id: int,
         group_name: str | None = None,
         max_cap : str | None = None,
-        level: str | None = None,
+        level: str | list[str] | None = None,
+        levels: list[str] | None = None,
 ) -> dict:
     fields = []
     values = []
@@ -58,15 +62,17 @@ def on_manual_group_edit(
     if max_cap is not None:
         fields.append("max_cap = %s")
         values.append(max_cap)
-    if level is not None:
-        if level not in {"Beginner", "Intermediate", "Advanced"}:
+    if levels is None and level is not None:
+        levels = [level] if isinstance(level, str) else level
+    if levels is not None:
+        if not isinstance(levels, list) or any(v not in {"Beginner", "Intermediate", "Advanced"} for v in levels):
             return {
                 'ok': False,
                 'code': 'INVALID_LEVEL',
-                'message': 'level must be Beginner, Intermediate, or Advanced'
+                'message': 'levels must contain only Beginner, Intermediate, or Advanced'
             }
         fields.append("level = %s")
-        values.append(level)
+        values.append(levels)
 
     if not fields:
         return {
@@ -110,6 +116,8 @@ def on_manual_group_schedule_edit(
         new_training_day: int | None = None,
         time_start: str | None = None,
         time_end: str | None = None,
+        field: int | None = None,
+        field_provided: bool = False,
 ) -> dict:
     fields = []
     values = []
@@ -123,6 +131,9 @@ def on_manual_group_schedule_edit(
     if time_end is not None:
         fields.append("time_end = %s")
         values.append(time_end)
+    if field_provided:
+        fields.append("field = %s")
+        values.append(field)
 
     if not fields:
         return {
@@ -203,7 +214,7 @@ def on_manual_group_schedule_edit(
                     updated_at = NOW()
                 WHERE group_id = %s
                   AND training_day = %s
-                RETURNING id, group_id, training_day, time_start, time_end
+                RETURNING id, group_id, training_day, time_start, time_end, field
                 """,
                 values,
             )
@@ -215,10 +226,11 @@ def on_manual_group_schedule_edit(
                 'training_day': row['training_day'],
                 'time_start': row['time_start'],
                 'time_end': row['time_end'],
+                'field': row['field'],
             }
 
 
-def setting_training_time(group_id: int, training_day: int, time_start: str, time_end: str):
+def setting_training_time(group_id: int, training_day: int, time_start: str, time_end: str, field: int | None = None):
     if training_day < 0 or training_day > 6:
         raise ValueError("training_day must be between 0 and 6")
     if datetime.strptime(str(time_start)[:5], "%H:%M") >= datetime.strptime(str(time_end)[:5], "%H:%M"):
@@ -227,16 +239,17 @@ def setting_training_time(group_id: int, training_day: int, time_start: str, tim
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO academy_group_schedules (group_id, training_day, time_start, time_end)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO academy_group_schedules (group_id, training_day, time_start, time_end, field)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (group_id, training_day, time_start, time_end) DO UPDATE SET group_id     = EXCLUDED.group_id,
                                                                                          training_day = EXCLUDED.training_day,
                                                                                          time_start   = EXCLUDED.time_start,
                                                                                          time_end     = EXCLUDED.time_end,
+                                                                                         field        = EXCLUDED.field,
                                                                                          updated_at   = NOW()
                     RETURNING id
 
-                """, (group_id, training_day, time_start, time_end,)
+                """, (group_id, training_day, time_start, time_end, field,)
             )
             row = cur.fetchone()
             return row["id"] if row else None
@@ -248,7 +261,7 @@ def get_groups_info(bot_name: str):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT s.group_id, s.training_day, s.time_start, s.time_end,
+                SELECT s.group_id, s.training_day, s.time_start, s.time_end, s.field,
                        g.group_name, g.group_type, g.max_cap, g.curr_cap,
                        g.birth_years, g.location, g.level
                 FROM academy_group_schedules s
@@ -286,7 +299,7 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location, g.level,
-                       s.training_day, s.time_start AS time_start, s.time_end AS time_end
+                       s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
                 ON s.group_id = g.id
@@ -307,7 +320,7 @@ def get_all_groups_for_frontend() -> list[dict]:
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
                        g.birth_years, g.location, g.level,
-                       s.training_day, s.time_start AS time_start, s.time_end AS time_end
+                       s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
                   ON s.group_id = g.id
@@ -813,18 +826,23 @@ def check_trial_limits(bot_name: str, phone: str) -> bool:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                        SELECT COUNT(*) < (SELECT quantity
-                                           FROM trial_limits
-                                           WHERE group_type = %s)
-                                   AS can_take_trial
+                        SELECT limit_row.quantity IS NULL
+                               OR COUNT(at.id) < limit_row.quantity AS can_take_trial
                         FROM academy_trials at
-                                 JOIN academy_groups ag ON ag.id = at.group_id
+                        JOIN academy_groups ag ON ag.id = at.group_id
+                        LEFT JOIN LATERAL (
+                            SELECT quantity
+                            FROM trial_limits
+                            WHERE group_type = %s
+                            LIMIT 1
+                        ) limit_row ON TRUE
                         WHERE at.phone = %s
                           AND ag.group_type = %s
+                        GROUP BY limit_row.quantity
                         """, (group_type, phone, group_type))
 
-            can_take_trial = cur.fetchone()["can_take_trial"]
-            return can_take_trial
+            row = cur.fetchone()
+            return bool(row["can_take_trial"]) if row else True
 
 
 def has_active_trial(bot_name: str, phone: str) -> bool:

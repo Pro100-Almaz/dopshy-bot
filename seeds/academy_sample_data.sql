@@ -108,9 +108,9 @@ SELECT
     t.child_birth_year
 FROM (
     VALUES
-        ('Boxing Juniors A', 'boxing', 'ru', DATE '2026-08-17', '17:00', '18:30', TRUE, TRUE, 'Seed trial: attended and subscribed.', '+77010001002', 'Miras Sadykov', 10),
-        ('Boxing Juniors A', 'boxing', 'kz', DATE '2026-08-19', '17:00', '18:30', FALSE, FALSE, 'Seed trial: upcoming.', '+77010001001', 'Ayan Karimov', 9),
-        ('Football Juniors A', 'football', 'ru', DATE '2026-08-18', '18:00', '19:30', TRUE, TRUE, 'Seed trial: attended and subscribed.', '+77010002001', 'Dias Omarov', 9)
+        ('Boxing Juniors A', 'boxing', 'ru', DATE '2026-08-17', '17:00', '18:30', TRUE, TRUE, 'Seed trial: attended and subscribed.', '+77010001002', 'Miras Sadykov', 2016),
+        ('Boxing Juniors A', 'boxing', 'kz', DATE '2026-08-19', '17:00', '18:30', FALSE, FALSE, 'Seed trial: upcoming.', '+77010001001', 'Ayan Karimov', 2017),
+        ('Football Juniors A', 'football', 'ru', DATE '2026-08-18', '18:00', '19:30', TRUE, TRUE, 'Seed trial: attended and subscribed.', '+77010002001', 'Dias Omarov', 2017)
 ) AS t(group_name, group_type, language, trial_day, start_time, end_time, attended, subscribed, notes, phone, child_name, child_birth_year)
 JOIN target_groups g
   ON g.group_name = t.group_name

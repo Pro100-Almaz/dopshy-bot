@@ -21,7 +21,7 @@ var COL = {
 var GROUP_COL = {
   GROUP_ID: 1, GROUP_NAME: 2, MAX_CAP : 3, CURR_CAP: 4,
   BIRTH_YEARS: 5, LOCATION: 6, LEVEL: 7,
-  TRAINGING_DAY: 8, START_TIME: 9, END_TIME: 10
+  FIELD: 8, TRAINGING_DAY: 9, START_TIME: 10, END_TIME: 11
 }
 const user = Session.getActiveUser();
 
@@ -116,6 +116,7 @@ function onEditManual(e) {
       GROUP_COL.GROUP_NAME,
       GROUP_COL.MAX_CAP,
       GROUP_COL.LEVEL,
+      GROUP_COL.FIELD,
       GROUP_COL.TRAINGING_DAY,
       GROUP_COL.START_TIME,
       GROUP_COL.END_TIME
@@ -149,6 +150,8 @@ function onEditManual(e) {
       }
     } else if (col === GROUP_COL.LEVEL) {
       field = 'level';
+    } else if (col === GROUP_COL.FIELD) {
+      field = 'field';
     } else if (col === GROUP_COL.TRAINGING_DAY) {
       field = 'training_day';
     } else if (col === GROUP_COL.START_TIME) {
@@ -166,9 +169,11 @@ function onEditManual(e) {
       }
       patch.previous_training_day = _groupTrainingDayValue(e.oldValue);
       patch.training_day = _groupTrainingDayValue(sheet.getRange(row, GROUP_COL.TRAINGING_DAY).getValue());
-    } else if (field === 'time_start' || field === 'time_end') {
+    } else if (field === 'time_start' || field === 'time_end' || field === 'field') {
       patch.training_day = _groupTrainingDayValue(sheet.getRange(row, GROUP_COL.TRAINGING_DAY).getValue());
-      patch[field] = _groupTimeValue(sheet.getRange(row, col).getValue());
+      patch[field] = field === 'field'
+        ? String(sheet.getRange(row, col).getValue()).replace(/^Field\\s*/i, '')
+        : _groupTimeValue(sheet.getRange(row, col).getValue());
     } else {
       patch[field] = sheet.getRange(row, col).getValue();
     }

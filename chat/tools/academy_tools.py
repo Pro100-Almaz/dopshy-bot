@@ -69,7 +69,9 @@ EXTRACT_TRIAL_DATA_LLM = {
         "name": "extract_trial_data",
         "description": (
             "Extract structured intake data and preferred schedule from a trial "
-            "signup conversation. Preferences are not final group/date/time choices."
+            "signup conversation. Return null for side questions, greetings, "
+            "acknowledgements, bot-identity questions, or small talk. Preferences "
+            "are not final group/date/time choices."
         ),
         "strict": True,
         "parameters": {
@@ -78,7 +80,11 @@ EXTRACT_TRIAL_DATA_LLM = {
             "properties": {
                 "child_name": {
                     "type": ["string", "null"],
-                    "description": "Child's name. Null unless explicitly provided.",
+                    "description": (
+                        "Child's name. Null unless explicitly provided as a plausible name. "
+                        "Never use questions, greetings, acknowledgements, commands, or "
+                        "whole sentences as a name."
+                    ),
                 },
                 "child_birth_year": {
                     "type": ["integer", "null"],

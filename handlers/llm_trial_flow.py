@@ -19,8 +19,8 @@ T = {
         "kk": "Балаңыздың туған жылын жазыңыз. Мысалы: *2016*.",
     },
     "ask_experience": {
-        "ru": "Выберите уровень подготовки:\n1. Beginner\n2. Intermediate\n3. Advanced",
-        "kk": "Дайындық деңгейін таңдаңыз:\n1. Beginner\n2. Intermediate\n3. Advanced",
+        "ru": "Выберите уровень подготовки:\n1. Начинающий\n2. Средний\n3. Продвинутый",
+        "kk": "Дайындық деңгейін таңдаңыз:\n1. Бастауыш\n2. Орта\n3. Жетілдірілген",
     },
     "ask_school_shift": {
         "ru": "Какая школьная смена у ребенка?\n1. Утренняя\n2. Дневная",
@@ -92,6 +92,18 @@ _EXPERIENCE_ALIASES = {
     "продвинутый": "Advanced",
     "жоғары": "Advanced",
 }
+LEVEL_LABELS = {
+    "ru": {
+        "Beginner": "Начальный",
+        "Intermediate": "Средний",
+        "Advanced": "Продвинутый",
+    },
+    "kk": {
+        "Beginner": "Бастапқы",
+        "Intermediate": "Орта",
+        "Advanced": "Жоғары",
+    },
+}
 
 _SHIFT_ALIASES = {
     "1": "morning",
@@ -108,6 +120,20 @@ _SHIFT_ALIASES = {
 
 _YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын"}
 _NO = {"нет", "жоқ", "no", "отмена", "бас тартамын", "бас тарту"}
+_GREETINGS = {
+    "hello", "hi", "hey", "привет", "здравствуйте", "салам", "сәлем",
+    "сәлеметсіз бе", "добрый день", "доброе утро", "добрый вечер",
+    "че там", "чё там", "как дела", "как ты", "что нового",
+}
+_ACKNOWLEDGEMENTS = {
+    "понял", "поняла", "понятно", "ясно", "ок", "окей", "okay", "хорошо",
+    "ладно", "спасибо", "спс", "рахмет", "түсіндім", "жақсы",
+}
+_BOT_IDENTITY_QUESTIONS = (
+    "что это за бот", "кто ты", "ты кто", "что ты умеешь",
+    "какой это бот", "для чего этот бот", "зачем этот бот",
+    "бұл қандай бот", "сен кімсің", "не істей аласың",
+)
 
 
 def _loc(lang: str, key: str, **fmt) -> str:
@@ -133,13 +159,81 @@ def _normalize_manual_value(field: str, text: str):
         years = [int(part) for part in low.replace(",", " ").split() if part.isdigit() and len(part) == 4]
         return years[-1] if years else None
     if field == "child_name":
+        if not _is_plausible_child_name(text):
+            return None
         return text.strip() or None
+    return None
+
+
+def _is_plausible_child_name(text: str | None) -> bool:
+    if not text:
+        return False
+    value = text.strip()
+    if not value:
+        return False
+    if is_bot_identity_question(value) or is_greeting(value) or is_acknowledgement(value):
+        return False
+    lowered = value.lower()
+    blocked_fragments = (
+        "что это", "какой это", "кто ты", "что ты", "хочу", "запис",
+        "пробн", "занят", "распис", "бот", "можно", "сколько",
+    )
+    if any(fragment in lowered for fragment in blocked_fragments):
+        return False
+    if "?" in value or len(value.split()) > 4:
+        return False
+    return True
+
+
+def is_greeting(text: str) -> bool:
+    normalized = " ".join((text or "").lower().replace("!", " ").replace(".", " ").split())
+    return normalized in _GREETINGS
+
+
+def is_acknowledgement(text: str) -> bool:
+    normalized = " ".join((text or "").lower().replace("!", " ").replace(".", " ").split())
+    return normalized in _ACKNOWLEDGEMENTS
+
+
+def is_bot_identity_question(text: str) -> bool:
+    normalized = " ".join((text or "").lower().replace("?", " ").replace("!", " ").replace(".", " ").split())
+    return any(q in normalized for q in _BOT_IDENTITY_QUESTIONS)
+
+
+def _waiting_prompt(lang: str, waiting_for: str | None) -> str:
+    if not waiting_for:
+        return ""
+    prompt = _ask_missing(lang, waiting_for)
+    if lang == "ru":
+        return f"\n\nЧтобы продолжить запись на пробное занятие: {prompt}"
+    return f"\n\nСынақ сабағына жазылуды жалғастыру үшін: {prompt}"
+
+
+def _session_interrupt_response(lang: str, text: str, waiting_for: str | None = None) -> str | None:
+    if is_bot_identity_question(text):
+        base = (
+            "Я бот-ассистент академии. Могу ответить на вопросы о тренировках "
+            "и помочь записаться на пробное занятие."
+            if lang == "ru"
+            else "Мен академияның бот-ассистентімін. Жаттығулар туралы сұрақтарға "
+                 "жауап беріп, сынақ сабағына жазуға көмектесемін."
+        )
+        return base + _waiting_prompt(lang, waiting_for)
+
+    if is_greeting(text):
+        base = "Здравствуйте!" if lang == "ru" else "Сәлеметсіз бе!"
+        return base + _waiting_prompt(lang, waiting_for)
+
+    if is_acknowledgement(text):
+        base = "Хорошо." if lang == "ru" else "Жақсы."
+        return base + _waiting_prompt(lang, waiting_for)
+
     return None
 
 
 def _draft_to_data(draft: dict) -> dict:
     return {
-        "child_name": draft.get("child_name"),
+        "child_name": draft.get("child_name") if _is_plausible_child_name(draft.get("child_name")) else None,
         "child_birth_year": draft.get("child_birth_year"),
         "experience": draft.get("experience"),
         "school_shift": draft.get("school_shift"),
@@ -177,8 +271,16 @@ def _ask_missing(lang: str, field: str) -> str:
 def _slot_lines(slots: list[dict], lang: str) -> str:
     lines = []
     for i, slot in enumerate(slots, 1):
+        group = slot.get("group_name") or f"Group #{slot.get('group_id')}"
+        levels = slot.get("level") or []
+        if isinstance(levels, str):
+            levels = [levels]
+        labels = LEVEL_LABELS.get(lang, LEVEL_LABELS["ru"])
+        localized_levels = [labels.get(level, level) for level in levels]
+        level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
         lines.append(
-            f"{i}. {_fmt_date(slot['date'], lang)} "
+            f"{i}. {group}{level_text}\n"
+            f"   {_fmt_date(slot['date'], lang)} | "
             f"{str(slot['time_start'])[:5]}–{str(slot['time_end'])[:5]}"
         )
     return "\n".join(lines)
@@ -220,9 +322,21 @@ class LlmTrialFlowHandler:
                 return result.get("message") or _loc(lang, "no_groups")
             draft = result["data"]["trial"]
 
-        extracted = extract_trial_details(history, user_text)
+        if draft.get("child_name") and not _is_plausible_child_name(draft.get("child_name")):
+            result = trial_service.update_intake(bot_name, draft["id"], {"child_name": None, "language": lang})
+            if not result["ok"]:
+                return result.get("message") or _loc(lang, "no_groups")
+            draft = result["data"]["trial"]
+
         active = postgres.get_active_session(bot_name, chat_id)
         waiting_for = (active or {}).get("params", {}).get("waiting_for")
+        interrupt = _session_interrupt_response(lang, user_text, waiting_for)
+        if waiting_for and interrupt:
+            return interrupt
+
+        extracted = extract_trial_details(history, user_text)
+        if extracted.get("child_name") and not _is_plausible_child_name(extracted.get("child_name")):
+            extracted["child_name"] = None
         if waiting_for and not extracted.get(waiting_for):
             extracted[waiting_for] = _normalize_manual_value(waiting_for, user_text)
 
@@ -260,7 +374,8 @@ class LlmTrialFlowHandler:
                 draft["experience"],
             )
             if fallback_slots:
-                offered = fallback_slots[0].get("level") or "lower"
+                slot_levels = fallback_slots[0].get("level") or []
+                offered = next((level for level in ("Intermediate", "Beginner") if level in slot_levels), "lower")
                 postgres.upsert_session(
                     bot_name,
                     chat_id,
@@ -276,7 +391,9 @@ class LlmTrialFlowHandler:
                                 "date": str(s["date"]),
                                 "time_start": str(s["time_start"])[:5],
                                 "time_end": str(s["time_end"])[:5],
-                                "level": s.get("level"),
+                                "group_name": s.get("group_name"),
+                                "level": s.get("level") or [],
+                                "field": s.get("field"),
                             }
                             for s in fallback_slots
                         ],
@@ -290,10 +407,6 @@ class LlmTrialFlowHandler:
             postgres.delete_session(bot_name, chat_id)
             return _loc(lang, "no_groups")
 
-        matched = trial_logic.match_preferred_slot(slots, draft)
-        if matched:
-            return self._assign_slot_and_confirm(chat_id, bot_name, draft, matched, lang)
-
         postgres.upsert_session(
             bot_name,
             chat_id,
@@ -306,6 +419,9 @@ class LlmTrialFlowHandler:
                         "date": str(s["date"]),
                         "time_start": str(s["time_start"])[:5],
                         "time_end": str(s["time_end"])[:5],
+                        "group_name": s.get("group_name"),
+                        "level": s.get("level") or [],
+                        "field": s.get("field"),
                     }
                     for s in slots
                 ],
@@ -313,10 +429,7 @@ class LlmTrialFlowHandler:
             },
             draft["id"],
         )
-        prefix = "preferred_unavailable" if any(draft.get(k) for k in (
-            "preferred_date", "preferred_weekday", "preferred_time_start", "preferred_time_end"
-        )) else "choose_slot"
-        return f"{_loc(lang, prefix)}\n\n{_slot_lines(slots, lang)}"
+        return f"{_loc(lang, 'choose_slot')}\n\n{_slot_lines(slots, lang)}"
 
     def _assign_slot_and_confirm(
         self, chat_id: str, bot_name: str, draft: dict, slot: dict, lang: str
@@ -342,9 +455,15 @@ class LlmTrialFlowHandler:
         trial_id = params.get("trial_id")
 
         if state == "trial_intake":
+            interrupt = _session_interrupt_response(lang, user_text, params.get("waiting_for"))
+            if interrupt:
+                return interrupt
             return self.handle(chat_id, sender_phone, bot_name, user_text, history, lang)
 
         if state == "trial_select_slot":
+            interrupt = _session_interrupt_response(lang, user_text)
+            if interrupt:
+                return interrupt + "\n\n" + f"{_loc(lang, 'choose_slot')}\n\n{_slot_lines(params.get('slots') or [], lang)}"
             if not user_text.strip().isdigit():
                 return _loc(lang, "slot_invalid")
             idx = int(user_text.strip()) - 1

@@ -72,6 +72,11 @@ def test_extract_trial_details_parses_all_supported_fields(monkeypatch):
 
     assert result == payload
     assert seen["tool_choice"]["function"]["name"] == "extract_trial_data"
+    prompt = seen["messages"][0]["content"]
+    assert "Твоя задача — извлечение, а не вывод информации" in prompt
+    assert "категорически запрещено выводить данные из предыдущих пробных занятий" in prompt
+    assert "{today}" not in prompt
+    assert "{now}" not in prompt
 
 
 def test_extract_trial_details_merges_missing_keys_with_empty_template(monkeypatch):

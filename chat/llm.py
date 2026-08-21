@@ -161,10 +161,13 @@ def route_trial_message(history: list, user_message: str) -> tuple[str, str]:
     """Classify the latest academy/QA bot message into a strict trial intent."""
     system_content = (
         "You route WhatsApp messages for academy trial signup bots. "
+        "Greetings, thanks, and small talk such as hello/hi/привет/сәлем/че там/как дела are always other. "
+        "Questions about the bot itself such as 'что это за бот', 'кто ты', 'что ты умеешь' are always other. "
         "Return one intent only. Use trial_new when the user wants to sign up, "
         "try a class, join training, or asks to come to a trial. "
         "Use question_schedule/price/location/age/trial_rules for factual questions. "
-        "Use trial_continue when the user is providing missing signup details. "
+        "Use trial_continue only when the user is clearly providing missing signup details "
+        "such as child name, birth year, experience, school shift, or preferred date/time. "
         "Use human_help when they ask for an administrator or human manager. "
         "Detect Russian as ru and Kazakh as kk."
     )
