@@ -1,10 +1,12 @@
 import logging
+import re
 from datetime import date, datetime
 
 from handlers.academy_extractor import extract_trial_details
 from integrations import trial_service
 from integrations import trial as trial_logic
 from integrations.repo import academy_repo, postgres
+from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,10 @@ T = {
     "ask_name": {
         "ru": "Укажите имя ребенка.",
         "kk": "Балаңыздың есімін жазыңыз.",
+    },
+    "ask_name_self": {
+        "ru": "Укажите ваше имя.",
+        "kk": "Атыңызды жазыңыз.",
     },
     "ask_birth_year": {
         "ru": "Укажите год рождения ребенка. Например: *2016*.",
@@ -29,6 +35,10 @@ T = {
     "no_groups": {
         "ru": "Подходящих групп сейчас не нашлось. Администратор поможет подобрать вариант вручную.",
         "kk": "Қазір сәйкес топ табылмады. Әкімші қолмен нұсқа таңдап береді.",
+    },
+    "no_groups_call_admin": {
+        "ru": "Подходящих групп сейчас не нашлось. Пожалуйста, позвоните администратору по номеру +7 700 555 6000.",
+        "kk": "Қазір сәйкес топ табылмады. Әкімшіге +7 700 555 6000 нөміріне қоңырау шалыңыз.",
     },
     "preferred_unavailable": {
         "ru": "Указанное время не подходит для группы ребенка. Выберите один из доступных вариантов:",
@@ -70,6 +80,14 @@ T = {
         "ru": "У вас уже есть активная запись на пробное занятие.",
         "kk": "Сізде сынақ сабағына белсенді жазылым бар.",
     },
+    "details_updated_confirm": {
+        "ru": "Данные обновил. Проверьте детали и подтвердите запись.",
+        "kk": "Деректер жаңартылды. Мәліметтерді тексеріп, жазылымды растаңыз.",
+    },
+    "slot_no_longer_eligible": {
+        "ru": "После изменения данных выбранная группа уже не подходит. Я убрал выбранные дату и время — выберите подходящий вариант заново.",
+        "kk": "Деректер өзгергеннен кейін таңдалған топ сәйкес келмейді. Таңдалған күн мен уақытты алып тастадым — қолайлы нұсқаны қайта таңдаңыз.",
+    },
 }
 
 WEEKDAY = {
@@ -104,6 +122,16 @@ LEVEL_LABELS = {
         "Advanced": "Жоғары",
     },
 }
+SHIFT_LABELS = {
+    "ru": {
+        "morning": "утренняя",
+        "afternoon": "дневная",
+    },
+    "kk": {
+        "morning": "таңғы",
+        "afternoon": "түскі",
+    },
+}
 
 _SHIFT_ALIASES = {
     "1": "morning",
@@ -134,11 +162,61 @@ _BOT_IDENTITY_QUESTIONS = (
     "какой это бот", "для чего этот бот", "зачем этот бот",
     "бұл қандай бот", "сен кімсің", "не істей аласың",
 )
+_AGE_RE = re.compile(
+    r"\b(?:мне|маған|жасым)\s+(\d{1,2})\s*(?:лет|жас)?\b"
+    r"|\b(\d{1,2})\s*(?:лет|жас)(?:\s+мне|\s+маған)?\b",
+    re.IGNORECASE,
+)
+_SELF_SIGNUP_RE = re.compile(
+    r"\b(?:мне|я\s+хочу|хочу\s+записаться|хочу\s+заниматься|маған|өзім)\b",
+    re.IGNORECASE,
+)
 
 
 def _loc(lang: str, key: str, **fmt) -> str:
     text = T[key].get(lang) or T[key]["ru"]
     return text.format(**fmt) if fmt else text
+
+
+def _birth_year_from_age(text: str, today: date | None = None) -> int | None:
+    today = today or today_almaty()
+    for match in _AGE_RE.finditer(text or ""):
+        raw = match.group(1) or match.group(2)
+        if not raw:
+            continue
+        age = int(raw)
+        if 5 <= age <= 15:
+            return today.year - age
+    return None
+
+
+def _signup_actor(text: str | None) -> str | None:
+    return "self" if _SELF_SIGNUP_RE.search(text or "") else None
+
+
+def _extract_user_data(
+    history: list,
+    user_text: str,
+    waiting_for: str | None = None,
+) -> dict:
+    extracted = extract_trial_details(history, user_text)
+    if not extracted.get("child_birth_year"):
+        extracted["child_birth_year"] = _birth_year_from_age(user_text)
+    if extracted.get("child_name") and not _is_plausible_child_name(extracted.get("child_name")):
+        extracted["child_name"] = None
+    if not extracted.get("experience"):
+        extracted["experience"] = _normalize_manual_value("experience", user_text)
+    if not extracted.get("school_shift"):
+        extracted["school_shift"] = _normalize_manual_value("school_shift", user_text)
+    if waiting_for and not extracted.get(waiting_for):
+        extracted[waiting_for] = _normalize_manual_value(waiting_for, user_text)
+    if waiting_for == "child_birth_year" and not extracted.get("child_birth_year"):
+        extracted["child_birth_year"] = _birth_year_from_age(user_text)
+    return extracted
+
+
+def _filled_patch(data: dict) -> dict:
+    return {key: value for key, value in (data or {}).items() if value not in (None, "")}
 
 
 def _fmt_date(value, lang: str) -> str:
@@ -150,11 +228,27 @@ def _fmt_date(value, lang: str) -> str:
 
 
 def _normalize_manual_value(field: str, text: str):
-    low = text.strip().lower()
+    low = " ".join((text or "").strip().lower().replace("?", " ").replace("!", " ").split())
     if field == "experience":
-        return _EXPERIENCE_ALIASES.get(low)
+        exact = _EXPERIENCE_ALIASES.get(low)
+        if exact:
+            return exact
+        if "начина" in low or "нович" in low or "бастап" in low:
+            return "Beginner"
+        if "средн" in low or "орта" in low:
+            return "Intermediate"
+        if "продвин" in low or "жоғары" in low:
+            return "Advanced"
+        return None
     if field == "school_shift":
-        return _SHIFT_ALIASES.get(low)
+        exact = _SHIFT_ALIASES.get(low)
+        if exact:
+            return exact
+        if "утрен" in low or "утром" in low or "таң" in low:
+            return "morning"
+        if "дневн" in low or "днем" in low or "түск" in low:
+            return "afternoon"
+        return None
     if field == "child_birth_year":
         years = [int(part) for part in low.replace(",", " ").split() if part.isdigit() and len(part) == 4]
         return years[-1] if years else None
@@ -259,13 +353,23 @@ def _missing_prerequisite(data: dict) -> str | None:
     return None
 
 
-def _ask_missing(lang: str, field: str) -> str:
+def _ask_missing(lang: str, field: str, signup_actor: str | None = None) -> str:
+    if field == "child_name" and signup_actor == "self":
+        return _loc(lang, "ask_name_self")
     return _loc(lang, {
         "child_name": "ask_name",
         "child_birth_year": "ask_birth_year",
         "experience": "ask_experience",
         "school_shift": "ask_school_shift",
     }[field])
+
+
+def _level_label(value: str | None, lang: str) -> str:
+    return LEVEL_LABELS.get(lang, LEVEL_LABELS["ru"]).get(value, value or "")
+
+
+def _shift_label(value: str | None, lang: str) -> str:
+    return SHIFT_LABELS.get(lang, SHIFT_LABELS["ru"]).get(value, value or "")
 
 
 def _slot_lines(slots: list[dict], lang: str) -> str:
@@ -275,8 +379,7 @@ def _slot_lines(slots: list[dict], lang: str) -> str:
         levels = slot.get("level") or []
         if isinstance(levels, str):
             levels = [levels]
-        labels = LEVEL_LABELS.get(lang, LEVEL_LABELS["ru"])
-        localized_levels = [labels.get(level, level) for level in levels]
+        localized_levels = [_level_label(level, lang) for level in levels]
         level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
         lines.append(
             f"{i}. {group}{level_text}\n"
@@ -284,6 +387,46 @@ def _slot_lines(slots: list[dict], lang: str) -> str:
             f"{str(slot['time_start'])[:5]}–{str(slot['time_end'])[:5]}"
         )
     return "\n".join(lines)
+
+
+def _age_group_lines(slots: list[dict], lang: str) -> str:
+    seen = set()
+    unique = []
+    for slot in slots:
+        key = (
+            slot.get("group_id"),
+            slot.get("training_day"),
+            str(slot.get("time_start"))[:5],
+            str(slot.get("time_end"))[:5],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(slot)
+    return _slot_lines(unique, lang)
+
+
+def _no_groups_with_age_options(
+    lang: str,
+    slots: list[dict],
+    draft: dict,
+    signup_actor: str | None = None,
+) -> str:
+    if not slots:
+        return _loc(lang, "no_groups_call_admin")
+    if lang == "ru":
+        return (
+            f"{_loc(lang, 'no_groups')}\n\n"
+            f"По возрасту {draft.get('child_birth_year')} подходят такие группы:\n"
+            f"{_age_group_lines(slots, lang)}\n\n"
+            "Можно поменять уровень подготовки или школьную смену, и я проверю ещё раз."
+        )
+    return (
+        f"{_loc(lang, 'no_groups')}\n\n"
+        f"{draft.get('child_birth_year')} туған жылына сәйкес келетін топтар:\n"
+        f"{_age_group_lines(slots, lang)}\n\n"
+        "Дайындық деңгейін немесе мектеп ауысымын өзгертсеңіз, қайта тексеремін."
+    )
 
 
 def _confirmation(draft: dict, lang: str) -> str:
@@ -295,8 +438,8 @@ def _confirmation(draft: dict, lang: str) -> str:
         end=str(draft["end_time"])[:5],
         name=draft.get("child_name", ""),
         birth_year=draft.get("child_birth_year", ""),
-        experience=draft.get("experience", ""),
-        school_shift=draft.get("school_shift", ""),
+        experience=_level_label(draft.get("experience"), lang),
+        school_shift=_shift_label(draft.get("school_shift"), lang),
     )
     return body + ("\n\nОтветьте *да* или *нет*." if lang == "ru" else "\n\n*Иә* немесе *жоқ* деп жауап беріңіз.")
 
@@ -330,15 +473,12 @@ class LlmTrialFlowHandler:
 
         active = postgres.get_active_session(bot_name, chat_id)
         waiting_for = (active or {}).get("params", {}).get("waiting_for")
+        signup_actor = (active or {}).get("params", {}).get("signup_actor") or _signup_actor(user_text)
         interrupt = _session_interrupt_response(lang, user_text, waiting_for)
         if waiting_for and interrupt:
             return interrupt
 
-        extracted = extract_trial_details(history, user_text)
-        if extracted.get("child_name") and not _is_plausible_child_name(extracted.get("child_name")):
-            extracted["child_name"] = None
-        if waiting_for and not extracted.get(waiting_for):
-            extracted[waiting_for] = _normalize_manual_value(waiting_for, user_text)
+        extracted = _extract_user_data(history, user_text, waiting_for)
 
         data = _merge(_draft_to_data(draft), extracted)
         result = trial_service.update_intake(bot_name, draft["id"], {**data, "language": lang})
@@ -346,20 +486,42 @@ class LlmTrialFlowHandler:
             return result.get("message") or _loc(lang, "no_groups")
         draft = result["data"]["trial"]
 
+        return self._continue_from_draft(chat_id, bot_name, draft, lang, signup_actor)
+
+    def _continue_from_draft(
+        self,
+        chat_id: str,
+        bot_name: str,
+        draft: dict,
+        lang: str,
+        signup_actor: str | None = None,
+    ) -> str:
         missing = _missing_prerequisite(draft)
         if missing:
             postgres.upsert_session(
                 bot_name,
                 chat_id,
                 "trial_intake",
-                {"trial_id": draft["id"], "waiting_for": missing, "lang": lang},
+                {
+                    "trial_id": draft["id"],
+                    "waiting_for": missing,
+                    "lang": lang,
+                    "signup_actor": signup_actor,
+                },
                 draft["id"],
             )
-            return _ask_missing(lang, missing)
+            return _ask_missing(lang, missing, signup_actor)
 
-        return self._evaluate_slots(chat_id, bot_name, draft, lang)
+        return self._evaluate_slots(chat_id, bot_name, draft, lang, signup_actor)
 
-    def _evaluate_slots(self, chat_id: str, bot_name: str, draft: dict, lang: str) -> str:
+    def _evaluate_slots(
+        self,
+        chat_id: str,
+        bot_name: str,
+        draft: dict,
+        lang: str,
+        signup_actor: str | None = None,
+    ) -> str:
         slots = trial_logic.get_eligible_trial_slots(
             bot_name,
             int(draft["child_birth_year"]),
@@ -402,10 +564,26 @@ class LlmTrialFlowHandler:
                 )
                 return _loc(
                     lang, "fallback_offer",
-                    requested=draft["experience"], offered=offered,
+                    requested=_level_label(draft["experience"], lang),
+                    offered=_level_label(offered, lang),
                 )
-            postgres.delete_session(bot_name, chat_id)
-            return _loc(lang, "no_groups")
+            age_slots = trial_logic.get_birth_year_trial_slots(
+                bot_name,
+                int(draft["child_birth_year"]),
+            )
+            postgres.upsert_session(
+                bot_name,
+                chat_id,
+                "trial_intake",
+                {
+                    "trial_id": draft["id"],
+                    "waiting_for": None,
+                    "lang": lang,
+                    "signup_actor": signup_actor,
+                },
+                draft["id"],
+            )
+            return _no_groups_with_age_options(lang, age_slots, draft, signup_actor)
 
         postgres.upsert_session(
             bot_name,
@@ -464,14 +642,35 @@ class LlmTrialFlowHandler:
             interrupt = _session_interrupt_response(lang, user_text)
             if interrupt:
                 return interrupt + "\n\n" + f"{_loc(lang, 'choose_slot')}\n\n{_slot_lines(params.get('slots') or [], lang)}"
-            if not user_text.strip().isdigit():
-                return _loc(lang, "slot_invalid")
-            idx = int(user_text.strip()) - 1
             slots = params.get("slots") or []
-            if idx < 0 or idx >= len(slots):
+            if user_text.strip().isdigit():
+                idx = int(user_text.strip()) - 1
+                if idx < 0 or idx >= len(slots):
+                    return _loc(lang, "slot_invalid")
+                draft = academy_repo.get_trial(trial_id)
+                return self._assign_slot_and_confirm(chat_id, bot_name, draft, slots[idx], lang)
+
+            patch = _filled_patch(_extract_user_data(history, user_text))
+            if not patch:
                 return _loc(lang, "slot_invalid")
-            draft = academy_repo.get_trial(trial_id)
-            return self._assign_slot_and_confirm(chat_id, bot_name, draft, slots[idx], lang)
+
+            result = trial_service.update_intake(
+                bot_name,
+                trial_id,
+                {
+                    **patch,
+                    "trial_day": None,
+                    "start_time": None,
+                    "end_time": None,
+                    "group_id": None,
+                    "language": lang,
+                },
+            )
+            if not result["ok"]:
+                return result.get("message") or _loc(lang, "no_groups")
+            return self._continue_from_draft(
+                chat_id, bot_name, result["data"]["trial"], lang, params.get("signup_actor")
+            )
 
         if state == "trial_fallback_offer":
             lower = user_text.lower().strip()
@@ -491,14 +690,47 @@ class LlmTrialFlowHandler:
                 return _loc(lang, "fallback_declined")
             return _loc(
                 lang, "fallback_offer",
-                requested=params.get("requested_level", ""),
-                offered=params.get("offered_level", ""),
+                requested=_level_label(params.get("requested_level"), lang),
+                offered=_level_label(params.get("offered_level"), lang),
             )
 
         if state == "trial_confirm":
             lower = user_text.lower().strip()
             decision = "yes" if any(w in lower for w in _YES) else "no" if any(w in lower for w in _NO) else ""
+            if not decision:
+                patch = _filled_patch(_extract_user_data(history, user_text))
+                if patch:
+                    result = trial_service.update_intake(
+                        bot_name,
+                        trial_id,
+                        {**patch, "language": lang},
+                    )
+                    if not result["ok"]:
+                        return result.get("message") or _confirmation(academy_repo.get_trial(trial_id), lang)
+                    return (
+                        f"{_loc(lang, 'details_updated_confirm')}\n\n"
+                        f"{_confirmation(result['data']['trial'], lang)}"
+                    )
             if decision == "yes":
+                draft = academy_repo.get_trial(trial_id)
+                if not trial_logic.is_trial_slot_eligible(bot_name, draft):
+                    result = trial_service.update_intake(
+                        bot_name,
+                        trial_id,
+                        {
+                            "trial_day": None,
+                            "start_time": None,
+                            "end_time": None,
+                            "group_id": None,
+                            "language": lang,
+                        },
+                    )
+                    if not result["ok"]:
+                        return result.get("message") or _loc(lang, "no_groups")
+                    return (
+                        f"{_loc(lang, 'slot_no_longer_eligible')}\n\n"
+                        f"{self._continue_from_draft(chat_id, bot_name, result['data']['trial'], lang)}"
+                    )
                 result = trial_service.confirm_trial(bot_name, chat_id, trial_id)
                 if not result["ok"]:
                     return result.get("message") or _confirmation(academy_repo.get_trial(trial_id), lang)

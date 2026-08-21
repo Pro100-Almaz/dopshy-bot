@@ -137,6 +137,57 @@ def get_fallback_trial_slots(
     ]
 
 
+def get_birth_year_trial_slots(
+    bot_name: str,
+    child_birth_year: int,
+) -> list[dict]:
+    """Return available schedule slots filtered only by academy type and birth year."""
+    result = []
+    for info in academy_repo.get_groups_info(bot_name=bot_name):
+        birth_years = info.get("birth_years") or []
+        if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
+            continue
+
+        max_cap = info.get("max_cap")
+        curr_cap = info.get("curr_cap") or 0
+        if max_cap is not None and int(curr_cap) >= int(max_cap):
+            continue
+
+        result.append({
+            **info,
+            "date": _get_closest_date(info["training_day"]),
+        })
+    return result
+
+
+def is_trial_slot_eligible(bot_name: str, trial: dict) -> bool:
+    """Return whether the trial's selected slot still matches its intake data."""
+    required = (
+        "group_id", "trial_day", "start_time", "end_time",
+        "child_birth_year", "school_shift",
+    )
+    if any(trial.get(key) in (None, "") for key in required):
+        return False
+
+    slots = get_eligible_trial_slots(
+        bot_name,
+        int(trial["child_birth_year"]),
+        trial["school_shift"],
+        experience=trial.get("experience"),
+    )
+    for slot in slots:
+        if int(slot["group_id"]) != int(trial["group_id"]):
+            continue
+        if str(slot["date"]) != str(trial["trial_day"]):
+            continue
+        if str(slot["time_start"])[:5] != str(trial["start_time"])[:5]:
+            continue
+        if str(slot["time_end"])[:5] != str(trial["end_time"])[:5]:
+            continue
+        return True
+    return False
+
+
 def match_preferred_slot(slots: list[dict], draft: dict) -> dict | None:
     preferred_date = draft.get("preferred_date")
     preferred_weekday = draft.get("preferred_weekday")

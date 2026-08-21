@@ -88,7 +88,11 @@ EXTRACT_TRIAL_DATA_LLM = {
                 },
                 "child_birth_year": {
                     "type": ["integer", "null"],
-                    "description": "Four-digit child birth year. Null unless explicit.",
+                    "description": (
+                        "Four-digit student's birth year. If the user clearly gives their own "
+                        "age for self-signup, such as 'мне 15 лет' or 'маған 15 жас', return the "
+                        "estimated birth year using the current year. Null unless explicit."
+                    ),
                 },
                 "experience": {
                     "type": ["string", "null"],
