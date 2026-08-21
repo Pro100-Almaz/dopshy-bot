@@ -20,6 +20,118 @@ START_TRIAL_TOOL = {
 }
 
 
+SELECT_TRIAL_INTENT_LLM = {
+    "type": "function",
+    "function": {
+        "name": "route_trial_message",
+        "description": (
+            "Classify the latest message for an academy trial/QA WhatsApp bot. "
+            "Return exactly one intent and the user's language."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "question_price",
+                        "question_schedule",
+                        "question_location",
+                        "question_age",
+                        "question_trial_rules",
+                        "trial_new",
+                        "trial_continue",
+                        "trial_edit",
+                        "trial_status",
+                        "trial_cancel",
+                        "human_help",
+                        "other",
+                    ],
+                    "description": "Single best intent for the user's latest message.",
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["ru", "kk"],
+                    "description": "Language of the user's latest message.",
+                },
+            },
+            "required": ["type", "lang"],
+        },
+    },
+}
+
+
+EXTRACT_TRIAL_DATA_LLM = {
+    "type": "function",
+    "function": {
+        "name": "extract_trial_data",
+        "description": (
+            "Extract structured intake data and preferred schedule from a trial "
+            "signup conversation. Preferences are not final group/date/time choices."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "child_name": {
+                    "type": ["string", "null"],
+                    "description": "Child's name. Null unless explicitly provided.",
+                },
+                "child_birth_year": {
+                    "type": ["integer", "null"],
+                    "description": "Four-digit child birth year. Null unless explicit.",
+                },
+                "experience": {
+                    "type": ["string", "null"],
+                    "enum": ["Beginner", "Intermediate", "Advanced", None],
+                    "description": (
+                        "Training level. Map beginner/новичок/бастапқы to Beginner, "
+                        "intermediate/средний/орта to Intermediate, advanced/продвинутый/жоғары to Advanced."
+                    ),
+                },
+                "school_shift": {
+                    "type": ["string", "null"],
+                    "enum": ["morning", "afternoon", None],
+                    "description": (
+                        "Child's school shift, not desired training time. "
+                        "morning means studies in the morning; afternoon means studies in the afternoon."
+                    ),
+                },
+                "preferred_date": {
+                    "type": ["string", "null"],
+                    "description": "Preferred trial date as YYYY-MM-DD, or null.",
+                },
+                "preferred_weekday": {
+                    "type": ["integer", "null"],
+                    "description": "Preferred weekday 0=Monday through 6=Sunday, or null.",
+                },
+                "preferred_time_start": {
+                    "type": ["string", "null"],
+                    "description": "Preferred start time HH:MM, or null.",
+                },
+                "preferred_time_end": {
+                    "type": ["string", "null"],
+                    "description": "Preferred end time HH:MM, or null.",
+                },
+            },
+            "required": [
+                "child_name",
+                "child_birth_year",
+                "experience",
+                "school_shift",
+                "preferred_date",
+                "preferred_weekday",
+                "preferred_time_start",
+                "preferred_time_end",
+            ],
+        },
+    },
+}
+
+
 EDIT_TRIAL_TOOL = {
     "type": "function",
     "function": {
@@ -51,9 +163,9 @@ EDIT_TRIAL_TOOL = {
                     "type": "string",
                     "description": "Новое значение смены учебы ребенка клиента. Опускай, если смена учебы не меняется.",
                 },
-                "child_age": {
+                "child_birth_year": {
                     "type": "integer",
-                    "description": "Новый возраст ребенка клиента. Опускай, если возраст ребенка клиента не меняется.",
+                    "description": "Новый год рождения ребенка клиента. Опускай, если год рождения не меняется.",
                 },
                 "child_name": {
                     "type": "string",

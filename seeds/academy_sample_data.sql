@@ -43,18 +43,17 @@ seed_users AS (
     SELECT *
     FROM (
         VALUES
-            ('Boxing Juniors A', 'boxing', 'Ayan Karimov', 9, DATE '2017-03-18', '+77010001001', 1, FALSE),
-            ('Boxing Juniors A', 'boxing', 'Miras Sadykov', 10, DATE '2016-07-22', '+77010001002', 2, TRUE),
-            ('Boxing Juniors A', 'boxing', 'Timur Akhmetov', 8, DATE '2018-01-09', '+77010001003', 0, FALSE),
-            ('Football Juniors A', 'football', 'Dias Omarov', 9, DATE '2017-05-14', '+77010002001', 1, TRUE),
-            ('Football Juniors A', 'football', 'Arman Ibrayev', 11, DATE '2015-11-03', '+77010002002', 0, FALSE)
-    ) AS u(group_name, group_type, child_name, child_age, child_birth_date, parent_phone, total_trials, subscribed)
+            ('Boxing Juniors A', 'boxing', 'Ayan Karimov', 2017, '+77010001001', 1, FALSE),
+            ('Boxing Juniors A', 'boxing', 'Miras Sadykov', 2016, '+77010001002', 2, TRUE),
+            ('Boxing Juniors A', 'boxing', 'Timur Akhmetov', 2018, '+77010001003', 0, FALSE),
+            ('Football Juniors A', 'football', 'Dias Omarov', 2017, '+77010002001', 1, TRUE),
+            ('Football Juniors A', 'football', 'Arman Ibrayev', 2015, '+77010002002', 0, FALSE)
+    ) AS u(group_name, group_type, child_name, child_birth_year, parent_phone, total_trials, subscribed)
 ),
 seeded_users AS (
     INSERT INTO academy_users (
         child_name,
-        child_age,
-        child_birth_date,
+        child_birth_year,
         parent_phone,
         total_trials,
         assigned_group_id,
@@ -62,8 +61,7 @@ seeded_users AS (
     )
     SELECT
         u.child_name,
-        u.child_age,
-        u.child_birth_date,
+        u.child_birth_year,
         u.parent_phone,
         u.total_trials,
         g.id,
@@ -93,7 +91,7 @@ INSERT INTO academy_trials (
     notes,
     phone,
     child_name,
-    child_age
+    child_birth_year
 )
 SELECT
     t.language,
@@ -107,13 +105,13 @@ SELECT
     t.notes,
     t.phone,
     t.child_name,
-    t.child_age
+    t.child_birth_year
 FROM (
     VALUES
         ('Boxing Juniors A', 'boxing', 'ru', DATE '2026-08-17', '17:00', '18:30', TRUE, TRUE, 'Seed trial: attended and subscribed.', '+77010001002', 'Miras Sadykov', 10),
         ('Boxing Juniors A', 'boxing', 'kz', DATE '2026-08-19', '17:00', '18:30', FALSE, FALSE, 'Seed trial: upcoming.', '+77010001001', 'Ayan Karimov', 9),
         ('Football Juniors A', 'football', 'ru', DATE '2026-08-18', '18:00', '19:30', TRUE, TRUE, 'Seed trial: attended and subscribed.', '+77010002001', 'Dias Omarov', 9)
-) AS t(group_name, group_type, language, trial_day, start_time, end_time, attended, subscribed, notes, phone, child_name, child_age)
+) AS t(group_name, group_type, language, trial_day, start_time, end_time, attended, subscribed, notes, phone, child_name, child_birth_year)
 JOIN target_groups g
   ON g.group_name = t.group_name
  AND g.group_type = t.group_type

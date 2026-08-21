@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _ACADEMY_DRAFT_FIELDS = {
     "trial_day", "start_time", "end_time", "notes", "group_id",
-    "state", "language", "client_token", "phone", "child_age", "child_name"
+    "state", "language", "client_token", "phone", "child_name",
+    "child_birth_year", "experience", "school_shift",
+    "preferred_date", "preferred_weekday", "preferred_time_start",
+    "preferred_time_end",
 }
 
 _ARENA_DRAFT_FIELDS = {

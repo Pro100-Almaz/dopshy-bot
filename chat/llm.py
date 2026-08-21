@@ -8,7 +8,12 @@ from openai import OpenAI
 from chat.conversation import Message
 from chat.system_prompts.sp_1 import INTENT_PROMPT
 from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL, SELECT_INTENT_LLM
-from chat.tools.academy_tools import START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL
+from chat.tools.academy_tools import (
+    START_TRIAL_TOOL,
+    EDIT_TRIAL_TOOL,
+    CANCEL_TRIAL_TOOL,
+    SELECT_TRIAL_INTENT_LLM,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,4 +154,44 @@ def route_incoming_message(history: list, user_message: str) -> tuple[str, str]:
 
     except Exception as err:
         logging.error(f"route_incoming_message failed: {err}")
+        return "other", "ru"
+
+
+def route_trial_message(history: list, user_message: str) -> tuple[str, str]:
+    """Classify the latest academy/QA bot message into a strict trial intent."""
+    system_content = (
+        "You route WhatsApp messages for academy trial signup bots. "
+        "Return one intent only. Use trial_new when the user wants to sign up, "
+        "try a class, join training, or asks to come to a trial. "
+        "Use question_schedule/price/location/age/trial_rules for factual questions. "
+        "Use trial_continue when the user is providing missing signup details. "
+        "Use human_help when they ask for an administrator or human manager. "
+        "Detect Russian as ru and Kazakh as kk."
+    )
+    messages = [{"role": "system", "content": system_content}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        response = _client.chat.completions.create(
+            model=config.INTENT_MODEL,
+            temperature=0,
+            messages=messages,
+            tools=[SELECT_TRIAL_INTENT_LLM],
+            tool_choice={"type": "function", "function": {"name": "route_trial_message"}},
+        )
+
+        tool_calls = response.choices[0].message.tool_calls
+        if not tool_calls:
+            return "other", "ru"
+
+        raw_args = tool_calls[0].function.arguments
+        if not raw_args:
+            return "other", "ru"
+
+        data = json.loads(raw_args)
+        return data.get("type", "other"), data.get("lang", "ru")
+
+    except Exception as err:
+        logging.error(f"route_trial_message failed: {err}")
         return "other", "ru"

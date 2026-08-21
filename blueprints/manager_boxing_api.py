@@ -40,6 +40,8 @@ def _sheet_group(row: dict) -> dict:
         "group_type": row.get("group_type"),
         "max_cap": row.get("max_cap"),
         "curr_cap": row.get("curr_cap", 0),
+        "birth_years": row.get("birth_years") or [],
+        "location": row.get("location"),
         "training_day": training_day,
         "training_day_label": WEEKDAY_RU.get(training_day, ""),
         "start_time": row.get("time_start"),
@@ -53,8 +55,7 @@ def _trial_user(row: dict) -> dict | None:
     return {
         "id": row.get("user_id"),
         "name": row.get("user_child_name"),
-        "age": row.get("user_child_age"),
-        "birthdate": row.get("user_child_birth_date"),
+        "birth_year": row.get("user_child_birth_year"),
         "parent_phone": row.get("user_parent_phone"),
         "total_trials": row.get("user_total_trials"),
         "assigned_group_id": row.get("user_assigned_group_id"),
@@ -66,7 +67,7 @@ def _sheet_trial(row: dict) -> dict:
     return {
         "trial_id": row.get("id"),
         "child_name": row.get("child_name"),
-        "child_age": row.get("child_age"),
+        "child_birth_year": row.get("child_birth_year"),
         "language": row.get("language"),
         "phone": row.get("phone"),
         "group_id": row.get("group_id"),
@@ -86,8 +87,7 @@ def _academy_user(row: dict) -> dict:
     return {
         "id": row.get("id"),
         "name": row.get("child_name"),
-        "age": row.get("child_age"),
-        "birthdate": row.get("child_birth_date"),
+        "birth_year": row.get("child_birth_year"),
         "parent_phone": row.get("parent_phone"),
         "total_trials": row.get("total_trials"),
         "assigned_group_id": row.get("assigned_group_id"),
@@ -130,8 +130,7 @@ def get_group_trials(group_id: int):
             "group": _serialize(group),
             "user_fields": [
                 "name",
-                "age",
-                "birthdate",
+                "birth_year",
                 "parent_phone",
                 "total_trials",
                 "assigned_group_id",
@@ -175,8 +174,7 @@ def list_academy_users():
     return _ok({
         "user_fields": [
             "name",
-            "age",
-            "birthdate",
+            "birth_year",
             "parent_phone",
             "total_trials",
             "assigned_group_id",
