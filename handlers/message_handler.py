@@ -26,7 +26,11 @@ from handlers.whatsapp_client import send_text_message as _send_text_message, ma
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
-from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
+from handlers.edit_trial import (
+    handle_edit_request as handle_edit_trial_request,
+    handle_cancel_trial_request,
+    handle_trial_status_request,
+)
 from integrations import booking_service, payment_validation, booking, trial
 from utils import display_end_time
 from integrations.repo import booking_repo
@@ -282,7 +286,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             user_text[:80],
         )
 
-        context = retrieve_context(user_text)
+        context = retrieve_context(user_text, bot_name=bot_config["name"])
         logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
 
         history = get_history(chat_id)
@@ -486,6 +490,22 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
+            if trial_intent == "trial_status":
+                handle_reply = handle_trial_status_request(sender_id, bot_config["name"], trial_lang)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
+            if trial_intent == "trial_edit":
+                handle_reply = handle_edit_trial_request(
+                    chat_id, sender_id, {}, bot_config["name"], user_text, history, trial_lang
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
             if trial_intent == "human_help":
                 handle_reply = (
                     "Передам администратору. Он сможет уточнить детали по записи.\n\n"
@@ -518,7 +538,9 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             elif tool_call["name"] == "edit_trial":
                 logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])
-                handle_reply = handle_edit_trial_request(chat_id, sender_id, tool_call["args"], bot_config["name"])
+                handle_reply = handle_edit_trial_request(
+                    chat_id, sender_id, tool_call["args"], bot_config["name"], user_text, history, builder.detect_lang(user_text)
+                )
 
             elif tool_call["name"] == "cancel_trial":
                 logger.info("[CANCEL] LLM called cancel_trial tool")

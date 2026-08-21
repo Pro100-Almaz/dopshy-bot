@@ -18,16 +18,15 @@ function submitNewGrouping(form) {
     var payload = {
       group_type: form.group_type,
       group_name: form.group_name,
-      training_day: form.training_day,                 // YYYY-MM-DD
-      time_start: form.time_start,          // HH:MM
-      time_end: form.time_end,              // HH:MM
+      level: form.level || null,
+      schedules: form.schedules || [],
       max_cap: form.max_cap
     };
     var res = apiCreateGrouping(payload);
     if (!res.ok) return { ok: false, message: res.message || 'Ошибка' };
 
 
-    return { ok: true, message: 'Бронь создана (#' + payload.group_name + ')' };
+    return { ok: true, message: 'Группа создана (#' + payload.group_name + ')' };
   } catch (err) {
     return { ok: false, message: err.message };
   }

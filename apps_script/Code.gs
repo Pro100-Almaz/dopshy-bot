@@ -20,7 +20,8 @@ var COL = {
 };
 var GROUP_COL = {
   GROUP_ID: 1, GROUP_NAME: 2, MAX_CAP : 3, CURR_CAP: 4,
-  TRAINGING_DAY: 5, START_TIME: 6, END_TIME: 7
+  BIRTH_YEARS: 5, LOCATION: 6, LEVEL: 7,
+  TRAINGING_DAY: 8, START_TIME: 9, END_TIME: 10
 }
 const user = Session.getActiveUser();
 
@@ -114,6 +115,7 @@ function onEditManual(e) {
     var allowedGroupCols = [
       GROUP_COL.GROUP_NAME,
       GROUP_COL.MAX_CAP,
+      GROUP_COL.LEVEL,
       GROUP_COL.TRAINGING_DAY,
       GROUP_COL.START_TIME,
       GROUP_COL.END_TIME
@@ -145,6 +147,8 @@ function onEditManual(e) {
       } else{
         field = 'max_cap';
       }
+    } else if (col === GROUP_COL.LEVEL) {
+      field = 'level';
     } else if (col === GROUP_COL.TRAINGING_DAY) {
       field = 'training_day';
     } else if (col === GROUP_COL.START_TIME) {

@@ -228,7 +228,12 @@ def handle_trial_turn(
             chat_id, state, params, user_text,
         )
 
-        if state in ("trial_intake", "trial_select_slot", "trial_confirm"):
+        if state == "trial_cancel_select":
+            from handlers.edit_trial import handle_cancel_selection
+
+            return handle_cancel_selection(chat_id, bot_name, user_text, params)
+
+        if state in ("trial_intake", "trial_select_slot", "trial_fallback_offer", "trial_confirm"):
             from chat.conversation import get_history
             from handlers.llm_trial_flow import LlmTrialFlowHandler
 

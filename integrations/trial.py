@@ -9,6 +9,11 @@ from utils import today_almaty
 logger = logging.getLogger(__name__)
 
 _WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_LEVEL_FALLBACKS = {
+    "Advanced": ["Intermediate", "Beginner"],
+    "Intermediate": ["Beginner"],
+    "Beginner": [],
+}
 
 
 def _parse_time(t: str) -> time:
@@ -59,6 +64,8 @@ def get_eligible_trial_slots(
     bot_name: str,
     child_birth_year: int,
     school_shift: str,
+    experience: str | None = None,
+    allow_lower_level: bool = False,
 ) -> list[dict]:
     """Return schedule slots from groups eligible for the child.
 
@@ -66,6 +73,10 @@ def get_eligible_trial_slots(
     date/time can only be selected after group eligibility is known.
     """
     result = []
+    allowed_levels = [experience] if experience else []
+    if allow_lower_level and experience:
+        allowed_levels.extend(_LEVEL_FALLBACKS.get(experience, []))
+
     for info in academy_repo.get_groups_info(bot_name=bot_name):
         birth_years = info.get("birth_years") or []
         if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
@@ -74,6 +85,12 @@ def get_eligible_trial_slots(
         max_cap = info.get("max_cap")
         curr_cap = info.get("curr_cap") or 0
         if max_cap is not None and int(curr_cap) >= int(max_cap):
+            continue
+
+        level = info.get("level")
+        if allowed_levels and level and level not in allowed_levels:
+            continue
+        if allowed_levels and not allow_lower_level and level is None:
             continue
 
         start = info["time_start"]
@@ -88,6 +105,31 @@ def get_eligible_trial_slots(
             "date": _get_closest_date(info["training_day"]),
         })
     return result
+
+
+def get_fallback_trial_slots(
+    bot_name: str,
+    child_birth_year: int,
+    school_shift: str,
+    experience: str,
+) -> list[dict]:
+    """Return lower-level slots, preserving hard age/type/capacity/shift rules."""
+    exact = get_eligible_trial_slots(
+        bot_name, child_birth_year, school_shift, experience=experience,
+        allow_lower_level=False,
+    )
+    if exact:
+        return []
+
+    fallback_levels = _LEVEL_FALLBACKS.get(experience, [])
+    if not fallback_levels:
+        return []
+
+    slots = get_eligible_trial_slots(
+        bot_name, child_birth_year, school_shift, experience=experience,
+        allow_lower_level=True,
+    )
+    return [s for s in slots if s.get("level") in fallback_levels]
 
 
 def match_preferred_slot(slots: list[dict], draft: dict) -> dict | None:
@@ -116,7 +158,10 @@ def format_availability_context(free_windows: list[dict]) -> str:
     for w in free_windows:
         by_date.setdefault(w["date"], []).append(w)
 
-    lines = ["Пробные занятия на ближайшие 7 дней:"]
+    lines = [
+        "Общее расписание пробных занятий на ближайшие 7 дней.",
+        "Не обещай точную доступность без года рождения, уровня подготовки и школьной смены ребенка:",
+    ]
     for d in sorted(by_date):
         day_label = f"{_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = set()

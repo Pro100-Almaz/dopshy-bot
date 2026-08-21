@@ -7,6 +7,8 @@
       label { display: block; margin-top: 10px; font-weight: bold; }
       input, select, textarea { width: 100%; box-sizing: border-box; padding: 5px; margin-top: 3px; }
       button { margin-top: 14px; padding: 8px 14px; cursor: pointer; }
+      .schedule { border: 1px solid #ddd; padding: 8px; margin-top: 8px; }
+      .schedule button { margin-top: 8px; }
       #msg { margin-top: 12px; padding: 8px; border-radius: 4px; display: none; }
       .ok { background: #e6f4ea; color: #137333; }
       .err { background: #fce8e6; color: #c5221f; }
@@ -22,22 +24,17 @@
     <label>Название Группы</label>
     <input type='text' id='group_name'>
 
-    <label>День занятия</label>
-    <select id="training_day">
-      <option value='0'>Понедельник</option>
-      <option value='1'>Вторник</option>
-      <option value='2'>Среда</option>
-      <option value='3'>Четверг</option>
-      <option value='4'>Пятница</option>
-      <option value='5'>Суббота</option>
-      <option value='6'>Воскресенье</option>
+    <label>Уровень группы</label>
+    <select id="level">
+      <option value="">Не указан</option>
+      <option value="Beginner">Beginner</option>
+      <option value="Intermediate">Intermediate</option>
+      <option value="Advanced">Advanced</option>
     </select>
 
-    <label>Начало</label>
-    <input type="time" id="start" step="300">
-
-    <label>Конец</label>
-    <input type="time" id="end" step="300">
+    <label>Расписание</label>
+    <div id="schedules"></div>
+    <button type="button" onclick="addSchedule()">Добавить день/время</button>
 
     <label>Максимальное количество учащихся</label>
     <input type="number" id="max_cap">
@@ -54,21 +51,60 @@
         m.style.display = 'block';
       }
 
+      function dayOptions() {
+        return [
+          ['0', 'Понедельник'], ['1', 'Вторник'], ['2', 'Среда'],
+          ['3', 'Четверг'], ['4', 'Пятница'], ['5', 'Суббота'], ['6', 'Воскресенье']
+        ].map(function (d) {
+          return '<option value="' + d[0] + '">' + d[1] + '</option>';
+        }).join('');
+      }
+
+      function addSchedule() {
+        var wrap = document.createElement('div');
+        wrap.className = 'schedule';
+        wrap.innerHTML =
+          '<label>День занятия</label>' +
+          '<select class="training_day">' + dayOptions() + '</select>' +
+          '<label>Начало</label>' +
+          '<input type="time" class="start" step="300">' +
+          '<label>Конец</label>' +
+          '<input type="time" class="end" step="300">' +
+          '<button type="button" onclick="this.parentNode.remove()">Удалить</button>';
+        document.getElementById('schedules').appendChild(wrap);
+      }
+
+      function collectSchedules() {
+        var rows = Array.prototype.slice.call(document.querySelectorAll('.schedule'));
+        return rows.map(function (row) {
+          return {
+            training_day: row.querySelector('.training_day').value,
+            time_start: row.querySelector('.start').value,
+            time_end: row.querySelector('.end').value
+          };
+        });
+      }
+
       function submit() {
+        var schedules = collectSchedules();
         var form = {
           group_type: document.getElementById('group_type').value,
           group_name: document.getElementById('group_name').value,
-          training_day: document.getElementById('training_day').value,
-          time_start: document.getElementById('start').value,
-          time_end: document.getElementById('end').value,
+          level: document.getElementById('level').value,
+          schedules: schedules,
           max_cap: document.getElementById('max_cap').value,
 
         };
-        if (!form.group_type || !form.group_name || !form.training_day || !form.time_start || !form.time_end || !form.max_cap) {
+        if (!form.group_type || !form.group_name || !form.max_cap || schedules.length === 0) {
           return show(false, 'Заполните все поля.');
         }
-        if (form.time_end <= form.time_start) {
-          return show(false, 'Конец должен быть позже начала.');
+        for (var i = 0; i < schedules.length; i++) {
+          if (!schedules[i].training_day || !schedules[i].time_start || !schedules[i].time_end) {
+            return show(false, 'Заполните все расписание.');
+          }
+          if (schedules[i].time_end <= schedules[i].time_start) {
+            return show(false, 'Конец должен быть позже начала.');
+          }
         }
 
         document.getElementById('submit').disabled = true;
@@ -83,6 +119,8 @@
           })
           .submitNewGrouping(form);
       }
+
+      addSchedule();
     </script>
   </body>
 </html>

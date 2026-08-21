@@ -19,23 +19,25 @@ def create_or_update_group(
     is_active: bool = True,
     birth_years: list[int] | None = None,
     location: str | None = None,
+    level: str | None = None,
 ) -> int:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 INSERT INTO academy_groups
-                    (group_name, group_type, max_cap, is_active, birth_years, location)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (group_name, group_type, max_cap, is_active, birth_years, location, level)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (group_name, group_type)
                 DO UPDATE SET
                     max_cap = EXCLUDED.max_cap,
                     is_active = EXCLUDED.is_active,
                     birth_years = COALESCE(EXCLUDED.birth_years, academy_groups.birth_years),
-                    location = COALESCE(EXCLUDED.location, academy_groups.location)
+                    location = COALESCE(EXCLUDED.location, academy_groups.location),
+                    level = COALESCE(EXCLUDED.level, academy_groups.level)
                 RETURNING id
                 """,
-                (group_name, group_type, max_cap, is_active, birth_years, location),
+                (group_name, group_type, max_cap, is_active, birth_years, location, level),
             )
 
             row = cur.fetchone()
@@ -44,7 +46,8 @@ def create_or_update_group(
 def on_manual_group_edit(
         group_id: int,
         group_name: str | None = None,
-        max_cap : str | None = None
+        max_cap : str | None = None,
+        level: str | None = None,
 ) -> dict:
     fields = []
     values = []
@@ -55,6 +58,15 @@ def on_manual_group_edit(
     if max_cap is not None:
         fields.append("max_cap = %s")
         values.append(max_cap)
+    if level is not None:
+        if level not in {"Beginner", "Intermediate", "Advanced"}:
+            return {
+                'ok': False,
+                'code': 'INVALID_LEVEL',
+                'message': 'level must be Beginner, Intermediate, or Advanced'
+            }
+        fields.append("level = %s")
+        values.append(level)
 
     if not fields:
         return {
@@ -207,6 +219,10 @@ def on_manual_group_schedule_edit(
 
 
 def setting_training_time(group_id: int, training_day: int, time_start: str, time_end: str):
+    if training_day < 0 or training_day > 6:
+        raise ValueError("training_day must be between 0 and 6")
+    if datetime.strptime(str(time_start)[:5], "%H:%M") >= datetime.strptime(str(time_end)[:5], "%H:%M"):
+        raise ValueError("time_start must be before time_end")
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -222,6 +238,8 @@ def setting_training_time(group_id: int, training_day: int, time_start: str, tim
 
                 """, (group_id, training_day, time_start, time_end,)
             )
+            row = cur.fetchone()
+            return row["id"] if row else None
 
 
 def get_groups_info(bot_name: str):
@@ -232,7 +250,7 @@ def get_groups_info(bot_name: str):
                 """
                 SELECT s.group_id, s.training_day, s.time_start, s.time_end,
                        g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location
+                       g.birth_years, g.location, g.level
                 FROM academy_group_schedules s
                 JOIN academy_groups g ON g.id = s.group_id
                 WHERE g.group_type = %s AND g.is_active = TRUE
@@ -267,7 +285,7 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location,
+                SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location, g.level,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -288,7 +306,7 @@ def get_all_groups_for_frontend() -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location,
+                       g.birth_years, g.location, g.level,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -767,9 +785,16 @@ def get_all_active_trials(sender_phone: str, bot_name: str) -> list[dict] | None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"""SELECT * FROM academy_trials 
-                WHERE state IN ('confirmed', 'draft') AND phone = '{sender_phone}' 
-                AND group_id IN (SELECT id FROM academy_groups WHERE group_type = '{group_type}')"""
+                """
+                SELECT t.*
+                FROM academy_trials t
+                LEFT JOIN academy_groups g ON g.id = t.group_id
+                WHERE t.state IN ('confirmed', 'draft')
+                  AND t.phone = %s
+                  AND (t.group_id IS NULL OR g.group_type = %s)
+                ORDER BY t.trial_day NULLS LAST, t.start_time NULLS LAST, t.id
+                """,
+                (sender_phone, group_type),
             )
             trials = cur.fetchall()
             return [dict(t) for t in trials]
