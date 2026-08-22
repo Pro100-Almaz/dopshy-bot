@@ -18,7 +18,7 @@ function submitNewGrouping(form) {
     var payload = {
       group_type: form.group_type,
       group_name: form.group_name,
-      level: form.level || null,
+      level: form.level || form.levels || [],
       schedules: form.schedules || [],
       max_cap: form.max_cap
     };

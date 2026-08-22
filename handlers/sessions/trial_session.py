@@ -124,9 +124,14 @@ _LOGGER_MESSAGES = {
 # Substrings (lowercased) that mean "user wants to make a new booking right now".
 # Checked AFTER _MY_BOOKING_KW so phrases like "я забронировал" stay on my_booking.
 _NEW_TRIAL_KW = (
-    "записат", "хочу запи", "хочу про", "проб", "снять поле",
+    "записат", "хочу запи", "хочу про", "снять поле",
     "хочу зани", "хочу прой",
     "жазылу", "тегін", "қатыс", "келу", "көру",
+)
+_MY_TRIAL_KW = (
+    "мои проб", "моя проб", "моё проб", "мое проб", "у меня проб",
+    "какие есть у меня", "мои занятия", "моя запись", "мои записи",
+    "менің жаз", "жазылымым", "жазылымдарым",
 )
 
 _TRIAL_MIN_BIRTH_YEAR = datetime.now().year - 15
@@ -166,10 +171,10 @@ def start_trial_flow(chat_id: str, sender_phone: str, bot_name: str, lang: str =
         chat_id, lang, len(free), available_days,
     )
 
-    if not check_trial_limits(bot_name, sender_phone):
-        logger.info("[TRIAL: start_flow] User reached trial limits sender_phone=%s, bot_name=%s",
-                    sender_phone, bot_name)
-        return builder.data_localization(lang, "reached_limits")
+    # if not check_trial_limits(bot_name, sender_phone):
+    #     logger.info("[TRIAL: start_flow] User reached trial limits sender_phone=%s, bot_name=%s",
+    #                 sender_phone, bot_name)
+    #     return builder.data_localization(lang, "reached_limits")
 
     if has_active_trial(bot_name, sender_phone):
         logger.info("[TRIAL: start_flow] User already has confirmed trial sender_phone=%s, bot_name=%s",
@@ -284,6 +289,10 @@ def handle_trial_turn(
     intent = builder.detect_intent(user_text)
     logger.info("[TRIAL] No active session. intent=%s | user_text=%.80s", intent, user_text)
 
+    if intent == "my_trial":
+        from handlers.edit_trial import handle_trial_status_request
+        return handle_trial_status_request(sender_phone, bot_name, builder.detect_lang(user_text))
+
     if intent == "new_trial":
         lang = builder.detect_lang(user_text)
         logger.info("[TRIAL] new_trial intent — starting gated flow (lang=%s)", lang)
@@ -396,7 +405,7 @@ class TrialPromptBuilder(BasePromptBuilder):
             local_dict=_T,
             bot_name=bot_name,
             new_kw=_NEW_TRIAL_KW,
-            my_kw=()
+            my_kw=_MY_TRIAL_KW
         )
 
     def confirm(self, chat_id: str, sender_phone: str, params: dict) -> str:

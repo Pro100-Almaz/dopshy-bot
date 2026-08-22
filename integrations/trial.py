@@ -87,10 +87,12 @@ def get_eligible_trial_slots(
         if max_cap is not None and int(curr_cap) >= int(max_cap):
             continue
 
-        level = info.get("level")
-        if allowed_levels and level and level not in allowed_levels:
+        levels = info.get("level") or []
+        if isinstance(levels, str):
+            levels = [levels]
+        if allowed_levels and levels and not set(levels).intersection(allowed_levels):
             continue
-        if allowed_levels and not allow_lower_level and level is None:
+        if allowed_levels and not allow_lower_level and not levels:
             continue
 
         start = info["time_start"]
@@ -129,7 +131,10 @@ def get_fallback_trial_slots(
         bot_name, child_birth_year, school_shift, experience=experience,
         allow_lower_level=True,
     )
-    return [s for s in slots if s.get("level") in fallback_levels]
+    return [
+        s for s in slots
+        if set(s.get("level") or []).intersection(fallback_levels)
+    ]
 
 
 def match_preferred_slot(slots: list[dict], draft: dict) -> dict | None:

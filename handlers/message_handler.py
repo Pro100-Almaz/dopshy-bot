@@ -16,6 +16,9 @@ from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from handlers.llm_trial_flow import LlmTrialFlowHandler
+from handlers.llm_trial_flow import is_greeting as is_trial_greeting
+from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
+from handlers.llm_trial_flow import is_bot_identity_question
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.bot_pause_repo import is_bot_paused
@@ -465,6 +468,38 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 return
             logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
+            if is_trial_greeting(user_text):
+                handle_reply = (
+                    "Здравствуйте! Чем могу помочь?\n\n"
+                    "Сәлеметсіз бе! Қалай көмектесе аламын?"
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
+            if is_bot_identity_question(user_text):
+                handle_reply = (
+                    "Я бот-ассистент академии. Могу ответить на вопросы о тренировках "
+                    "и помочь записаться на пробное занятие.\n\n"
+                    "Мен академияның бот-ассистентімін. Жаттығулар туралы сұрақтарға "
+                    "жауап беріп, сынақ сабағына жазуға көмектесемін."
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
+            if is_trial_acknowledgement(user_text):
+                handle_reply = (
+                    "Хорошо. Если появятся вопросы по тренировкам или пробному занятию, напишите.\n\n"
+                    "Жақсы. Жаттығулар немесе сынақ сабағы бойынша сұрақ болса, жазыңыз."
+                )
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
             free = trial.get_trial_daytime(bot_config["name"], None)
             availability_ctx = trial.format_availability_context(free)
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
@@ -530,11 +565,19 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         if tool_call:
             handle_reply = reply
             if tool_call["name"] == "start_trial":
-                lang = builder.detect_lang(user_text)
-                logger.info("[TRIAL] LLM called start_trial tool — starting gated trial flow (lang=%s)", lang)
-                handle_reply = LlmTrialFlowHandler().handle(
-                    chat_id, sender_id, bot_config["name"], user_text, history, lang
-                )
+                if is_trial_greeting(user_text) or is_trial_acknowledgement(user_text) or is_bot_identity_question(user_text):
+                    logger.info("[TRIAL] Ignoring start_trial tool for greeting/ack/bot-identity text")
+                    handle_reply = (
+                        "Хорошо. Чем могу помочь по академии?\n\n"
+                        "Жақсы. Академия бойынша қалай көмектесе аламын?"
+                    )
+                    reply = handle_reply
+                else:
+                    lang = builder.detect_lang(user_text)
+                    logger.info("[TRIAL] LLM called start_trial tool — starting gated trial flow (lang=%s)", lang)
+                    handle_reply = LlmTrialFlowHandler().handle(
+                        chat_id, sender_id, bot_config["name"], user_text, history, lang
+                    )
 
             elif tool_call["name"] == "edit_trial":
                 logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])

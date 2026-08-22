@@ -5,7 +5,9 @@ from typing import Any
 from openai import OpenAI
 
 import config
+from chat.system_prompts.sp_2 import _DATA_EXTRACT_PROMPT_TEMPLATE
 from chat.tools.academy_tools import EXTRACT_TRIAL_DATA_LLM
+from utils import now_almaty, today_almaty
 
 client = OpenAI(api_key=config.OPENAI_API_KEY)
 
@@ -29,16 +31,15 @@ def extract_trial_details(history: list[dict[str, str]], user_text: str) -> dict
     must validate them against eligible groups before assigning trial_day,
     start_time, end_time, or group_id.
     """
+    now = now_almaty()
+    prompt = _DATA_EXTRACT_PROMPT_TEMPLATE.format(
+        today=today_almaty().isoformat(),
+        now=now.strftime("%Y-%m-%d %H:%M"),
+    )
     messages = [
         {
             "role": "system",
-            "content": (
-                "Extract trial signup data from the conversation. "
-                "Do not infer missing personal data. "
-                "A requested day/time is only a preference, never a confirmed slot. "
-                "Normalize dates to YYYY-MM-DD and times to HH:MM. "
-                "Use weekday numbers 0=Monday through 6=Sunday."
-            ),
+            "content": prompt,
         }
     ]
     messages.extend(history)

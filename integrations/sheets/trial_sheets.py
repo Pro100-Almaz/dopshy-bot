@@ -17,7 +17,7 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 _HEADERS = {
-        'groups' : ['group_id', 'group_name', 'max_cap', 'curr_cap', 'birth_years', 'location', 'level', 'training_day', 'start_time',	'end_time'],
+        'groups' : ['group_id', 'group_name', 'max_cap', 'curr_cap', 'birth_years', 'location', 'level', 'field', 'training_day', 'start_time',	'end_time'],
         'trials' : ['trial_id',	'child_name',	'child_birth_year',	'language',	'phone',	'group_id',	'trial_day',
                     'start_time',	'end_time',	'state',	'notes',	'attended',	'subscribed']
     }
@@ -88,7 +88,8 @@ def _group_to_row(g: dict) -> list:
         g.get("curr_cap", 0),
         ", ".join(str(year) for year in (g.get("birth_years") or [])),
         g.get("location"),
-        g.get("level"),
+        ", ".join(g.get("level") or []),
+        f"Field {g.get('field')}" if g.get("field") else "",
         WEEKDAY_RU[g["training_day"]],
         str(g["time_start"]),
         str(g["time_end"]),
