@@ -316,9 +316,9 @@ def receive_ycloud_message():
             data.business.phone,
         )
         # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
-        if data.customer.phone not in ['+77072479672']:
-            logger.info({f'IGNORED phone number {data.customer.phone}'})
-            return jsonify({"status": "ignored"}), 200
+        # if data.customer.phone not in ['+77072479672']:
+        #     logger.info({f'IGNORED phone number {data.customer.phone}'})
+        #     return jsonify({"status": "ignored"}), 200
 
     except WhatsappPayloadParserError:
         logger.exception("Failed to parse YCloud webhook")
