@@ -136,6 +136,63 @@ def update_confirmed_trial(bot_name: str, trial_id: int, fields: dict) -> dict:
     return _ok({"trial": trial})
 
 
+def replace_confirmed_trial_with_draft(
+    bot_name: str,
+    chat_id: str,
+    trial_id: int,
+    fields: dict,
+    lang: str,
+) -> dict:
+    """Cancel a confirmed trial and create a new draft with merged intake data."""
+    existing = academy_repo.get_trial(trial_id)
+    if not existing:
+        return _err("NOT_FOUND", "Trial not found.")
+    if existing.get("state") != "confirmed":
+        return _err("TRIAL_WRONG_STATE", "Trial cannot be replaced from this state.")
+
+    allowed = {
+        "child_name", "child_birth_year", "experience", "school_shift",
+        "preferred_date", "preferred_weekday", "preferred_time_start",
+        "preferred_time_end",
+    }
+    base = {
+        key: existing.get(key)
+        for key in allowed
+        if existing.get(key) not in (None, "")
+    }
+    patch = {key: value for key, value in fields.items() if key in allowed and value not in (None, "")}
+    base.update(patch)
+
+    cancelled = postgres.cancel_booking_trial(
+        bot_name,
+        trial_id,
+        actor_type="chatbot:Бот",
+        actor_id=chat_id,
+        reason="confirmed_trial_replaced_by_user_edit",
+    )
+    if not cancelled.get("ok") or not cancelled.get("data", {}).get("cancelled"):
+        return _err("CANCEL_FAILED", cancelled.get("message") or "Could not cancel confirmed trial.")
+
+    result = postgres.create_draft(
+        bot_name,
+        chat_id=chat_id,
+        phone=existing.get("phone"),
+        client_token=str(uuid.uuid4()),
+        language=lang,
+        **base,
+    )
+    if not result.get("ok"):
+        return result
+
+    trial = academy_repo.get_trial(result["data"]["trial_id"])
+    if not trial:
+        return _err("NOT_FOUND", "Replacement draft was not found after creation.")
+
+    clear_history(chat_id)
+    refresh_all_trials()
+    return _ok({"trial": trial, "cancelled_trial_id": trial_id})
+
+
 def reopen_confirmed_trial_for_reassignment(bot_name: str, trial_id: int, fields: dict) -> dict:
     allowed = {
         "child_name", "child_birth_year", "experience", "school_shift",
