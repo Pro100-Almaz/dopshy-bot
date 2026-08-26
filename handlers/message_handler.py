@@ -22,9 +22,11 @@ from handlers.llm_trial_flow import is_bot_identity_question
 from handlers.llm_trial_flow import is_factual_question as is_trial_factual_question
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
+from integrations.repo.academy_repo import get_existing_trial_draft
 from integrations.repo.bot_pause_repo import is_bot_paused
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
+from integrations.sheets.trial_sheets import refresh_all_trials
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message as _send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
@@ -170,7 +172,64 @@ _LOCATION_MESSAGE = (
     "2GIS сілтемесі: https://2gis.kz/astana/geo/700000010748\n"
 )
 
+_ACADEMY_ADMIN_PHONE = "+7 700 555 6000"
+
+_ACADEMY_INFO_INTENTS = {
+    "question_personal_training",
+    "question_adult_training",
+    "question_child_training",
+    "question_payment",
+    "question_discounts",
+    "question_contacts",
+}
+
 builder = BasePromptBuilder({}, "", (), ())
+
+
+def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
+    is_boxing = bot_name == "dopsy_boxing"
+
+    if intent in {"question_personal_training", "question_adult_training"}:
+        if lang == "kk":
+            return (
+                "Жеке немесе ересектерге арналған жаттығулар бойынша баға мен бос уақытты "
+                f"әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
+            )
+        subject = "персональным и взрослым тренировкам" if is_boxing else "индивидуальным условиям"
+        return (
+            f"По {subject} стоимость и свободное время уточняет администратор: "
+            f"{_ACADEMY_ADMIN_PHONE}."
+        )
+
+    if intent == "question_child_training":
+        if lang == "kk":
+            return (
+                "Балалар топтары бар. Нақты топ жасына, дайындық деңгейіне және мектеп "
+                "ауысымына қарай таңдалады. Сынақ сабағына жазғыңыз келсе, жазыңыз: "
+                "«сынақ сабаққа жазу»."
+            )
+        age_text = "7–16 лет" if is_boxing else "5–15 лет"
+        return (
+            f"Для детей есть группы {age_text}. Точная группа зависит от возраста, уровня "
+            "подготовки и школьной смены. Если хотите записать на пробное, напишите: "
+            "«запишите на пробное»."
+        )
+
+    if intent == "question_payment":
+        if lang == "kk":
+            return f"Төлем шарттарын әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
+        return f"Условия оплаты уточнит администратор: {_ACADEMY_ADMIN_PHONE}."
+
+    if intent == "question_discounts":
+        if lang == "kk":
+            return f"Жеңілдіктер мен арнайы шарттарды әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
+        return f"Скидки и специальные условия уточнит администратор: {_ACADEMY_ADMIN_PHONE}."
+
+    if lang == "kk":
+        return (
+            f"Мекенжай: Астана, Сығанақ 6Ф. Әкімші телефоны: {_ACADEMY_ADMIN_PHONE}."
+        )
+    return f"Адрес: Астана, Сыганак 6Ф. Телефон администратора: {_ACADEMY_ADMIN_PHONE}."
 
 
 def _format_payment_reject_message(
@@ -272,6 +331,11 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     cancel_booking_trial(bot_config["name"], draft["id"])
                 refresh_week_sheet()
                 refresh_all_bookings()
+            else:
+                draft = get_existing_trial_draft(sender_id, bot_config["name"])
+                if draft:
+                    cancel_booking_trial(bot_config["name"], draft["id"])
+                    refresh_all_trials()
 
             clear_history(chat_id)
             send_text_message(
@@ -514,7 +578,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             # cannot answer a price/schedule/location question, so veto the router
             # for those — but only for clients with no draft in progress, so a
             # side-question mid-signup still reaches the flow's own interrupt
-            # handling instead of being diverted to RAG.
+            # handling instead of being diverted to RAG. This runs BEFORE the
+            # info-intent branch below: those two are complementary, not
+            # alternatives. _ACADEMY_INFO_INTENTS catches questions the router
+            # labelled correctly; this catches questions it labelled as signup.
             if (
                 trial_intent in ("trial_new", "trial_continue")
                 and is_trial_factual_question(user_text)
@@ -525,6 +592,13 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     "draft is in progress — falling through to RAG/LLM", trial_intent
                 )
                 trial_intent = "other"
+
+            if trial_intent in _ACADEMY_INFO_INTENTS:
+                handle_reply = _academy_info_reply(trial_intent, bot_config["name"], trial_lang)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
 
             if trial_intent in ("trial_new", "trial_continue"):
                 handle_reply = LlmTrialFlowHandler().handle(

@@ -10,6 +10,40 @@ from integrations.repo.postgres import _conn
 groups --> users --> trials
 '''
 
+_BOT_CONTENT_DEFAULT = {
+    "prices": {
+        "trial": "",
+        "full": "",
+        "discounted": "",
+    },
+    "kaspiLink": "",
+    "adminPhone": "",
+    "whatsappNumber": "",
+    "paymentDay": "",
+    "faq": [],
+}
+
+_CHECK_STATUS_ALIASES = {
+    "read": "Оқылды",
+    "оқылды": "Оқылды",
+    "Оқылды": "Оқылды",
+    "blurry": "Бұлдыр",
+    "бұлдыр": "Бұлдыр",
+    "Бұлдыр": "Бұлдыр",
+    "amount_mismatch": "Тексеру керек",
+    "тексеру керек": "Тексеру керек",
+    "Тексеру керек": "Тексеру керек",
+    "manual": "Қолмен тексеру",
+    "қолмен тексеру": "Қолмен тексеру",
+    "Қолмен тексеру": "Қолмен тексеру",
+}
+
+
+def _normalize_check_status(value: str | None) -> str:
+    if value is None:
+        return "Қолмен тексеру"
+    return _CHECK_STATUS_ALIASES.get(str(value).strip(), str(value).strip())
+
 # ----------------------------GROUPS
 
 def create_or_update_group(
@@ -21,6 +55,9 @@ def create_or_update_group(
     location: str | None = None,
     level: str | list[str] | None = None,
     levels: list[str] | None = None,
+    age_min: int | None = None,
+    age_max: int | None = None,
+    shift: str | None = None,
 ) -> int:
     if levels is None and level is not None:
         levels = [level] if isinstance(level, str) else level
@@ -29,18 +66,21 @@ def create_or_update_group(
             cur.execute(
                 """
                 INSERT INTO academy_groups
-                    (group_name, group_type, max_cap, is_active, birth_years, location, level)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (group_name, group_type, max_cap, is_active, birth_years, location, level, age_min, age_max, shift)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (group_name, group_type)
                 DO UPDATE SET
                     max_cap = EXCLUDED.max_cap,
                     is_active = EXCLUDED.is_active,
                     birth_years = COALESCE(EXCLUDED.birth_years, academy_groups.birth_years),
                     location = COALESCE(EXCLUDED.location, academy_groups.location),
-                    level = COALESCE(EXCLUDED.level, academy_groups.level)
+                    level = COALESCE(EXCLUDED.level, academy_groups.level),
+                    age_min = COALESCE(EXCLUDED.age_min, academy_groups.age_min),
+                    age_max = COALESCE(EXCLUDED.age_max, academy_groups.age_max),
+                    shift = COALESCE(EXCLUDED.shift, academy_groups.shift)
                 RETURNING id
                 """,
-                (group_name, group_type, max_cap, is_active, birth_years, location, levels),
+                (group_name, group_type, max_cap, is_active, birth_years, location, levels, age_min, age_max, shift),
             )
 
             row = cur.fetchone()
@@ -52,6 +92,10 @@ def on_manual_group_edit(
         max_cap : str | None = None,
         level: str | list[str] | None = None,
         levels: list[str] | None = None,
+        age_min: int | None = None,
+        age_max: int | None = None,
+        shift: str | None = None,
+        is_active: bool | None = None,
 ) -> dict:
     fields = []
     values = []
@@ -73,6 +117,18 @@ def on_manual_group_edit(
             }
         fields.append("level = %s")
         values.append(levels)
+    if age_min is not None:
+        fields.append("age_min = %s")
+        values.append(age_min)
+    if age_max is not None:
+        fields.append("age_max = %s")
+        values.append(age_max)
+    if shift is not None:
+        fields.append("shift = %s")
+        values.append(shift)
+    if is_active is not None:
+        fields.append("is_active = %s")
+        values.append(is_active)
 
     if not fields:
         return {
@@ -263,7 +319,7 @@ def get_groups_info(bot_name: str):
                 """
                 SELECT s.group_id, s.training_day, s.time_start, s.time_end, s.field,
                        g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location, g.level
+                       g.birth_years, g.location, g.level, g.age_min, g.age_max, g.shift, g.is_active
                 FROM academy_group_schedules s
                 JOIN academy_groups g ON g.id = s.group_id
                 WHERE g.group_type = %s AND g.is_active = TRUE
@@ -299,6 +355,7 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location, g.level,
+                       g.age_min, g.age_max, g.shift, g.is_active,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -319,14 +376,32 @@ def get_all_groups_for_frontend() -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location, g.level,
+                       g.birth_years, g.location, g.level, g.age_min, g.age_max, g.shift, g.is_active,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
                   ON s.group_id = g.id
-                WHERE g.is_active = TRUE
                 ORDER BY g.group_type, g.id, s.training_day, s.time_start
                 """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_groups_by_type_for_frontend(group_type: str) -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
+                       g.birth_years, g.location, g.level, g.age_min, g.age_max, g.shift, g.is_active,
+                       s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
+                FROM academy_groups g
+                LEFT JOIN academy_group_schedules s
+                  ON s.group_id = g.id
+                WHERE g.group_type = %s
+                ORDER BY g.id, s.training_day, s.time_start
+                """,
+                (group_type,),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -488,6 +563,24 @@ def get_user_by_id(user_id: int) -> dict | None:
             return dict(row) if row else None
 
 
+def user_belongs_to_type(user_id: int, group_type: str) -> bool:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM academy_users u
+                    JOIN academy_groups g ON g.id = u.assigned_group_id
+                    WHERE u.id = %s
+                      AND g.group_type = %s
+                )
+                """,
+                (user_id, group_type),
+            )
+            return bool(cur.fetchone()["exists"])
+
+
 _TRIAL_WITH_USER_SELECT = """
     SELECT t.id,
            t.child_name,
@@ -501,7 +594,12 @@ _TRIAL_WITH_USER_SELECT = """
            t.state,
            t.notes,
            t.attended,
+           t.attendance_state,
            t.subscribed,
+           t.created_at,
+           t.school_shift,
+           t.preferred_time_start,
+           t.preferred_time_end,
            u.id AS user_id,
            u.child_name AS user_child_name,
            u.child_birth_year AS user_child_birth_year,
@@ -573,6 +671,24 @@ def get_trial_with_user_by_id(trial_id: int) -> dict | None:
             return dict(row) if row else None
 
 
+def trial_belongs_to_type(trial_id: int, group_type: str) -> bool:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM academy_trials t
+                    JOIN academy_groups g ON g.id = t.group_id
+                    WHERE t.id = %s
+                      AND g.group_type = %s
+                )
+                """,
+                (trial_id, group_type),
+            )
+            return bool(cur.fetchone()["exists"])
+
+
 def get_users_by_type(group_type: str | None = None) -> list[dict]:
     where = []
     params: list = []
@@ -609,11 +725,37 @@ def update_trial_attended(trial_id: int, attended: bool) -> dict | None:
                 """
                 UPDATE academy_trials
                 SET attended = %s,
+                    attendance_state = %s,
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING id
                 """,
-                (attended, trial_id)
+                (attended, "attended" if attended else "missed", trial_id)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+    return get_trial_with_user_by_id(trial_id)
+
+
+def update_trial_attendance_state(trial_id: int, attendance_state: str) -> dict | None:
+    if attendance_state not in {"pending", "attended", "missed"}:
+        raise ValueError("attendance_state must be pending, attended, or missed")
+
+    attended = True if attendance_state == "attended" else False
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE academy_trials
+                SET attendance_state = %s,
+                    attended = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (attendance_state, attended, trial_id),
             )
             row = cur.fetchone()
             if not row:
@@ -756,6 +898,156 @@ def update_user_subscribed(user_id: int, subscribed: bool) -> dict | None:
                 )
             )
             return dict(user)
+
+
+def list_academy_payments(group_type: str) -> list[dict]:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id AS payment_id,
+                       child_name,
+                       parent_phone,
+                       discount,
+                       amount,
+                       sender_bank,
+                       receiver_bank,
+                       check_number,
+                       payment_date,
+                       due_date,
+                       created_at,
+                       check_status,
+                       is_active,
+                       confirmed,
+                       notes,
+                       check_url
+                FROM academy_payments
+                WHERE group_type = %s
+                ORDER BY created_at DESC, id DESC
+                """,
+                (group_type,),
+            )
+            rows = []
+            for row in cur.fetchall():
+                item = dict(row)
+                item["check_status"] = _normalize_check_status(item.get("check_status"))
+                rows.append(item)
+            return rows
+
+
+def update_academy_payment_confirmed(payment_id: int, group_type: str, confirmed: bool) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE academy_payments
+                SET confirmed = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND group_type = %s
+                RETURNING id AS payment_id, confirmed
+                """,
+                (confirmed, payment_id, group_type),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def update_academy_payment(payment_id: int, group_type: str, **patch) -> dict | None:
+    allowed = {"due_date", "is_active", "notes", "check_status"}
+    fields = {k: v for k, v in patch.items() if k in allowed}
+    if "check_status" in fields:
+        fields["check_status"] = _normalize_check_status(fields["check_status"])
+    if not fields:
+        return get_academy_payment(payment_id, group_type)
+
+    set_clause = ", ".join(f"{key} = %s" for key in fields)
+    values = list(fields.values()) + [payment_id, group_type]
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                UPDATE academy_payments
+                SET {set_clause},
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND group_type = %s
+                RETURNING id AS payment_id,
+                          due_date,
+                          is_active,
+                          notes,
+                          check_status
+                """,
+                values,
+            )
+            row = cur.fetchone()
+            if row:
+                item = dict(row)
+                item["check_status"] = _normalize_check_status(item.get("check_status"))
+                return item
+    return None
+
+
+def get_academy_payment(payment_id: int, group_type: str) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id AS payment_id,
+                       due_date,
+                       is_active,
+                       notes,
+                       check_status
+                FROM academy_payments
+                WHERE id = %s
+                  AND group_type = %s
+                """,
+                (payment_id, group_type),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["check_status"] = _normalize_check_status(item.get("check_status"))
+            return item
+
+
+def get_bot_content(group_type: str) -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT content FROM academy_bot_content WHERE group_type = %s",
+                (group_type,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return dict(_BOT_CONTENT_DEFAULT)
+            content = dict(row["content"] or {})
+            merged = dict(_BOT_CONTENT_DEFAULT)
+            merged.update(content)
+            prices = dict(_BOT_CONTENT_DEFAULT["prices"])
+            prices.update(content.get("prices") or {})
+            merged["prices"] = prices
+            merged["faq"] = content.get("faq") or []
+            return merged
+
+
+def save_bot_content(group_type: str, content: dict) -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO academy_bot_content (group_type, content)
+                VALUES (%s, %s)
+                ON CONFLICT (group_type)
+                DO UPDATE SET content = EXCLUDED.content,
+                              updated_at = NOW()
+                RETURNING group_type
+                """,
+                (group_type, psycopg2.extras.Json(content)),
+            )
+            cur.fetchone()
+            return {"saved": True}
 
 
 def confirm_trial(trial_id: int) -> bool:

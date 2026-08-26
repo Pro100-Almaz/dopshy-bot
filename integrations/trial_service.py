@@ -33,7 +33,8 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
     # tuned to over-trigger, so gating draft creation meant a client who merely
     # asked about prices got "you have used up your trial lessons" instead of an
     # answer. The limit is enforced at confirm_trial() — the only point where a
-    # trial lesson is actually taken.
+    # trial lesson is actually taken. The has_active_trial-before-limit ordering
+    # introduced on the api_contract_spec branch is preserved there.
     if academy_repo.has_active_trial(bot_name, phone):
         return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
 

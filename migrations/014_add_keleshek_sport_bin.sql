@@ -1,3 +1,9 @@
 -- Add the ТОО "КЕЛЕШЕК СПОРТ" / ФШ Допшы fiscal-receipt seller BIN as a second
 -- active Kaspi recipient. Fiscal receipts carry this BIN; the legacy P2P-style
 -- DOPSHY recipient stays valid alongside it.
+--
+-- The INSERT that used to live here was moved to seeds/reference_data.sql in
+-- 7303e96, when reference data was split out of migrations (see the note at the
+-- top of 040_academy_trial_intake.sql). Do NOT restore it here — it would
+-- duplicate the seed. This file is kept as the historical record of the change;
+-- scripts/migrate.py records statement-free migrations without executing them.

@@ -43,6 +43,10 @@ def _sheet_group(row: dict) -> dict:
         "birth_years": row.get("birth_years") or [],
         "location": row.get("location"),
         "level": row.get("level") or [],
+        "age_min": row.get("age_min"),
+        "age_max": row.get("age_max"),
+        "shift": row.get("shift"),
+        "is_active": row.get("is_active"),
         "field": row.get("field"),
         "training_day": training_day,
         "training_day_label": WEEKDAY_RU.get(training_day, ""),
@@ -80,7 +84,15 @@ def _sheet_trial(row: dict) -> dict:
         "state_label": _STATES_RUSSIAN.get(row.get("state"), row.get("state")),
         "notes": row.get("notes"),
         "attended": row.get("attended"),
+        "attendance_state": row.get("attendance_state") or ("attended" if row.get("attended") else "pending"),
         "subscribed": row.get("subscribed"),
+        "created_at": row.get("created_at"),
+        "shift": row.get("school_shift"),
+        "school_time": (
+            f"{str(row.get('preferred_time_start'))[:5]}-{str(row.get('preferred_time_end'))[:5]}"
+            if row.get("preferred_time_start") and row.get("preferred_time_end")
+            else None
+        ),
         "user": _trial_user(row),
     }
 
@@ -202,11 +214,18 @@ def get_academy_user(user_id: int):
 
 @manager_boxing_api.patch("/api/manager/academy_trials/<int:trial_id>/attended")
 def patch_trial_attended(trial_id: int):
-    attended, error = _required_bool("attended")
-    if error:
-        return error
+    body = request.get_json(silent=True) or {}
+    if "attendance_state" in body:
+        attendance_state = body.get("attendance_state")
+        if attendance_state not in {"pending", "attended", "missed"}:
+            return _invalid("attendance_state must be pending, attended, or missed.")
+        trial = academy_repo.update_trial_attendance_state(trial_id, attendance_state)
+    else:
+        attended, error = _required_bool("attended")
+        if error:
+            return error
 
-    trial = academy_repo.update_trial_attended(trial_id, attended)
+        trial = academy_repo.update_trial_attended(trial_id, attended)
     if not trial:
         return _not_found("Trial not found.")
 
