@@ -391,7 +391,8 @@ def _slot_lines(slots: list[dict], lang: str) -> str:
         levels = slot.get("level") or []
         if isinstance(levels, str):
             levels = [levels]
-        localized_levels = [_level_label(level, lang) for level in levels]
+        labels = LEVEL_LABELS.get(lang, LEVEL_LABELS["ru"])
+        localized_levels = [labels.get(level, level) for level in levels]
         level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
         lines.append(
             f"{i}. {group}{level_text}\n"
@@ -490,7 +491,11 @@ class LlmTrialFlowHandler:
         if waiting_for and interrupt:
             return interrupt
 
-        extracted = _extract_user_data(history, user_text, waiting_for)
+        extracted = extract_trial_details(history, user_text)
+        if extracted.get("child_name") and not _is_plausible_child_name(extracted.get("child_name")):
+            extracted["child_name"] = None
+        if waiting_for and not extracted.get(waiting_for):
+            extracted[waiting_for] = _normalize_manual_value(waiting_for, user_text)
 
         data = _merge(_draft_to_data(draft), extracted)
         result = trial_service.update_intake(bot_name, draft["id"], {**data, "language": lang})
@@ -654,6 +659,9 @@ class LlmTrialFlowHandler:
             interrupt = _session_interrupt_response(lang, user_text)
             if interrupt:
                 return interrupt + "\n\n" + f"{_loc(lang, 'choose_slot')}\n\n{_slot_lines(params.get('slots') or [], lang)}"
+            if not user_text.strip().isdigit():
+                return _loc(lang, "slot_invalid")
+            idx = int(user_text.strip()) - 1
             slots = params.get("slots") or []
             if user_text.strip().isdigit():
                 idx = int(user_text.strip()) - 1
