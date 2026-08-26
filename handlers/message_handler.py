@@ -278,6 +278,14 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         message_id = payload.whatsapp_message_id
         sender_id = payload.customer.phone  # sender phone number
 
+        if not config.is_sender_allowed_for_bot(bot_config["name"], sender_id):
+            logger.info(
+                "[ALLOWLIST] Ignoring sender %s for bot %s",
+                sender_id,
+                bot_config["name"],
+            )
+            return
+
         # Bot paused for this contact — a manager is handling them. Mark the
         # message read so their inbox stays clean, but send no auto-reply.
         if is_bot_paused(sender_id):

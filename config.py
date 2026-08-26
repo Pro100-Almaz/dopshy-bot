@@ -33,6 +33,24 @@ MESSAGE_BATCH_WINDOW_SECONDS: float = float(
     os.getenv("MESSAGE_BATCH_WINDOW_SECONDS", "4")
 )
 
+def _parse_phone_allowlist(value: str) -> set[str]:
+    return {
+        phone
+        for phone in (
+            "".join(ch for ch in item.strip() if ch.isdigit())
+            for item in value.split(",")
+        )
+        if phone
+    }
+
+
+FOOTBALL_BOT_ALLOWED_SENDERS: set[str] = _parse_phone_allowlist(
+    os.getenv("FOOTBALL_BOT_ALLOWED_SENDERS", "+77072479672")
+)
+BOXING_BOT_ALLOWED_SENDERS: set[str] = _parse_phone_allowlist(
+    os.getenv("BOXING_BOT_ALLOWED_SENDERS", "+77072479672")
+)
+
 BOT_CONFIGS = {
     WHATSAPP_PHONE_NUMBER_ID_BOT_1: {
         "name": "dopsy_bot",
@@ -66,6 +84,20 @@ def get_bot_config(phone_number_id: str) -> dict | None:
 
 def _normalize_phone(value: str | None) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def is_sender_allowed_for_bot(bot_name: str, sender_phone: str | None) -> bool:
+    """Return whether this bot should process an inbound sender."""
+    allowlist_by_bot = {
+        "dopsy_fs_school": FOOTBALL_BOT_ALLOWED_SENDERS,
+        "dopsy_boxing": BOXING_BOT_ALLOWED_SENDERS,
+    }
+    allowlist = allowlist_by_bot.get(bot_name)
+    if allowlist is None:
+        return True
+    if not allowlist:
+        return True
+    return _normalize_phone(sender_phone) in allowlist
 
 
 def get_phone_number_id_for_ycloud_from(ycloud_from: str | None) -> str | None:
