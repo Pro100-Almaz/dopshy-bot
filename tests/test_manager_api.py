@@ -246,7 +246,7 @@ def test_academy_group_patch_omits_group_name(monkeypatch, client):
     r = client.patch("/api/manager/academy_groups/7", json={"max_cap": 14}, headers=_HDR)
 
     assert r.status_code == 200
-    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14, "level": None}
+    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14, "level": None, "trainer": None}
 
 
 def test_academy_group_create_accepts_multiple_schedules(monkeypatch, client):

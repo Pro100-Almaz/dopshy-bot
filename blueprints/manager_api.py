@@ -699,6 +699,7 @@ def create_academy_group_with_time():
         age_min=body.get("age_min"),
         age_max=body.get("age_max"),
         shift=body.get("shift"),
+        trainer=body.get("trainer"),
     )
 
     if not group_id:
@@ -750,6 +751,7 @@ def edit_academy_group(group_id: int):
     age_min = body.get("age_min")
     age_max = body.get("age_max")
     shift = body.get("shift")
+    trainer = body.get("trainer")
     is_active = body.get("is_active")
 
     if max_cap is not None:
@@ -781,7 +783,8 @@ def edit_academy_group(group_id: int):
 
     if (
         group_name is not None or max_cap is not None or level is not None or levels is not None
-        or age_min is not None or age_max is not None or shift is not None or is_active is not None
+        or age_min is not None or age_max is not None or shift is not None
+        or trainer is not None or is_active is not None
     ):
         group_res = on_manual_group_edit(
             group_id=group_id,
@@ -792,6 +795,7 @@ def edit_academy_group(group_id: int):
             age_min=age_min,
             age_max=age_max,
             shift=shift,
+            trainer=trainer,
             is_active=is_active,
         )
         if not group_res["ok"]:

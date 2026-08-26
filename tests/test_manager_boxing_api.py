@@ -101,6 +101,7 @@ def test_boxing_lists_groups(monkeypatch):
             "group_type": "boxing",
             "max_cap": 12,
             "curr_cap": 4,
+            "trainer": "Бейсенов Тимур",
             "training_day": 0,
             "time_start": "10:00",
             "time_end": "11:00",
@@ -113,6 +114,7 @@ def test_boxing_lists_groups(monkeypatch):
     data = r.get_json()
     assert data["ok"]
     assert data["data"]["groups"]["boxing"][0]["group_id"] == 3
+    assert data["data"]["groups"]["boxing"][0]["trainer"] == "Бейсенов Тимур"
     assert data["data"]["groups"]["boxing"][0]["training_day_label"] == "Понедельник"
 
 
