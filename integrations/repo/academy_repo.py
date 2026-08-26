@@ -5,6 +5,7 @@ import psycopg2.extras
 import psycopg2.pool
 
 from integrations.repo.postgres import _conn
+from utils import today_almaty
 
 '''
 groups --> users --> trials
@@ -1140,6 +1141,18 @@ def check_trial_limits(bot_name: str, phone: str) -> bool:
 
 
 def has_active_trial(bot_name: str, phone: str) -> bool:
+    """True when the phone already holds a trial booking that has not happened yet.
+
+    Only UPCOMING trials block a new signup. Without the date bound this
+    returned True for any confirmed row ever written, so a client whose trial
+    took place months ago could never book again and every attempt died on
+    HAS_ACTIVE_TRIAL before a draft was created — a permanent dead end with no
+    new row to show for it.
+
+    `today` is anchored to BOOKING_TIMEZONE, not the database's CURRENT_DATE:
+    the container runs in UTC, which rolls over at 19:00 Almaty and would start
+    treating today's trials as past.
+    """
     group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1149,8 +1162,9 @@ def has_active_trial(bot_name: str, phone: str) -> bool:
                                                 JOIN academy_groups ag ON ag.id = at.group_id
                                        WHERE at.phone = %s
                                          AND ag.group_type = %s
-                                         AND at.state = 'confirmed')
-                        """, (phone, group_type))
+                                         AND at.state = 'confirmed'
+                                         AND at.trial_day >= %s)
+                        """, (phone, group_type, today_almaty()))
 
             has_confirmed_trial = cur.fetchone()
             return has_confirmed_trial['exists']
