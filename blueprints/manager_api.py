@@ -696,6 +696,9 @@ def create_academy_group_with_time():
         is_active = body.get('is_active', True),
         level=body.get("level"),
         levels=body.get("levels"),
+        age_min=body.get("age_min"),
+        age_max=body.get("age_max"),
+        shift=body.get("shift"),
     )
 
     if not group_id:
@@ -744,9 +747,23 @@ def edit_academy_group(group_id: int):
     time_start = body.get("time_start")
     time_end = body.get("time_end")
     field = body.get("field")
+    age_min = body.get("age_min")
+    age_max = body.get("age_max")
+    shift = body.get("shift")
+    is_active = body.get("is_active")
 
     if max_cap is not None:
         max_cap = int(max_cap)
+    if age_min is not None:
+        age_min = int(age_min)
+    if age_max is not None:
+        age_max = int(age_max)
+    if is_active is not None and not isinstance(is_active, bool):
+        return jsonify({
+            "ok": False,
+            "code": "INVALID",
+            "message": "is_active must be a boolean."
+        }), 400
     if field not in (None, ""):
         try:
             field = int(field)
@@ -762,13 +779,20 @@ def edit_academy_group(group_id: int):
     group_res = None
     schedule_res = None
 
-    if group_name is not None or max_cap is not None or level is not None or levels is not None:
+    if (
+        group_name is not None or max_cap is not None or level is not None or levels is not None
+        or age_min is not None or age_max is not None or shift is not None or is_active is not None
+    ):
         group_res = on_manual_group_edit(
             group_id=group_id,
             group_name=group_name,
             max_cap=max_cap,
             level=level,
             levels=levels,
+            age_min=age_min,
+            age_max=age_max,
+            shift=shift,
+            is_active=is_active,
         )
         if not group_res["ok"]:
             return jsonify(group_res), 400 if group_res.get("code") == "INVALID_LEVEL" else 404

@@ -28,10 +28,10 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
     if draft:
         return _ok({"trial": draft})
 
-    if not academy_repo.check_trial_limits(bot_name, phone):
-        return _err("LIMIT_REACHED", "Trial limit reached.")
     if academy_repo.has_active_trial(bot_name, phone):
         return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
+    if not academy_repo.check_trial_limits(bot_name, phone):
+        return _err("LIMIT_REACHED", "Trial limit reached.")
 
     result = postgres.create_draft(
         bot_name,
