@@ -838,6 +838,8 @@ def check_trial_limits(bot_name: str, phone: str) -> bool:
                         ) limit_row ON TRUE
                         WHERE at.phone = %s
                           AND ag.group_type = %s
+                          AND at.state = 'confirmed'
+                          AND at.attended IS TRUE
                         GROUP BY limit_row.quantity
                         """, (group_type, phone, group_type))
 

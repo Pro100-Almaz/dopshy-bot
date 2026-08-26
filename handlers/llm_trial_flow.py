@@ -157,6 +157,20 @@ _ACKNOWLEDGEMENTS = {
     "понял", "поняла", "понятно", "ясно", "ок", "окей", "okay", "хорошо",
     "ладно", "спасибо", "спс", "рахмет", "түсіндім", "жақсы",
 }
+# Stems for "this is a factual question, not a signup request". The intent
+# router is tuned to over-trigger trial_new/trial_continue, so an unanswered
+# price/schedule/location question used to be swallowed by the booking flow.
+# Stems are short so Russian declensions and Kazakh suffixes both match.
+_FACTUAL_QUESTION_STEMS = (
+    "скольк", "сколко", "цена", "цены", "стоим", "стоит", "тариф", "прайс",
+    "расписан", "график", "график заняти", "во сколько", "когда заняти",
+    "где наход", "адрес", "локац", "как добрат",
+    "с какого возраст", "какой возраст", "во сколько лет",
+    "что нужно", "что взять", "что брать",
+    "қанша", "баға", "құны", "кесте", "қай уақыт", "қайда", "мекенжай",
+    "неше жаст", "не керек",
+)
+
 _BOT_IDENTITY_QUESTIONS = (
     "что это за бот", "кто ты", "ты кто", "что ты умеешь",
     "какой это бот", "для чего этот бот", "зачем этот бот",
@@ -292,6 +306,17 @@ def is_acknowledgement(text: str) -> bool:
 def is_bot_identity_question(text: str) -> bool:
     normalized = " ".join((text or "").lower().replace("?", " ").replace("!", " ").replace(".", " ").split())
     return any(q in normalized for q in _BOT_IDENTITY_QUESTIONS)
+
+
+def is_factual_question(text: str) -> bool:
+    """True for price/schedule/location/age questions that deserve a real answer.
+
+    Used to veto the intent router when it classifies such a question as a
+    signup: the booking flow cannot answer it, so it must fall through to
+    RAG/LLM instead.
+    """
+    normalized = " ".join((text or "").lower().replace("?", " ").replace("!", " ").replace(".", " ").split())
+    return any(stem in normalized for stem in _FACTUAL_QUESTION_STEMS)
 
 
 def _waiting_prompt(lang: str, waiting_for: str | None) -> str:
@@ -459,8 +484,6 @@ class LlmTrialFlowHandler:
         if not draft:
             result = trial_service.create_or_get_draft(bot_name, chat_id, sender_phone, lang)
             if not result["ok"]:
-                if result["code"] == "LIMIT_REACHED":
-                    return _loc(lang, "reached_limits")
                 if result["code"] == "HAS_ACTIVE_TRIAL":
                     return _loc(lang, "has_active_trial")
                 return result.get("message") or _loc(lang, "no_groups")
@@ -741,6 +764,10 @@ class LlmTrialFlowHandler:
                     )
                 result = trial_service.confirm_trial(bot_name, chat_id, trial_id)
                 if not result["ok"]:
+                    if result["code"] == "LIMIT_REACHED":
+                        return _loc(lang, "reached_limits")
+                    if result["code"] == "HAS_ACTIVE_TRIAL":
+                        return _loc(lang, "has_active_trial")
                     return result.get("message") or _confirmation(academy_repo.get_trial(trial_id), lang)
                 trial = result["data"]["trial"]
                 return _loc(

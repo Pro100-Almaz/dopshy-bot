@@ -19,6 +19,7 @@ from handlers.llm_trial_flow import LlmTrialFlowHandler
 from handlers.llm_trial_flow import is_greeting as is_trial_greeting
 from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
 from handlers.llm_trial_flow import is_bot_identity_question
+from handlers.llm_trial_flow import is_factual_question as is_trial_factual_question
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.bot_pause_repo import is_bot_paused
@@ -36,7 +37,7 @@ from handlers.edit_trial import (
 )
 from integrations import booking_service, payment_validation, booking, trial
 from utils import display_end_time
-from integrations.repo import booking_repo
+from integrations.repo import academy_repo, booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
 from handlers.base_classes.base_checker import BaseChecker
@@ -508,6 +509,22 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             trial_intent, trial_lang = route_trial_message(history, user_text)
             logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
                         trial_intent, trial_lang)
+
+            # The router is tuned to over-trigger signup intent. The booking flow
+            # cannot answer a price/schedule/location question, so veto the router
+            # for those — but only for clients with no draft in progress, so a
+            # side-question mid-signup still reaches the flow's own interrupt
+            # handling instead of being diverted to RAG.
+            if (
+                trial_intent in ("trial_new", "trial_continue")
+                and is_trial_factual_question(user_text)
+                and not academy_repo.get_existing_trial_draft(sender_id, bot_config["name"])
+            ):
+                logger.info(
+                    "[TRIAL] Router said %s but message is a factual question and no "
+                    "draft is in progress — falling through to RAG/LLM", trial_intent
+                )
+                trial_intent = "other"
 
             if trial_intent in ("trial_new", "trial_continue"):
                 handle_reply = LlmTrialFlowHandler().handle(

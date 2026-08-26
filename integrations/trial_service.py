@@ -28,8 +28,12 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
     if draft:
         return _ok({"trial": draft})
 
-    if not academy_repo.check_trial_limits(bot_name, phone):
-        return _err("LIMIT_REACHED", "Trial limit reached.")
+    # The trial limit is deliberately NOT checked here. A draft is created on the
+    # first message the intent router classifies as a signup, and that router is
+    # tuned to over-trigger, so gating draft creation meant a client who merely
+    # asked about prices got "you have used up your trial lessons" instead of an
+    # answer. The limit is enforced at confirm_trial() — the only point where a
+    # trial lesson is actually taken.
     if academy_repo.has_active_trial(bot_name, phone):
         return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
 
@@ -93,6 +97,15 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
         return _err("TRIAL_WRONG_STATE", "Trial cannot be confirmed from this state.")
     if not all(trial.get(k) for k in ("group_id", "trial_day", "start_time", "end_time")):
         return _err("INVALID_SLOT", "Trial slot is incomplete.")
+
+    # Order matters: a client who already holds a booking must hear that, not
+    # that they are out of trials.
+    phone = trial.get("phone")
+    if phone:
+        if academy_repo.has_active_trial(bot_name, phone):
+            return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
+        if not academy_repo.check_trial_limits(bot_name, phone):
+            return _err("LIMIT_REACHED", "Trial limit reached.")
 
     if not academy_repo.confirm_trial(trial_id):
         return _err("NOT_FOUND", "Trial not found.")
