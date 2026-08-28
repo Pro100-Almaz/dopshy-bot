@@ -49,12 +49,15 @@ VALUES
     (103, 'Box Askhat Summer 10:00', 'boxing', FALSE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Адильханов Асхат Адильханович'),
     (104, 'Box Askhat Summer 16:00', 'boxing', FALSE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Адильханов Асхат Адильханович'),
 
-    -- September Timur groups. Weekdays are assumed to keep the Tue/Thu/Sat cadence.
-    (201, 'Box Timur Sep 09:00',     'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
-    (202, 'Box Timur Sep 10:00',     'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
-    (203, 'Box Timur Sep 17:00',     'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
-    (204, 'Box Timur Sep 18:00',     'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
-    (205, 'Box Timur Sep 19:30',     'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур');
+    -- Current boxing groups. Names intentionally do not include a month so the
+    -- frontend and bot do not expose seasonal labels after the schedule changes.
+    (201, 'Box Timur 09:00',         'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
+    (202, 'Box Timur 10:00',         'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
+    (203, 'Box Timur 17:00',         'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
+    (204, 'Box Timur 18:00',         'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
+    (205, 'Box Timur 19:30',         'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Бейсенов Тимур'),
+    (206, 'Box Askhat 10:00',        'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Адильханов Асхат Адильханович'),
+    (207, 'Box Askhat 16:00',        'boxing', TRUE, 25, ARRAY[2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020], 'second floor', ARRAY['Beginner', 'Intermediate', 'Advanced'], 'Адильханов Асхат Адильханович');
 
 -- Weekdays: Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5.
 INSERT INTO _seed_academy_schedules (row_no, training_day, time_start, time_end, field)
@@ -83,7 +86,9 @@ VALUES
     (202, 1, '10:00', '11:00', NULL), (202, 3, '10:00', '11:00', NULL), (202, 5, '10:00', '11:00', NULL),
     (203, 1, '17:00', '18:00', NULL), (203, 3, '17:00', '18:00', NULL), (203, 5, '17:00', '18:00', NULL),
     (204, 1, '18:00', '19:00', NULL), (204, 3, '18:00', '19:00', NULL), (204, 5, '18:00', '19:00', NULL),
-    (205, 1, '19:30', '20:30', NULL), (205, 3, '19:30', '20:30', NULL), (205, 5, '19:30', '20:30', NULL);
+    (205, 1, '19:30', '20:30', NULL), (205, 3, '19:30', '20:30', NULL), (205, 5, '19:30', '20:30', NULL),
+    (206, 0, '10:00', '11:00', NULL), (206, 2, '10:00', '11:00', NULL), (206, 4, '10:00', '11:00', NULL),
+    (207, 0, '16:00', '17:00', NULL), (207, 2, '16:00', '17:00', NULL), (207, 4, '16:00', '17:00', NULL);
 
 UPDATE academy_groups g
 SET is_active = FALSE,
