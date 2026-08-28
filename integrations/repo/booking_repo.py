@@ -254,6 +254,30 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
             return [dict(r) for r in cur.fetchall()]
 
 
+def get_report_bookings_in_range(start: str, end: str, states: tuple) -> list[dict]:
+    """Reportable bookings between two dates, inclusive.
+
+    This intentionally has no pagination or manager-list state filter: document
+    generation needs a complete historical extract for the requested period.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       state, price_total, source,
+                       paid_kaspi_qr, paid_cash, paid_avans
+                FROM bookings
+                WHERE date BETWEEN %s AND %s
+                  AND state = ANY(%s)
+                  AND field IS NOT NULL
+                  AND date IS NOT NULL
+                  AND time_start IS NOT NULL
+                  AND time_end IS NOT NULL
+                ORDER BY date, time_start, field, id
+            """, (start, end, list(states)))
+            return [dict(r) for r in cur.fetchall()]
+
+
 def get_booking(booking_id: int) -> dict | None:
     """Return a single booking with full detail, or None."""
     with _conn() as conn:

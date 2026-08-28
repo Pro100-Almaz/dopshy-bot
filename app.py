@@ -46,6 +46,8 @@ from blueprints.manager_boxing_api import manager_boxing_api  # noqa: E402
 app.register_blueprint(manager_boxing_api)
 from blueprints.academy_api import academy_api  # noqa: E402
 app.register_blueprint(academy_api)
+from blueprints.document_api import document_api  # noqa: E402
+app.register_blueprint(document_api)
 
 # ApiPay.kz payment webhook (POST /webhooks/apipay) — self-disables when the
 # APIPAY_* env vars are absent.
