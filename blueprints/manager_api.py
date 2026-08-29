@@ -327,6 +327,157 @@ def get_fields_info():
     }}), 200
 
 
+def _validate_contract_body(body: dict, creating: bool = False) -> dict | None:
+    required = ("customer_name", "start_date", "end_date", "price")
+    if creating and not all(body.get(k) for k in required):
+        return {"code": "INVALID", "message": "customer_name, start_date, end_date and price are required."}
+    status = body.get("status")
+    if status and status not in booking_service._CONTRACT_STATES:
+        return {"code": "INVALID_STATUS", "message": "Недопустимый статус договора."}
+    return None
+
+
+@manager_api.get("/api/manager/contracts")
+def list_contracts():
+    page = request.args.get("page", type=int)
+    search = request.args.get("search", type=str)
+    if page is not None and page < 1:
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "page must be a positive integer."}), 400
+    rows = repo.get_contracts(page=page, search=search)
+    return jsonify({"ok": True, "data": [_serialize(r) for r in rows]}), 200
+
+
+@manager_api.get("/api/manager/contracts/<int:contract_id>")
+def get_contract(contract_id: int):
+    row = repo.get_contract(contract_id)
+    if not row:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Договор не найден."}), 404
+    return jsonify({"ok": True, "data": _serialize(row)}), 200
+
+
+@manager_api.post("/api/manager/contracts")
+def create_contract():
+    body = request.get_json(silent=True) or {}
+    invalid = _validate_contract_body(body, creating=True)
+    if invalid:
+        return jsonify({"ok": False, **invalid}), 400
+    res = booking_service.create_contract(
+        customer_name=body["customer_name"],
+        phone=body.get("phone"),
+        start_date=body["start_date"],
+        end_date=body["end_date"],
+        price=body["price"],
+        status=body.get("status") or "confirmed",
+        notes=body.get("notes"),
+        source=body.get("source") or body.get("updated_by") or "contract",
+        slots=body.get("slots"),
+        actor_id=_api_key_actor(),
+    )
+    if res["ok"]:
+        for bid in (res.get("data") or {}).get("booking_ids", []):
+            booking_row = repo.get_booking(bid)
+            if booking_row:
+                _single_table_write(booking_row)
+    status_code = 200 if res["ok"] else (409 if res.get("code") == "SLOT_TAKEN" else 400)
+    return jsonify(res), status_code
+
+
+@manager_api.patch("/api/manager/contracts/<int:contract_id>")
+def patch_contract(contract_id: int):
+    body = request.get_json(silent=True) or {}
+    invalid = _validate_contract_body(body)
+    if invalid:
+        return jsonify({"ok": False, **invalid}), 400
+    patch = {k: body[k] for k in (
+        "customer_name", "phone", "start_date", "end_date", "price", "status", "notes", "source"
+    ) if k in body}
+    res = booking_service.update_contract(contract_id, actor_id=_api_key_actor(), **patch)
+    if res["ok"] and "status" in patch:
+        refresh_week_sheet()
+    status_code = 200 if res["ok"] else (409 if res.get("code") == "SLOT_TAKEN" else 404)
+    return jsonify(res), status_code
+
+
+@manager_api.delete("/api/manager/contracts/<int:contract_id>")
+def delete_contract(contract_id: int):
+    res = booking_service.cancel_contract(contract_id, actor_id=_api_key_actor())
+    if res["ok"]:
+        refresh_week_sheet()
+    return jsonify(res), (200 if res["ok"] else 404)
+
+
+@manager_api.post("/api/manager/contracts/<int:contract_id>/bookings/batch")
+def create_contract_bookings_batch(contract_id: int):
+    body = request.get_json(silent=True) or {}
+    slots = body.get("slots")
+    res = booking_service.add_contract_bookings(
+        contract_id, slots, actor_id=_api_key_actor(),
+        source=body.get("source") or body.get("updated_by") or "contract",
+    )
+    if res["ok"]:
+        for bid in (res.get("data") or {}).get("booking_ids", []):
+            booking_row = repo.get_booking(bid)
+            if booking_row:
+                _single_table_write(booking_row)
+    status_code = 200 if res["ok"] else (409 if res.get("code") == "SLOT_TAKEN" else 400)
+    if res.get("code") == "NOT_FOUND":
+        status_code = 404
+    return jsonify(res), status_code
+
+
+@manager_api.patch("/api/manager/contracts/<int:contract_id>/bookings/batch")
+def patch_contract_bookings_batch(contract_id: int):
+    body = request.get_json(silent=True) or {}
+    items = body.get("bookings")
+    if not isinstance(items, list) or not items:
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "bookings must be a non-empty list."}), 400
+    try:
+        booking_ids = [
+            int(item.get("booking_id") or item.get("id"))
+            for item in items
+            if isinstance(item, dict) and (item.get("booking_id") or item.get("id"))
+        ]
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "all bookings must include a numeric booking_id."}), 400
+    if len(booking_ids) != len(items) or not repo.contract_owns_bookings(contract_id, booking_ids):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "all bookings must belong to this contract."}), 400
+    updated = []
+    for item in items:
+        patch = dict(item)
+        bid = int(patch.pop("booking_id")) if "booking_id" in patch else int(patch.pop("id"))
+        res = booking_service.manager_update_booking(bid, actor_id=_api_key_actor(), **patch)
+        if not res["ok"]:
+            return jsonify(res), (409 if res.get("code") == "SLOT_TAKEN" else 404)
+        updated.append(bid)
+        booking_row = repo.get_booking(bid)
+        if booking_row:
+            upsert_booking_row(booking_row)
+            _single_table_write(booking_row)
+    return jsonify({"ok": True, "data": {"contract_id": contract_id, "updated_ids": updated}}), 200
+
+
+@manager_api.delete("/api/manager/contracts/<int:contract_id>/bookings/batch")
+def delete_contract_bookings_batch(contract_id: int):
+    body = request.get_json(silent=True) or {}
+    booking_ids = body.get("booking_ids")
+    if booking_ids is not None and (not isinstance(booking_ids, list) or not all(isinstance(x, int) for x in booking_ids)):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "booking_ids must be a list of integers."}), 400
+    if booking_ids and not repo.contract_owns_bookings(contract_id, booking_ids):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "all bookings must belong to this contract."}), 400
+    res = booking_service.cancel_contract_bookings(
+        contract_id, booking_ids=booking_ids, actor_id=_api_key_actor(),
+    )
+    if res["ok"]:
+        refresh_week_sheet()
+    return jsonify(res), (200 if res["ok"] else 404)
+
+
 @manager_api.post("/api/manager/bookings")
 def create_booking():
     body = request.get_json(silent=True) or {}

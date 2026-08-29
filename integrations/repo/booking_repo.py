@@ -23,7 +23,10 @@ def get_all_bookings(page: int| None = None, search: str | None = None) -> list[
             query = """
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
-                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
+                       EXISTS (
+                           SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
+                       ) AS has_contract
                 FROM bookings
                 WHERE field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_payment', 'unpaid')
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
@@ -224,7 +227,10 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
             query = """
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
-                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
+                       EXISTS (
+                           SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
+                       ) AS has_contract
                 FROM bookings
                 WHERE date BETWEEN %s AND %s AND state = ANY(%s)
                   AND (%s::int IS NULL OR field = %s)
@@ -286,11 +292,81 @@ def get_booking(booking_id: int) -> dict | None:
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
-                       group_transition
+                       group_transition,
+                       EXISTS (
+                           SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
+                       ) AS has_contract
                 FROM bookings WHERE id = %s
             """, (booking_id,))
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def get_contract(contract_id: int) -> dict | None:
+    """Return a contract with its linked booking ids, or None."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT c.*,
+                       COALESCE(
+                           ARRAY_AGG(cb.booking_id ORDER BY cb.booking_id)
+                           FILTER (WHERE cb.booking_id IS NOT NULL),
+                           ARRAY[]::integer[]
+                       ) AS booking_ids
+                FROM contracts c
+                LEFT JOIN contract_bookings cb ON cb.contract_id = c.id
+                WHERE c.id = %s
+                GROUP BY c.id
+            """, (contract_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_contracts(page: int | None = None, search: str | None = None) -> list[dict]:
+    """Contracts for the manager API list view."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            query = """
+                SELECT c.*,
+                       COUNT(cb.booking_id)::int AS bookings_count
+                FROM contracts c
+                LEFT JOIN contract_bookings cb ON cb.contract_id = c.id
+                WHERE TRUE
+            """
+            params = []
+            if search:
+                like = f"%{search.strip()}%"
+                query += """
+                  AND (
+                      CAST(c.id AS TEXT) ILIKE %s
+                      OR c.customer_name ILIKE %s
+                      OR c.phone ILIKE %s
+                  )
+                """
+                params.extend([like, like, like])
+            query += """
+                GROUP BY c.id
+                ORDER BY c.start_date DESC, c.id DESC
+            """
+            if page is not None:
+                offset = (page - 1) * PAGE_SIZE
+                query += " LIMIT %s OFFSET %s"
+                params.extend([PAGE_SIZE, offset])
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def contract_owns_bookings(contract_id: int, booking_ids: list[int]) -> bool:
+    if not booking_ids:
+        return True
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM contract_bookings "
+                "WHERE contract_id = %s AND booking_id = ANY(%s)",
+                (contract_id, list(booking_ids)),
+            )
+            return cur.fetchone()[0] == len(set(booking_ids))
 
 
 def get_bookings(booking_ids: list[int]) -> list[dict]:

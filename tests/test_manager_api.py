@@ -88,6 +88,70 @@ def test_delete_cancels(client):
     assert g.get_json()["data"]["state"] == "cancelled"
 
 
+def test_contract_create_links_confirmed_zero_price_bookings(client, monkeypatch):
+    monkeypatch.setattr("blueprints.manager_api._single_table_write", lambda row: None)
+    body = {
+        "customer_name": "Big Co",
+        "phone": "77001234567",
+        "start_date": "2026-12-01",
+        "end_date": "2026-12-31",
+        "price": 550000,
+        "slots": [
+            {"field": 1, "date": "2026-12-01", "time_start": "10:00", "time_end": "11:00"},
+            {"field": 1, "date": "2026-12-08", "time_start": "10:00", "time_end": "11:00"},
+        ],
+    }
+
+    r = client.post("/api/manager/contracts", json=body, headers=_HDR)
+
+    assert r.status_code == 200, r.get_json()
+    data = r.get_json()["data"]
+    assert data["created_count"] == 2
+
+    contract = client.get(f"/api/manager/contracts/{data['contract_id']}", headers=_HDR)
+    assert contract.status_code == 200
+    assert contract.get_json()["data"]["price"] == 550000.0
+    assert contract.get_json()["data"]["booking_ids"] == data["booking_ids"]
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT state, price_total FROM bookings WHERE id = ANY(%s) ORDER BY id",
+                (data["booking_ids"],),
+            )
+            rows = cur.fetchall()
+    assert [row[0] for row in rows] == ["confirmed", "confirmed"]
+    assert [float(row[1]) for row in rows] == [0.0, 0.0]
+
+
+def test_contract_delete_cancels_linked_bookings(client, monkeypatch):
+    monkeypatch.setattr("blueprints.manager_api._single_table_write", lambda row: None)
+    monkeypatch.setattr("blueprints.manager_api.refresh_week_sheet", lambda: None)
+    monkeypatch.setattr("integrations.apipay_service.on_bookings_cancelled", lambda *args, **kwargs: None)
+    body = {
+        "customer_name": "Big Co",
+        "start_date": "2027-01-01",
+        "end_date": "2027-01-31",
+        "price": 900000,
+        "slots": [
+            {"field": 2, "date": "2027-01-05", "time_start": "18:00", "time_end": "19:00"},
+            {"field": 2, "date": "2027-01-12", "time_start": "18:00", "time_end": "19:00"},
+        ],
+    }
+    created = client.post("/api/manager/contracts", json=body, headers=_HDR).get_json()["data"]
+
+    r = client.delete(f"/api/manager/contracts/{created['contract_id']}", headers=_HDR)
+
+    assert r.status_code == 200
+    assert sorted(r.get_json()["data"]["cancelled_ids"]) == sorted(created["booking_ids"])
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM contracts WHERE id = %s", (created["contract_id"],))
+            assert cur.fetchone()[0] == "cancelled"
+            cur.execute("SELECT DISTINCT state FROM bookings WHERE id = ANY(%s)", (created["booking_ids"],))
+            assert {row[0] for row in cur.fetchall()} == {"cancelled"}
+
+
 # ---------------------------------------------------------------------------
 # Client notifications — a manager acts, the client is not in the room
 # ---------------------------------------------------------------------------
