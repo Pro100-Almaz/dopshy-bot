@@ -421,3 +421,64 @@ def test_academy_group_patch_updates_schedule_weekday(monkeypatch, client):
         "time_start": None,
         "time_end": None,
     }
+
+
+@pytest.mark.no_db
+def test_contacts_legacy_list_response_is_preserved(client, monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_api._list_conversation_contacts",
+        lambda: [{"chat_id": "wa:77000000001", "updated_at": "2026-08-29 10:00:00"}],
+    )
+    monkeypatch.setattr("blueprints.manager_api.repo.get_booking_customers", lambda: [])
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {phone: {"paused": False, "paused_reason": None} for phone in phones},
+    )
+
+    r = client.get("/api/manager/contacts", headers=_HDR)
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert isinstance(data, list)
+    assert data[0]["phone"] == "77000000001"
+
+
+@pytest.mark.no_db
+def test_contacts_can_be_paginated(client, monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_api._list_conversation_contacts",
+        lambda: [
+            {"chat_id": "wa:77000000001", "updated_at": "2026-08-29 10:00:00"},
+            {"chat_id": "wa:77000000002", "updated_at": "2026-08-30 10:00:00"},
+            {"chat_id": "wa:77000000003", "updated_at": "2026-08-28 10:00:00"},
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.repo.get_booking_customers",
+        lambda: [
+            {
+                "phone": "77000000004",
+                "customer_name": "Client Four",
+                "last_at": "2026-08-27 10:00:00",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {
+            phone: {"paused": phone == "77000000003", "paused_reason": "manual" if phone == "77000000003" else None}
+            for phone in phones
+        },
+    )
+
+    r = client.get("/api/manager/contacts?page=2&page_size=2", headers=_HDR)
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["page"] == 2
+    assert data["page_size"] == 2
+    assert data["total"] == 4
+    assert data["total_pages"] == 2
+    assert [row["phone"] for row in data["data"]] == ["77000000003", "77000000004"]
+    assert data["data"][0]["paused"] is True

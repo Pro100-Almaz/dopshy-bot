@@ -1053,7 +1053,13 @@ def list_contacts():
       - bookings (Postgres): anyone with a booking on record
     Each contact carries its live pause status so the UI can render the toggle
     without a second round trip.
+
+    Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
+    For compatibility, requests without either pagination parameter still return
+    the legacy bare list.
     """
+    wants_pagination = "page" in request.args or "page_size" in request.args
+    page, page_size, offset = _page_args()
     contacts: dict[str, dict] = {}
 
     def _touch(phone: str) -> dict | None:
@@ -1113,15 +1119,22 @@ def list_contacts():
             entry["name"] = row["customer_name"]
         _bump_activity(entry, row.get("last_at"))
 
-    statuses = get_statuses(list(contacts.keys()))
-    result = []
-    for key, entry in contacts.items():
+    result = list(contacts.values())
+    result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
+
+    total = len(result)
+    if wants_pagination:
+        result = result[offset:offset + page_size]
+
+    statuses = get_statuses([entry["phone"] for entry in result])
+    for entry in result:
+        key = entry["phone"]
         status = statuses.get(key, {"paused": False, "paused_reason": None})
         entry["paused"] = status["paused"]
         entry["paused_reason"] = status["paused_reason"]
-        result.append(entry)
 
-    result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
+    if wants_pagination:
+        return _paginated(result, total, page, page_size)
     return result
 
 
