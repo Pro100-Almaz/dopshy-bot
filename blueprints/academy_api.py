@@ -86,6 +86,7 @@ def _group(row: dict) -> dict:
         "birth_years": row.get("birth_years") or [],
         "location": row.get("location"),
         "level": row.get("level") or [],
+        "trainer": row.get("trainer"),
         "field": row.get("field"),
         "training_day": row.get("training_day"),
         "start_time": row.get("time_start"),

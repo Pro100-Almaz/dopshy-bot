@@ -88,6 +88,70 @@ def test_delete_cancels(client):
     assert g.get_json()["data"]["state"] == "cancelled"
 
 
+def test_contract_create_links_confirmed_zero_price_bookings(client, monkeypatch):
+    monkeypatch.setattr("blueprints.manager_api._single_table_write", lambda row: None)
+    body = {
+        "customer_name": "Big Co",
+        "phone": "77001234567",
+        "start_date": "2026-12-01",
+        "end_date": "2026-12-31",
+        "price": 550000,
+        "slots": [
+            {"field": 1, "date": "2026-12-01", "time_start": "10:00", "time_end": "11:00"},
+            {"field": 1, "date": "2026-12-08", "time_start": "10:00", "time_end": "11:00"},
+        ],
+    }
+
+    r = client.post("/api/manager/contracts", json=body, headers=_HDR)
+
+    assert r.status_code == 200, r.get_json()
+    data = r.get_json()["data"]
+    assert data["created_count"] == 2
+
+    contract = client.get(f"/api/manager/contracts/{data['contract_id']}", headers=_HDR)
+    assert contract.status_code == 200
+    assert contract.get_json()["data"]["price"] == 550000.0
+    assert contract.get_json()["data"]["booking_ids"] == data["booking_ids"]
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT state, price_total FROM bookings WHERE id = ANY(%s) ORDER BY id",
+                (data["booking_ids"],),
+            )
+            rows = cur.fetchall()
+    assert [row[0] for row in rows] == ["confirmed", "confirmed"]
+    assert [float(row[1]) for row in rows] == [0.0, 0.0]
+
+
+def test_contract_delete_cancels_linked_bookings(client, monkeypatch):
+    monkeypatch.setattr("blueprints.manager_api._single_table_write", lambda row: None)
+    monkeypatch.setattr("blueprints.manager_api.refresh_week_sheet", lambda: None)
+    monkeypatch.setattr("integrations.apipay_service.on_bookings_cancelled", lambda *args, **kwargs: None)
+    body = {
+        "customer_name": "Big Co",
+        "start_date": "2027-01-01",
+        "end_date": "2027-01-31",
+        "price": 900000,
+        "slots": [
+            {"field": 2, "date": "2027-01-05", "time_start": "18:00", "time_end": "19:00"},
+            {"field": 2, "date": "2027-01-12", "time_start": "18:00", "time_end": "19:00"},
+        ],
+    }
+    created = client.post("/api/manager/contracts", json=body, headers=_HDR).get_json()["data"]
+
+    r = client.delete(f"/api/manager/contracts/{created['contract_id']}", headers=_HDR)
+
+    assert r.status_code == 200
+    assert sorted(r.get_json()["data"]["cancelled_ids"]) == sorted(created["booking_ids"])
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM contracts WHERE id = %s", (created["contract_id"],))
+            assert cur.fetchone()[0] == "cancelled"
+            cur.execute("SELECT DISTINCT state FROM bookings WHERE id = ANY(%s)", (created["booking_ids"],))
+            assert {row[0] for row in cur.fetchall()} == {"cancelled"}
+
+
 # ---------------------------------------------------------------------------
 # Client notifications — a manager acts, the client is not in the room
 # ---------------------------------------------------------------------------
@@ -246,7 +310,7 @@ def test_academy_group_patch_omits_group_name(monkeypatch, client):
     r = client.patch("/api/manager/academy_groups/7", json={"max_cap": 14}, headers=_HDR)
 
     assert r.status_code == 200
-    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14, "level": None}
+    assert captured == {"group_id": 7, "group_name": None, "max_cap": 14, "level": None, "trainer": None}
 
 
 def test_academy_group_create_accepts_multiple_schedules(monkeypatch, client):
@@ -357,3 +421,64 @@ def test_academy_group_patch_updates_schedule_weekday(monkeypatch, client):
         "time_start": None,
         "time_end": None,
     }
+
+
+@pytest.mark.no_db
+def test_contacts_legacy_list_response_is_preserved(client, monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_api._list_conversation_contacts",
+        lambda: [{"chat_id": "wa:77000000001", "updated_at": "2026-08-29 10:00:00"}],
+    )
+    monkeypatch.setattr("blueprints.manager_api.repo.get_booking_customers", lambda: [])
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {phone: {"paused": False, "paused_reason": None} for phone in phones},
+    )
+
+    r = client.get("/api/manager/contacts", headers=_HDR)
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert isinstance(data, list)
+    assert data[0]["phone"] == "77000000001"
+
+
+@pytest.mark.no_db
+def test_contacts_can_be_paginated(client, monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_api._list_conversation_contacts",
+        lambda: [
+            {"chat_id": "wa:77000000001", "updated_at": "2026-08-29 10:00:00"},
+            {"chat_id": "wa:77000000002", "updated_at": "2026-08-30 10:00:00"},
+            {"chat_id": "wa:77000000003", "updated_at": "2026-08-28 10:00:00"},
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.repo.get_booking_customers",
+        lambda: [
+            {
+                "phone": "77000000004",
+                "customer_name": "Client Four",
+                "last_at": "2026-08-27 10:00:00",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {
+            phone: {"paused": phone == "77000000003", "paused_reason": "manual" if phone == "77000000003" else None}
+            for phone in phones
+        },
+    )
+
+    r = client.get("/api/manager/contacts?page=2&page_size=2", headers=_HDR)
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["page"] == 2
+    assert data["page_size"] == 2
+    assert data["total"] == 4
+    assert data["total_pages"] == 2
+    assert [row["phone"] for row in data["data"]] == ["77000000003", "77000000004"]
+    assert data["data"][0]["paused"] is True

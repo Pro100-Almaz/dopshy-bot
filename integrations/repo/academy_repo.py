@@ -59,6 +59,7 @@ def create_or_update_group(
     age_min: int | None = None,
     age_max: int | None = None,
     shift: str | None = None,
+    trainer: str | None = None,
 ) -> int:
     if levels is None and level is not None:
         levels = [level] if isinstance(level, str) else level
@@ -67,8 +68,8 @@ def create_or_update_group(
             cur.execute(
                 """
                 INSERT INTO academy_groups
-                    (group_name, group_type, max_cap, is_active, birth_years, location, level, age_min, age_max, shift)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (group_name, group_type, max_cap, is_active, birth_years, location, level, age_min, age_max, shift, trainer)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (group_name, group_type)
                 DO UPDATE SET
                     max_cap = EXCLUDED.max_cap,
@@ -78,10 +79,11 @@ def create_or_update_group(
                     level = COALESCE(EXCLUDED.level, academy_groups.level),
                     age_min = COALESCE(EXCLUDED.age_min, academy_groups.age_min),
                     age_max = COALESCE(EXCLUDED.age_max, academy_groups.age_max),
-                    shift = COALESCE(EXCLUDED.shift, academy_groups.shift)
+                    shift = COALESCE(EXCLUDED.shift, academy_groups.shift),
+                    trainer = COALESCE(EXCLUDED.trainer, academy_groups.trainer)
                 RETURNING id
                 """,
-                (group_name, group_type, max_cap, is_active, birth_years, location, levels, age_min, age_max, shift),
+                (group_name, group_type, max_cap, is_active, birth_years, location, levels, age_min, age_max, shift, trainer),
             )
 
             row = cur.fetchone()
@@ -97,6 +99,7 @@ def on_manual_group_edit(
         age_max: int | None = None,
         shift: str | None = None,
         is_active: bool | None = None,
+        trainer: str | None = None,
 ) -> dict:
     fields = []
     values = []
@@ -130,6 +133,9 @@ def on_manual_group_edit(
     if is_active is not None:
         fields.append("is_active = %s")
         values.append(is_active)
+    if trainer is not None:
+        fields.append("trainer = %s")
+        values.append(trainer)
 
     if not fields:
         return {
@@ -320,7 +326,8 @@ def get_groups_info(bot_name: str):
                 """
                 SELECT s.group_id, s.training_day, s.time_start, s.time_end, s.field,
                        g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location, g.level, g.age_min, g.age_max, g.shift, g.is_active
+                       g.birth_years, g.location, g.level, g.age_min, g.age_max,
+                       g.shift, g.trainer, g.is_active
                 FROM academy_group_schedules s
                 JOIN academy_groups g ON g.id = s.group_id
                 WHERE g.group_type = %s AND g.is_active = TRUE
@@ -356,7 +363,7 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location, g.level,
-                       g.age_min, g.age_max, g.shift, g.is_active,
+                       g.age_min, g.age_max, g.shift, g.trainer, g.is_active,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -377,7 +384,8 @@ def get_all_groups_for_frontend() -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location, g.level, g.age_min, g.age_max, g.shift, g.is_active,
+                       g.birth_years, g.location, g.level, g.age_min, g.age_max,
+                       g.shift, g.trainer, g.is_active,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -394,7 +402,8 @@ def get_groups_by_type_for_frontend(group_type: str) -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
-                       g.birth_years, g.location, g.level, g.age_min, g.age_max, g.shift, g.is_active,
+                       g.birth_years, g.location, g.level, g.age_min, g.age_max,
+                       g.shift, g.trainer, g.is_active,
                        s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s

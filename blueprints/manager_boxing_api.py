@@ -43,6 +43,7 @@ def _sheet_group(row: dict) -> dict:
         "birth_years": row.get("birth_years") or [],
         "location": row.get("location"),
         "level": row.get("level") or [],
+        "trainer": row.get("trainer"),
         "age_min": row.get("age_min"),
         "age_max": row.get("age_max"),
         "shift": row.get("shift"),

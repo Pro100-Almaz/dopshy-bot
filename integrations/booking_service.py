@@ -752,7 +752,7 @@ _INSERT_BOOKING_SQL = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
                           notes, price_total, paid_avans, state, source, client_token, start_at, end_at,
                           group_repetition, group_transition, repeat, reserved_until)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', %s,
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
                                  (%s::date + %s::time) AT TIME ZONE %s,
@@ -770,7 +770,8 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
                          notes: str | None = None, price_total=None, prepayment=None,
                          actor_id: str | None = None, client_token: str | None = None,
                          format_: str | None = None, reserved_until: int = 30,
-                         updated_by: str = 'manager') -> list[int]:
+                         updated_by: str = 'manager',
+                         state: str = "awaiting_payment") -> list[int]:
     """Insert one or more booking rows on the caller's cursor and return their ids."""
     if format_ is None:
         conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
@@ -794,7 +795,7 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
         cur.execute(
             _INSERT_BOOKING_SQL,
             (phone, customer, d_str, st, et, int(field), format_,
-             row_notes, row_price, row_avans, updated_by, client_token,
+             row_notes, row_price, row_avans, state, updated_by, client_token,
              d_str, st, config.BOOKING_TIMEZONE,
              d_str, et, config.BOOKING_TIMEZONE,
              group_repetition, group_transition,
@@ -815,8 +816,9 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                            actor_id: str | None = None,
                            client_token: str | None = None,
                            format_: str | None = None, reserved_until: int = 30,
-                           updated_by: str = 'manager') -> dict:
-    """Manager-created booking: DRAFT is skipped, inserted directly as awaiting_payment."""
+                           updated_by: str = 'manager',
+                           state: str = "confirmed") -> dict:
+    """Manager-created booking: DRAFT is skipped, inserted directly as confirmed."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -827,6 +829,7 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                     price_total=price_total, actor_id=actor_id,
                     client_token=client_token, format_=format_,
                     reserved_until=reserved_until, updated_by=updated_by,
+                    state=state,
                 )
     except psycopg2.errors.ExclusionViolation:
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
@@ -1061,6 +1064,7 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                         # prepayment=avans_per_booking if is_chargeable else prepayment,
                         actor_id=actor_id,
                         reserved_until=reserved_until, updated_by=updated_by,
+                        state="awaiting_payment",
                     )
                     booking_ids.extend(ids)
                     created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
@@ -1085,3 +1089,263 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
 
     return _ok({"created": created, "booking_ids": booking_ids,
                 "created_count": len(booking_ids), **hook_data})
+
+
+_CONTRACT_STATES = {"draft", "awaiting_payment", "confirmed", "cancelled", "unpaid", "failed"}
+
+
+def _normalize_contract_slots(slots: list[dict]) -> tuple[list[dict], dict | None]:
+    if not isinstance(slots, list) or not slots:
+        return [], _err("INVALID", "slots must be a non-empty list.")
+
+    valid_modes = ("none", "daily", "weekly", "monthly")
+    total_occurrences = 0
+    normalized: list[dict] = []
+    for s in slots:
+        if not isinstance(s, dict) or not all(s.get(k) for k in ("field", "date", "time_start", "time_end")):
+            return [], _err("INVALID", "each slot needs field, date, time_start, time_end.")
+        mode = s.get("repeat_mode") or "none"
+        if mode not in valid_modes:
+            return [], _err("INVALID", f"repeat_mode must be one of {valid_modes}.")
+        until = s.get("repeat_until") or s.get("end_date") or s["date"]
+        if mode != "none" and str(until) < str(s["date"]):
+            return [], _err("INVALID", "repeat_until must be >= date.")
+        try:
+            total_occurrences += len(occurrence_dates(str(s["date"]), str(until), mode))
+        except (ValueError, TypeError):
+            return [], _err("INVALID", "invalid date or repeat_until.")
+        normalized.append({
+            "field": int(s["field"]),
+            "date": str(s["date"]),
+            "time_start": str(s["time_start"])[:5],
+            "time_end": str(s["time_end"])[:5],
+            "repeat_mode": mode,
+            "repeat_until": str(until),
+        })
+
+    if total_occurrences > 1000:
+        return [], _err("INVALID", "too many occurrences (max 1000); shorten the repeat range.")
+    return normalized, None
+
+
+def _contract_slots_in_range(slots: list[dict], start_date: str, end_date: str) -> bool:
+    for slot in slots:
+        if str(slot["date"]) < str(start_date) or str(slot["repeat_until"]) > str(end_date):
+            return False
+    return True
+
+
+def create_contract(customer_name: str, start_date: str, end_date: str, price,
+                    phone: str | None = None, status: str = "confirmed",
+                    notes: str | None = None, source: str | None = None,
+                    slots: list[dict] | None = None,
+                    actor_id: str | None = None) -> dict:
+    status = status or "confirmed"
+    if status not in _CONTRACT_STATES:
+        return _err("INVALID_STATUS", "Недопустимый статус договора.")
+    normalized_slots = []
+    if slots is not None:
+        normalized_slots, err = _normalize_contract_slots(slots)
+        if err:
+            return err
+        if not _contract_slots_in_range(normalized_slots, start_date, end_date):
+            return _err("INVALID", "contract booking slots must be within start_date and end_date.")
+
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "INSERT INTO contracts "
+                    "  (customer_name, phone, start_date, end_date, price, status, notes, source) "
+                    "VALUES (%s, %s, %s::date, %s::date, %s, %s, %s, %s) "
+                    "RETURNING id",
+                    (customer_name, phone, start_date, end_date, price, status, notes, source),
+                )
+                contract_id = cur.fetchone()["id"]
+                booking_ids: list[int] = []
+                created: list[dict] = []
+                for slot in normalized_slots:
+                    ids = _insert_booking_rows(
+                        cur,
+                        field=slot["field"],
+                        date=slot["date"],
+                        end_date=slot["repeat_until"],
+                        time_start=slot["time_start"],
+                        time_end=slot["time_end"],
+                        repeat=slot["repeat_mode"],
+                        customer=customer_name,
+                        phone=phone,
+                        notes=notes,
+                        price_total=0,
+                        actor_id=actor_id,
+                        reserved_until=0,
+                        updated_by=source or "contract",
+                        state=status,
+                    )
+                    booking_ids.extend(ids)
+                    created.extend({"booking_id": bid, "status": _STATES_RUSSIAN.get(status, status)} for bid in ids)
+                if booking_ids:
+                    cur.executemany(
+                        "INSERT INTO contract_bookings (contract_id, booking_id) VALUES (%s, %s)",
+                        [(contract_id, bid) for bid in booking_ids],
+                    )
+    except psycopg2.errors.ExclusionViolation:
+        return _conflict([])
+    except psycopg2.errors.CheckViolation:
+        return _err("INVALID", "end_date must be >= start_date.")
+
+    return _ok({
+        "contract_id": contract_id,
+        "booking_ids": booking_ids,
+        "created": created,
+        "created_count": len(booking_ids),
+    })
+
+
+def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | None = None,
+                          source: str | None = None) -> dict:
+    normalized_slots, err = _normalize_contract_slots(slots)
+    if err:
+        return err
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, customer_name, phone, status, notes FROM contracts WHERE id = %s FOR UPDATE",
+                    (contract_id,),
+                )
+                contract = cur.fetchone()
+                if not contract:
+                    return _err("NOT_FOUND", "Договор не найден.")
+                if contract["status"] in ("cancelled", "failed", "unpaid"):
+                    return _err("INVALID_STATUS", "Нельзя добавить брони в закрытый договор.")
+                if not _contract_slots_in_range(
+                    normalized_slots, str(contract["start_date"]), str(contract["end_date"])
+                ):
+                    return _err("INVALID", "contract booking slots must be within start_date and end_date.")
+                booking_ids: list[int] = []
+                created: list[dict] = []
+                for slot in normalized_slots:
+                    ids = _insert_booking_rows(
+                        cur,
+                        field=slot["field"],
+                        date=slot["date"],
+                        end_date=slot["repeat_until"],
+                        time_start=slot["time_start"],
+                        time_end=slot["time_end"],
+                        repeat=slot["repeat_mode"],
+                        customer=contract["customer_name"],
+                        phone=contract["phone"],
+                        notes=contract["notes"],
+                        price_total=0,
+                        actor_id=actor_id,
+                        reserved_until=0,
+                        updated_by=source or "contract",
+                        state=contract["status"],
+                    )
+                    booking_ids.extend(ids)
+                    created.extend({"booking_id": bid, "status": _STATES_RUSSIAN.get(contract["status"], contract["status"])} for bid in ids)
+                cur.executemany(
+                    "INSERT INTO contract_bookings (contract_id, booking_id) VALUES (%s, %s)",
+                    [(contract_id, bid) for bid in booking_ids],
+                )
+    except psycopg2.errors.ExclusionViolation:
+        return _conflict([])
+
+    return _ok({"contract_id": contract_id, "booking_ids": booking_ids,
+                "created": created, "created_count": len(booking_ids)})
+
+
+def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> dict:
+    allowed = {"customer_name", "phone", "start_date", "end_date", "price", "status", "notes", "source"}
+    patch = {k: v for k, v in fields.items() if k in allowed}
+    if not patch:
+        return _ok({"contract_id": contract_id})
+    if "status" in patch and patch["status"] not in _CONTRACT_STATES:
+        return _err("INVALID_STATUS", "Недопустимый статус договора.")
+
+    set_clause = ", ".join(f"{k} = %s" for k in patch) + ", updated_at = NOW()"
+    vals = list(patch.values()) + [contract_id]
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"UPDATE contracts SET {set_clause} WHERE id = %s RETURNING id", vals)
+                if not cur.fetchone():
+                    return _err("NOT_FOUND", "Договор не найден.")
+                if "status" in patch:
+                    cur.execute(
+                        "UPDATE bookings b SET state = %s, updated_at = NOW() "
+                        "FROM contract_bookings cb "
+                        "WHERE cb.booking_id = b.id AND cb.contract_id = %s "
+                        "  AND b.state NOT IN ('cancelled', 'failed', 'unpaid') "
+                        "RETURNING b.id",
+                        (patch["status"], contract_id),
+                    )
+                    for row in cur.fetchall():
+                        _record_event(cur, row["id"], "contract_status_updated",
+                                      "manager", actor_id, patch["status"])
+    except psycopg2.errors.ExclusionViolation:
+        return _conflict([])
+    except psycopg2.errors.CheckViolation:
+        return _err("INVALID", "end_date must be >= start_date.")
+    return _ok({"contract_id": contract_id})
+
+
+def cancel_contract(contract_id: int, actor_id: str | None = None, reason: str = "contract_cancel") -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "UPDATE contracts SET status = 'cancelled', updated_at = NOW() "
+                "WHERE id = %s RETURNING id",
+                (contract_id,),
+            )
+            if not cur.fetchone():
+                return _err("NOT_FOUND", "Договор не найден.")
+            cur.execute(
+                "UPDATE bookings b SET state = 'cancelled', updated_at = NOW() "
+                "FROM contract_bookings cb "
+                "WHERE cb.booking_id = b.id AND cb.contract_id = %s "
+                "  AND b.state NOT IN ('cancelled', 'failed', 'unpaid') "
+                "RETURNING b.id",
+                (contract_id,),
+            )
+            cancelled_ids = [r["id"] for r in cur.fetchall()]
+            for bid in cancelled_ids:
+                _record_event(cur, bid, "contract_cancelled", "manager", actor_id, reason)
+
+    if cancelled_ids:
+        from integrations import apipay_service
+        apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason)
+    return _ok({"contract_id": contract_id, "cancelled_ids": cancelled_ids})
+
+
+def cancel_contract_bookings(contract_id: int, booking_ids: list[int] | None = None,
+                             actor_id: str | None = None,
+                             reason: str = "contract_booking_cancel") -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id FROM contracts WHERE id = %s", (contract_id,))
+            if not cur.fetchone():
+                return _err("NOT_FOUND", "Договор не найден.")
+            params = [contract_id]
+            filter_sql = ""
+            if booking_ids:
+                filter_sql = "AND b.id = ANY(%s)"
+                params.append(list(booking_ids))
+            cur.execute(
+                "UPDATE bookings b SET state = 'cancelled', updated_at = NOW() "
+                "FROM contract_bookings cb "
+                "WHERE cb.booking_id = b.id AND cb.contract_id = %s "
+                f"  {filter_sql} "
+                "  AND b.state NOT IN ('cancelled', 'failed', 'unpaid') "
+                "RETURNING b.id",
+                params,
+            )
+            cancelled_ids = [r["id"] for r in cur.fetchall()]
+            for bid in cancelled_ids:
+                _record_event(cur, bid, "contract_booking_cancelled", "manager", actor_id, reason)
+
+    if cancelled_ids:
+        from integrations import apipay_service
+        apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason)
+    return _ok({"contract_id": contract_id, "cancelled_ids": cancelled_ids})

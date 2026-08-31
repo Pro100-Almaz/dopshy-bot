@@ -25,7 +25,11 @@ import pytest
 import config
 
 
-@pytest.fixture(scope="session", autouse=True)
+def pytest_configure(config):
+    config.addinivalue_line("markers", "no_db: test does not need PostgreSQL")
+
+
+@pytest.fixture(scope="session")
 def _migrated_schema():
     if not config.POSTGRES_DSN:
         pytest.skip("POSTGRES_DSN not set — skipping DB tests")
@@ -51,12 +55,17 @@ def clean_rate_limit():
 
 
 @pytest.fixture(autouse=True)
-def clean_db(_migrated_schema):
+def clean_db(request):
+    if request.node.get_closest_marker("no_db"):
+        yield
+        return
+
+    request.getfixturevalue("_migrated_schema")
     from integrations.repo.postgres import _conn
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE bookings, booking_events, payments, booking_sessions, "
+                "TRUNCATE contracts, contract_bookings, bookings, booking_events, payments, booking_sessions, "
                 "apipay_invoices RESTART IDENTITY CASCADE"
             )
     yield
