@@ -140,6 +140,9 @@ KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pa
 # Payment receipt validation
 PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
 PAYMENT_RECEIPT_MAX_AGE_HOURS: int = int(os.getenv("PAYMENT_RECEIPT_MAX_AGE_HOURS", "24"))
+PAYMENT_RECEIPT_RECOGNITION_ENABLED: bool = os.getenv(
+    "PAYMENT_RECEIPT_RECOGNITION_ENABLED", "0"
+).strip().lower() in ("1", "true", "yes", "on")
 PAYMENT_MIN: int = 10000
 
 # ---------------------------------------------------------------------------

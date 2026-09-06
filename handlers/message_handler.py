@@ -291,8 +291,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         if message_id:
             mark_as_read(channel, message_id)
 
-        # Document = payment receipt — confirm the booking
-        if msg_type == "document":
+        # Document = payment receipt — confirm the booking.
+        # Disabled by default while keeping the receipt code available for a
+        # later return to manual PDF validation.
+        if msg_type == "document" and config.PAYMENT_RECEIPT_RECOGNITION_ENABLED:
             _handle_payment_receipt(channel, sender_id, payload.media)
             return
 
