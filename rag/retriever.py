@@ -31,7 +31,6 @@ def retrieve_context(query: str, k: int = config.TOP_K_RESULTS) -> str:
 
     return "\n\n".join(parts)
 
-
 def invalidate_cache() -> None:
     """Call this after re-ingesting documents to reload the store."""
     _load_store.cache_clear()

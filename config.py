@@ -1,5 +1,6 @@
 import json as _json
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 from chat.system_prompts import sp_1, sp_3, sp_2
 
@@ -7,10 +8,10 @@ load_dotenv()
 
 # OpenAI
 OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
-MODEL_NAME: str = "gpt-4.1"
-EXTRACTOR_MODEL: str = "gpt-4.1-mini"
+MODEL_NAME: str = "gpt-5.2"
+EXTRACTOR_MODEL: str = "gpt-4.1"
 INTENT_MODEL: str = "gpt-4.1"
-EMBEDDING_MODEL: str = "text-embedding-3-small"
+EMBEDDING_MODEL: str = "text-embedding-3-large"
 
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]
@@ -107,4 +108,13 @@ CHUNK_OVERLAP: int = 50
 MAX_HISTORY_MESSAGES: int = 20  # total messages kept per chat (user+assistant)
 CONVERSATION_DB_PATH: str = os.getenv("CONVERSATION_DB_PATH", "./data/conversations.db")
 
-MAX_PLAYERS: int = 200
+MAX_PLAYERS: int = 100
+
+# ---------------------------------------------------------------------------
+# Holidays (dates that use weekend_holiday pricing)
+# ---------------------------------------------------------------------------
+_raw_holidays = os.getenv("HOLIDAYS", "")
+HOLIDAYS: set = {
+    datetime.date(datetime.strptime(d.strip(), "%Y-%m-%d"))
+    for d in _raw_holidays.split(",") if d.strip()
+}

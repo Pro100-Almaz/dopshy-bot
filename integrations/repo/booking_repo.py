@@ -28,7 +28,7 @@ def get_user_upcoming_bookings(phone: str) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, date, time_start, time_end, field, format, players,
-                       customer_name, state, notes
+                       customer_name, state, notes, price_total, group_transition
                 FROM bookings
                 WHERE phone = %s
                   AND date >= CURRENT_DATE

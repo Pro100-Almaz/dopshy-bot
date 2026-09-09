@@ -409,7 +409,7 @@ def refresh_week_sheet() -> None:
             _paint_weekly_bookings(ws, bookings)
 
     except Exception as exc:
-        logger.exception("REFRESH_WEEK_SHEET FAILSED: %s", exc)
+        logger.exception("REFRESH_WEEK_SHEET FAILED: %s", exc)
 
 
 def _get_border_request(worksheet_id, start_row_id, end_row_id, start_col_id, end_col_id) -> dict:

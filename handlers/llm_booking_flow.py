@@ -30,6 +30,7 @@ from datetime import datetime
 
 import config
 from chat.conversation import clear_history
+from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from handlers.base_classes.base_asker import BaseAsker
 from handlers.base_classes.base_button import BaseButton
 from handlers.base_classes.base_checker import BaseChecker
@@ -51,8 +52,8 @@ T = {
                              "kk": "📅 Қай күнге брондағыңыз келеді?"},
     "ask_time":             {"ru": "⏰ Укажите время (напр. *18:00 - 20:00*)",
                              "kk": "⏰ Уақытты жазыңыз (мыс. *18:00 - 20:00*)"},
-    "ask_field":            {"ru": "⚽ Выберите поле:",
-                             "kk": "⚽ Алаңды таңдаңыз:"},
+    "ask_field":            {"ru": "⚽ Выберите размер поля:",
+                             "kk": "⚽ Алаң өлшемін таңдаңыз:"},
     "ask_players":          {"ru": "👥 Сколько игроков будет?",
                              "kk": "👥 Қанша ойыншы болады?"},
     "ask_name":             {"ru": "👤 Укажите ваше имя:",
@@ -75,16 +76,16 @@ T = {
                              "kk": "Аяқталу уақыты басталудан кейін болуы керек.\nМыс.: *18:00 - 20:00*"},
     "format_not_found":     {"ru": "Формат \"{fmt}\" не найден. Доступные: {available}",
                              "kk": "\"{fmt}\" форматы табылмады. Қолжетімді: {available}"},
-    "field_not_found":      {"ru": "Поле не найдено. Доступные:",
-                             "kk": "Алаң табылмады. Қолжетімді:"},
+    "field_not_found":      {"ru": "Формат не найден. Доступные размеры:",
+                             "kk": "Формат табылмады. Қолжетімді өлшемдер:"},
     "players_invalid":      {"ru": "Игроков должно быть > 0.",
                              "kk": "Ойыншылар саны 0-ден көп болуы керек."},
     "players_overflow":     {"ru": f"Макс. количество игроков: {config.MAX_PLAYERS}",
                              "kk": f"Макс. ойыншы саны: {config.MAX_PLAYERS}"},
-    "field_free":           {"ru": "✅ Поле {fid} ({fmt}) свободно\n{date} {ts}–{te}!",
-                             "kk": "✅ Алаң {fid} ({fmt}) бос\n{date} {ts}–{te}!"},
-    "field_taken":          {"ru": "❌ Поле {fid} ({fmt}) занято {date} {ts}–{te}.",
-                             "kk": "❌ Алаң {fid} ({fmt}) бос емес {date} {ts}–{te}."},
+    "field_free":           {"ru": "✅ {fmt} свободно\n{date} {ts}–{te}!",
+                             "kk": "✅ {fmt} бос\n{date} {ts}–{te}!"},
+    "field_taken":          {"ru": "❌ {fmt} занято {date} {ts}–{te}.",
+                             "kk": "❌ {fmt} бос емес {date} {ts}–{te}."},
     "alternatives":         {"ru": "Доступные варианты:",
                              "kk": "Бос нұсқалар:"},
     "earlier_hint":         {"ru": "Кстати, поле свободно уже с {earliest} — если удобнее начать пораньше, скажите 🙂",
@@ -95,26 +96,26 @@ T = {
                              "kk": "{date} {ts}–{te} бос алаң жоқ."},
     "available_time":       {"ru": "Доступное время:",
                              "kk": "Бос уақыт:"},
-    "field_auto":           {"ru": "✅ Поле {fid} ({fmt}) свободно {date} {ts}–{te}!",
-                             "kk": "✅ Алаң {fid} ({fmt}) бос {date} {ts}–{te}!"},
-    "choose_field":         {"ru": "📅 {date}, {ts}–{te}\n\n⚽ Выберите поле:",
-                             "kk": "📅 {date}, {ts}–{te}\n\n⚽ Алаңды таңдаңыз:"},
-    "time_available":       {"ru": "⏰ {ts}–{te} — доступные:",
-                             "kk": "⏰ {ts}–{te} — қолжетімді:"},
+    "field_auto":           {"ru": "✅ {fmt} свободно {date} {ts}–{te}!",
+                             "kk": "✅ {fmt} бос {date} {ts}–{te}!"},
+    "choose_field":         {"ru": "📅 {date}, {ts}–{te}\n\n⚽ Выберите размер поля:",
+                             "kk": "📅 {date}, {ts}–{te}\n\n⚽ Алаң өлшемін таңдаңыз:"},
+    "time_available":       {"ru": "⏰ {ts}–{te} — доступно",
+                             "kk": "⏰ {ts}–{te} — қолжетімді"},
     "no_fields_time":       {"ru": "На {ts}–{te} нет свободных полей.\nПопробуйте другое время.",
                              "kk": "{ts}–{te} аралығында бос алаң жоқ.\nБасқа уақыт көріңіз."},
-    "which_date":           {"ru": "📅 На какую дату?",
-                             "kk": "📅 Қай күнге?"},
-    "field_booked_date":    {"ru": "Поле {fid} ({fmt}) занято {date}.",
-                             "kk": "Алаң {fid} ({fmt}) {date} бос емес."},
+    "which_date":           {"ru": "📅 На какую дату хотите бронировать?",
+                             "kk": "📅 Қай күнге брондағыңыз келеді?"},
+    "field_booked_date":    {"ru": "{fmt} занято {date}.",
+                             "kk": "{fmt} {date} бос емес."},
     "other_options":        {"ru": "Другие варианты:",
                              "kk": "Басқа нұсқалар:"},
-    "field_schedule":       {"ru": "⚽ Поле {fid} ({fmt}), {date}\nСвободное время: {times}",
-                             "kk": "⚽ Алаң {fid} ({fmt}), {date}\nБос уақыт: {times}"},
-    "field_full_week":      {"ru": "Поле {fid} ({fmt}) занято в ближайшие 7 дней.",
-                             "kk": "Алаң {fid} ({fmt}) жақын 7 күнде бос емес."},
-    "field_slots":          {"ru": "⚽ Поле {fid} ({fmt}) — свободные слоты:",
-                             "kk": "⚽ Алаң {fid} ({fmt}) — бос слоттар:"},
+    "field_schedule":       {"ru": "⚽ {fmt}, {date}\nСвободное время: {times}",
+                             "kk": "⚽ {fmt}, {date}\nБос уақыт: {times}"},
+    "field_full_week":      {"ru": "{fmt} занято в ближайшие 7 дней.",
+                             "kk": "{fmt} жақын 7 күнде бос емес."},
+    "field_slots":          {"ru": "⚽ {fmt} — свободные слоты:",
+                             "kk": "⚽ {fmt} — бос слоттар:"},
     "confirm_header":       {"ru": "📋 Детали брони:",
                              "kk": "📋 Брондау деректері:"},
     "confirm_question":     {"ru": "Подтвердить?",
@@ -127,23 +128,25 @@ T = {
                              "kk": "Бұл слот алынды. Басқасын таңдаңыз."},
     "error":                {"ru": "Ошибка. Попробуйте ещё раз.",
                              "kk": "Қате. Қайталап көріңіз."},
-    "slot_taken_confirm":   {"ru": "❌ Поле {fid} ({fmt}) {date} {ts}–{te} занято.",
-                             "kk": "❌ Алаң {fid} ({fmt}) {date} {ts}–{te} бос емес."},
+    "slot_taken_confirm":   {"ru": "❌ {fmt} {date} {ts}–{te} занято.",
+                             "kk": "❌ {fmt} {date} {ts}–{te} бос емес."},
     "booking_done":         {"ru": ("📋 Бронь оформлена!\n\n"
                                     "📅 {date}\n"
                                     "⏰ {ts}–{te}\n"
-                                    "⚽ Поле {fid} ({fmt})\n"
+                                    "⚽ {fmt}\n"
                                     "👥 Игроков: {players}\n"
-                                    "👤 Имя: {name}\n\n"
+                                    "👤 Имя: {name}\n"
+                                    "💰 {price}\n\n"
                                     "Оплатите аванс на сумму не менее 10тысяч тг:\n{pay_url}\n"
                                     "⚠️ Возврат при неявке не производится\n\n"
                                     "Отправьте PDF-чек сюда 🙏\n⚠️ 15 мин без оплаты — бронь отменится."),
                              "kk": ("📋 Брондау тіркелді!\n\n"
                                     "📅 {date}\n"
                                     "⏰ {ts}–{te}\n"
-                                    "⚽ Алаң {fid} ({fmt})\n"
+                                    "⚽ {fmt}\n"
                                     "👥 Ойыншылар: {players}\n"
-                                    "👤 Аты: {name}\n\n"
+                                    "👤 Аты: {name}\n"
+                                    "💰 {price}\n\n"
                                     "Аванс ретінде кемінде 10мың тг төлем жасаңыз:\n{pay_url}\n"
                                     "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
                                     "PDF-чек жіберіңіз 🙏\n⚠️ 15 мин төлемсіз — брондау жойылады.")},
@@ -159,10 +162,12 @@ T = {
                              "kk": "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз."},
     "field_label":          {"ru": "Поле",
                              "kk": "Алаң"},
+
 }
 
 
 _FIELD_BTN_RE = re.compile(r'(?:Поле|Алаң)\s*(\d+)\s*\((\S+)\)')
+_FORMAT_BTN_RE = re.compile(r'\b(\d+x\d+)\b')
 # Earlier-start button reply, e.g. "Начать 17:00–19:00" / "17:00–19:00 бастау".
 _EARLIER_BTN_RE = re.compile(
     r'(?:Начать|бастау)[^\d]*(\d{1,2}:\d{2})\s*[–—-]\s*(\d{1,2}:\d{2})'
@@ -225,14 +230,23 @@ class LlmBookingFlowHandler:
         if format_str:
             data["field"] = self._resolve_field_id(format_str, data)
 
-        # Handle field button reply (e.g., "Поле 1 (5x5)" or "Алаң 1 (5x5)")
-        field_btn = _FIELD_BTN_RE.search(user_message)
-        if field_btn:
-            fid = int(field_btn.group(1))
-            fmt = field_btn.group(2)
-            if any(f["id"] == fid and f["format"] == fmt for f in config.BOOKING_FIELDS):
-                data["field"] = fid
+        # Handle format button reply (e.g., "5x5" or "6x6")
+        fmt_btn = _FORMAT_BTN_RE.search(user_message)
+        if fmt_btn:
+            fmt = fmt_btn.group(1)
+            if any(f["format"] == fmt for f in config.BOOKING_FIELDS):
                 data["format"] = fmt
+                data["field"] = self._resolve_field_id(fmt, data)
+
+        # Handle legacy field button reply (e.g., "Поле 1 (5x5)")
+        if not data.get("field") and not fmt_btn:
+            field_btn = _FIELD_BTN_RE.search(user_message)
+            if field_btn:
+                fid = int(field_btn.group(1))
+                fmt = field_btn.group(2)
+                if any(f["id"] == fid and f["format"] == fmt for f in config.BOOKING_FIELDS):
+                    data["field"] = fid
+                    data["format"] = fmt
 
         # Earlier-start button reply — both times come from the button itself,
         # so the shift is applied deterministically rather than via extraction.
@@ -358,7 +372,7 @@ class LlmBookingFlowHandler:
                     + self._show_general_availability(lang)
                 )
             logger.error("[LLM_FLOW] request_payment failed: %s", result)
-            return self.asker.localize(lang, "error")
+            return result.get("message", "Ошибка. Попробуйте ещё раз.")
 
         d = str(draft["date"])
         ts = str(draft["time_start"])[:5]
@@ -373,10 +387,13 @@ class LlmBookingFlowHandler:
         refresh_all_bookings()
         refresh_week_sheet()
 
+        total = calculate_full_booking_price(fmt, d, ts, te)
+
         return self.asker.localize(lang, "booking_done",
                   date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
                   fid=field_id, fmt=fmt, players=players,
-                  name=name, pay_url=config.KASPI_PAYMENT_URL)
+                  name=name, price=fmt_price(total),
+                  pay_url=config.KASPI_PAYMENT_URL)
 
     def _cancel_draft(self, draft: dict, chat_id: str, lang: str = "ru") -> str:
         """Cancel the draft and return user-facing confirmation."""
@@ -438,10 +455,8 @@ class LlmBookingFlowHandler:
                 f["id"] == int(data["field"]) for f in config.BOOKING_FIELDS
             )
             if not field_exists:
-                fl = "\n".join(
-                    f"  {f['id']}. {self.asker.localize(lang, 'field_label')} {f['id']} ({f['format']})"
-                    for f in config.BOOKING_FIELDS
-                )
+                formats = sorted({f["format"] for f in config.BOOKING_FIELDS})
+                fl = "\n".join(f"  • {fmt}" for fmt in formats)
                 return self.asker.localize(lang, "field_not_found") + "\n" + fl
 
         # ── Rule 7: validate players ──

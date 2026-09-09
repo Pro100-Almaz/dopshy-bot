@@ -47,7 +47,7 @@ services:
       - --reload
       - --reload-extra-file=/app/migrations
     ports:
-      - "127.0.0.1:5002:5000"
+      - "127.0.0.1:5000:5000"
     environment:
       LOG_LEVEL: DEBUG
       PYTHONDONTWRITEBYTECODE: "1"
