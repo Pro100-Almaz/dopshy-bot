@@ -69,6 +69,9 @@ GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Bookings")
 BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "00:00")
 BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:59")
 BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
+# Max minutes a booking may be pulled earlier when offering a gap-free start
+# (see booking.suggest_earlier_start). 0 = no limit.
+BOOKING_MAX_PULL_MIN: int = int(os.getenv("BOOKING_MAX_PULL_MIN", "180"))
 BOOKING_FIELDS: list = _json.loads(
     os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"6x6"},'
                                 '{"id":2,"format":"5x5"},'

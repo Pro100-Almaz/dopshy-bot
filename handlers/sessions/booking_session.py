@@ -72,6 +72,14 @@ _T = {
                                 "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ Алаң {field} ({fmt})\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "confirm_reshow":         {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
                                 "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "earlier_hint":           {"ru": "Кстати, поле свободно уже с {earliest} — если удобнее начать пораньше, скажите 🙂",
+                                "kk": "Айтпақшы, алаң {earliest}-ден бастап бос — ертерек бастау ыңғайлы болса, айтыңыз 🙂"},
+    "earlier_btn":            {"ru": "Начать {earliest}–{end}",
+                                "kk": "{earliest}–{end} бастау"},
+    "earlier_applied":        {"ru": "Отлично, сдвинул на {start}.\n\n",
+                                "kk": "Жақсы, {start}-ге ауыстырдым.\n\n"},
+    "earlier_gone":           {"ru": "Это время только что заняли, оставляю как было.\n\n",
+                                "kk": "Бұл уақытты жаңа ғана алып қойды, бұрынғысынша қалдырдым.\n\n"},
     "declined":               {"ru": "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂",
                                 "kk": "Брондау тоқтатылды. Қайта қаласаңыз — алаңды брондағыңыз келетінін жазыңыз. 🙂"},
     "slot_taken":             {"ru": "К сожалению, этот слот только что заняли. Начните бронирование заново.\n\n",
@@ -343,6 +351,98 @@ class BookingStepHandler(BaseStepHandler):
     def get_free_now(self, days: list | None = None):
         return booking_logic.get_free_windows()
 
+    # ── Gap-free start suggestion ───────────────────────────────────────
+    # A booking that starts later than the field actually frees up leaves a
+    # hole too short to sell. Before the summary we compute the glued-left
+    # equivalent and offer it once, as an option — the client's choice wins.
+
+    _EARLIER_WORDS = ("пораньше", "раньше", "ертерек")
+
+    def _attach_earlier_option(self, params: dict) -> None:
+        """Stash an earlier gap-free start in params, so the summary can offer it."""
+        if params.get("earlier_hint_shown"):
+            return
+        if not all(params.get(k) for k in ("date", "field", "time_start", "time_end")):
+            return
+        try:
+            suggestion = booking_logic.suggest_earlier_start(
+                booking_logic.get_free_windows(),
+                params["date"], params["field"],
+                params["time_start"], params["time_end"],
+            )
+        except Exception:
+            logger.exception("[BOOKING] earlier-start suggestion failed")
+            return
+        if not suggestion:
+            return
+
+        ts, te = suggestion
+        params["earlier_hint_shown"] = True
+        params["earlier_option"] = {"time_start": ts, "time_end": te}
+        logger.info(
+            "[BOOKING] earlier start offered: %s-%s (asked %s-%s) date=%s field=%s",
+            ts, te, params["time_start"], params["time_end"],
+            params["date"], params["field"],
+        )
+
+    def _wants_earlier(self, user_text: str, earlier: dict) -> bool:
+        """True if the reply accepts the earlier start ("с 17", "пораньше", the button)."""
+        low = user_text.lower().strip()
+        ts = earlier["time_start"]
+        hour = ts.split(":")[0].lstrip("0") or "0"
+
+        if ts in low or ts.replace(":", ".") in low:
+            return True
+        if any(w in low for w in self._EARLIER_WORDS):
+            return True
+        if low == hour:
+            return True
+        # "с 17", "в 17", "17-ден" — a bare hour needs a time preposition/suffix,
+        # otherwise "нас будет 17 человек" would silently move the booking.
+        return bool(re.search(
+            rf"(?:^|\s)(?:с|в|от|бастап)\s*{hour}(?![\d:.])"
+            rf"|(?:^|\s){hour}[-–](?:ден|де|ге|дан|дегі)\b",
+            low,
+        ))
+
+    def _apply_earlier_option(self, chat_id: str, params: dict, earlier: dict) -> str:
+        """Move the draft to the earlier start, then re-show the summary."""
+        lang = params.get("lang", "ru")
+        ts, te = earlier["time_start"], earlier["time_end"]
+        params.pop("earlier_option", None)
+
+        week_start, week_end = booking_logic.get_week_range()
+        booked = booking_logic.get_all_booked(week_start, week_end)
+        if not booking_logic.check_range_free(booked, params["date"], ts, te, int(params["field"])):
+            logger.info("[BOOKING] earlier start %s-%s taken meanwhile — keeping original", ts, te)
+            self.save_session(chat_id, "step_confirm", params)
+            return self.builder.format_summary(
+                params, "\n\n" + self.builder.data_localization(lang, "confirm_reshow"),
+                prefix=self.builder.data_localization(lang, "earlier_gone"),
+            )
+
+        params["time_start"], params["time_end"] = ts, te
+        postgres.update_draft(
+            self.builder.bot_name, params["booking_id"], time_start=ts, time_end=te,
+        )
+        logger.info("[BOOKING] earlier start accepted: booking_id=%s -> %s-%s",
+                    params["booking_id"], ts, te)
+        self.save_session(chat_id, "step_confirm", params)
+        return self.builder.format_summary(
+            params, prefix=self.builder.data_localization(lang, "earlier_applied", start=ts),
+        )
+
+    def handle_step_confirm(self, chat_id: str, phone_number_id: str, sender_phone: str,
+                            user_text: str, params: dict, id_type: str) -> str:
+        """Intercept 'start earlier' before the usual yes/no handling."""
+        earlier = params.get("earlier_option")
+        if (earlier and self.check_confirm_message(user_text) != "yes"
+                and self._wants_earlier(user_text, earlier)):
+            return self._apply_earlier_option(chat_id, params, earlier)
+        return super().handle_step_confirm(
+            chat_id, phone_number_id, sender_phone, user_text, params, id_type,
+        )
+
     def handle_step_await_date(self, chat_id: str, sender_phone: str, user_text: str, params: dict) -> str:
         """
         Pre-booking step: the user signalled a booking intent but gave no date.
@@ -381,6 +481,7 @@ class BookingStepHandler(BaseStepHandler):
         params["customer_name"] = user_text.strip()
         logger.info(self.LOGGER_MESSAGES["step_name"], params["customer_name"])
         postgres.update_draft(self.builder.bot_name, params["booking_id"], customer_name=params["customer_name"])
+        self._attach_earlier_option(params)
         self.save_session(chat_id, "step_confirm", params)
         return self.builder.format_summary(params)
 
@@ -576,7 +677,8 @@ class BookingPromptBuilder(BasePromptBuilder):
         lines.append(self.data_localization(lang, "ask_time_example"))
         return "\n".join(lines)
 
-    def format_summary(self, params: dict, append_message : str | None = None) -> str:
+    def format_summary(self, params: dict, append_message: str | None = None,
+                       prefix: str | None = None) -> str:
         append_message = append_message or ""
         lang = params.get("lang", "ru")
         formatted_response = self.data_localization(
@@ -590,7 +692,19 @@ class BookingPromptBuilder(BasePromptBuilder):
             players=params.get("players", "?"),
             name=params.get("customer_name", "?"),
         )
+        buttons = (["Растаймын✅", "Бас тартамын❌"] if lang == "kk"
+                   else ["Подтверждаю✅", "Отмена❌"])
+
+        # Offer the gap-free earlier start as a third button, once.
+        earlier = params.get("earlier_option")
+        hint = ""
+        if earlier:
+            earliest = earlier["time_start"]
+            hint = "\n\n" + self.data_localization(lang, "earlier_hint", earliest=earliest)
+            buttons.insert(1, self.data_localization(
+                lang, "earlier_btn", earliest=earliest, end=earlier["time_end"]))
+
         return self.get_buttons(
-            formatted_response + append_message,
-            ["Растаймын✅", "Бас тартамын❌"] if lang == "kk" else ["Подтверждаю✅", "Отмена❌"]
+            (prefix or "") + formatted_response + hint + append_message,
+            buttons,
         )

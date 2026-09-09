@@ -250,6 +250,56 @@ def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
     return "\n".join(lines)
 
 
+def _to_time(value) -> time:
+    """Accept a time object or an 'HH:MM[:SS]' string, return a time."""
+    if isinstance(value, time):
+        return value
+    return datetime.strptime(str(value)[:5], "%H:%M").time()
+
+
+def _minutes(t: time) -> int:
+    return t.hour * 60 + t.minute
+
+
+def suggest_earlier_start(free_windows: list[dict], date_str: str, field_id: int,
+                          time_start: str, time_end: str) -> tuple[str, str] | None:
+    """Pull a requested range left to the start of its free window.
+
+    Booking 19:00-21:00 on a field that frees up at 17:00 strands a two-hour
+    hole nobody buys. Return the glued-to-the-left equivalent (17:00-19:00) so
+    the bot can offer it as an option.
+
+    Returns None when there is nothing to offer: already glued, the range does
+    not sit inside a single free window, the pull exceeds
+    config.BOOKING_MAX_PULL_MIN, or the range crosses midnight.
+    """
+    if time_start > time_end:  # TRANSITIVE BOOKING: day-crossing, leave alone
+        return None
+
+    req_start = _to_time(time_start)
+    req_end = _to_time(time_end)
+
+    for w in free_windows:
+        if str(w["date"]) != str(date_str) or int(w["field"]) != int(field_id):
+            continue
+        w_start, w_end = _to_time(w["time_start"]), _to_time(w["time_end"])
+        if not (w_start <= req_start and req_end <= w_end):
+            continue
+        if w_start >= req_start:
+            return None  # already starts right after the previous booking
+
+        pull = _minutes(req_start) - _minutes(w_start)
+        if config.BOOKING_MAX_PULL_MIN and pull > config.BOOKING_MAX_PULL_MIN:
+            return None
+
+        duration = _minutes(req_end) - _minutes(req_start)
+        new_end_total = _minutes(w_start) + duration
+        new_end = time(new_end_total // 60, new_end_total % 60)
+        return w_start.strftime("%H:%M"), new_end.strftime("%H:%M")
+
+    return None
+
+
 def find_free_field(booked: list[dict], date_str: str, time_start: str, time_end: str, format_: str) -> int | None:
     """Return a free field id for the given date/time-range/format, or None if all are taken."""
     for f in config.BOOKING_FIELDS:

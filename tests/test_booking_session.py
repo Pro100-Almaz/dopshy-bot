@@ -9,7 +9,7 @@ Run:
 """
 
 import uuid
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from unittest.mock import patch
 
 
@@ -825,3 +825,78 @@ class TestStepConfirm:
 
             assert _booking_state(booking_id) == "awaiting_payment", \
                 f"'{yes_word}' did not confirm — got state {_booking_state(booking_id)}"
+
+
+# ---------------------------------------------------------------------------
+# Earlier-start offer — gap-free start suggested once at the confirm step
+# ---------------------------------------------------------------------------
+
+class TestEarlierStartOffer:
+    """The offer itself is a suggestion: the client's answer always wins."""
+
+    def _params(self, **over):
+        params = {
+            "lang": "ru", "date": "2026-07-06",
+            "time_start": "19:00", "time_end": "21:00",
+            "field": 1, "format": "5x5", "players": 10, "customer_name": "Алмат",
+            "earlier_option": {"time_start": "17:00", "time_end": "19:00"},
+        }
+        params.update(over)
+        return params
+
+    def _handler(self):
+        from handlers.sessions.booking_session import BookingStepHandler
+        bot = list(config.BOT_CONFIGS.values())[0]["name"]
+        return BookingStepHandler(bot)
+
+    def test_summary_offers_the_earlier_start(self):
+        import json
+        bot = list(config.BOT_CONFIGS.values())[0]["name"]
+        msg = json.loads(BookingPromptBuilder(bot).format_summary(self._params()))
+        titles = [b["reply"]["title"] for b in msg["action"]["buttons"]]
+
+        assert "17:00" in msg["body"]["text"]
+        assert "Начать 17:00–19:00" in titles
+        assert all(len(t) <= 20 for t in titles)   # WhatsApp button title limit
+
+    def test_summary_silent_without_option(self):
+        import json
+        bot = list(config.BOT_CONFIGS.values())[0]["name"]
+        params = self._params()
+        params.pop("earlier_option")
+        msg = json.loads(BookingPromptBuilder(bot).format_summary(params))
+
+        assert "Кстати" not in msg["body"]["text"]
+        assert len(msg["action"]["buttons"]) == 2
+
+    def test_accepting_phrasings(self):
+        handler = self._handler()
+        earlier = {"time_start": "17:00", "time_end": "19:00"}
+        for text in ["Начать 17:00–19:00", "давайте с 17", "можно пораньше",
+                     "17", "17:00", "начнем в 17", "17-ден бастайық"]:
+            assert handler._wants_earlier(text, earlier) is True, text
+
+    def test_non_accepting_phrasings(self):
+        """A bare number in another context must never move the booking."""
+        handler = self._handler()
+        earlier = {"time_start": "17:00", "time_end": "19:00"}
+        for text in ["да", "нет", "Подтверждаю✅", "Отмена❌",
+                     "нас будет 17 человек", "не 17, а 19"]:
+            assert handler._wants_earlier(text, earlier) is False, text
+
+    def test_offer_is_attached_once(self):
+        """Second pass must not re-offer — the client is asked exactly once."""
+        handler = self._handler()
+        params = self._params()
+        params.pop("earlier_option")
+        fake = [{"date": date(2026, 7, 6), "time_start": time(17, 0), "time_end": time(23, 0),
+                 "field": 1, "format": "5x5"}]
+
+        with patch("handlers.sessions.booking_session.booking_logic.get_free_windows",
+                   return_value=fake):
+            handler._attach_earlier_option(params)
+            assert params["earlier_option"] == {"time_start": "17:00", "time_end": "19:00"}
+
+            params.pop("earlier_option")
+            handler._attach_earlier_option(params)      # already shown once
+            assert "earlier_option" not in params

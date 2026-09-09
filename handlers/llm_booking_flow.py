@@ -87,6 +87,10 @@ T = {
                              "kk": "❌ Алаң {fid} ({fmt}) бос емес {date} {ts}–{te}."},
     "alternatives":         {"ru": "Доступные варианты:",
                              "kk": "Бос нұсқалар:"},
+    "earlier_hint":         {"ru": "Кстати, поле свободно уже с {earliest} — если удобнее начать пораньше, скажите 🙂",
+                             "kk": "Айтпақшы, алаң {earliest}-ден бастап бос — ертерек бастау ыңғайлы болса, айтыңыз 🙂"},
+    "earlier_btn":          {"ru": "Начать {earliest}–{end}",
+                             "kk": "{earliest}–{end} бастау"},
     "no_free_fields_slot":  {"ru": "Нет свободных полей {date} {ts}–{te}.",
                              "kk": "{date} {ts}–{te} бос алаң жоқ."},
     "available_time":       {"ru": "Доступное время:",
@@ -159,6 +163,12 @@ T = {
 
 
 _FIELD_BTN_RE = re.compile(r'(?:Поле|Алаң)\s*(\d+)\s*\((\S+)\)')
+# Earlier-start button reply, e.g. "Начать 17:00–19:00" / "17:00–19:00 бастау".
+_EARLIER_BTN_RE = re.compile(
+    r'(?:Начать|бастау)[^\d]*(\d{1,2}:\d{2})\s*[–—-]\s*(\d{1,2}:\d{2})'
+    r'|(\d{1,2}:\d{2})\s*[–—-]\s*(\d{1,2}:\d{2})\s*бастау',
+    re.IGNORECASE,
+)
 
 
 class LlmBookingFlowHandler:
@@ -224,6 +234,14 @@ class LlmBookingFlowHandler:
                 data["field"] = fid
                 data["format"] = fmt
 
+        # Earlier-start button reply — both times come from the button itself,
+        # so the shift is applied deterministically rather than via extraction.
+        earlier_btn = _EARLIER_BTN_RE.search(user_message)
+        if earlier_btn:
+            groups = [g for g in earlier_btn.groups() if g]
+            data["time_start"], data["time_end"] = groups[0], groups[1]
+            logger.info("[LLM_FLOW] Earlier-start button: %s-%s", groups[0], groups[1])
+
         # ── 1. Check for an existing draft ────────────────────────────────
         draft = booking_repo.get_existing_draft(phone)
 
@@ -254,6 +272,7 @@ class LlmBookingFlowHandler:
                 )
 
             self.draft_handler.update_draft_in_db(draft["id"], merged)
+            merged["chat_id"] = chat_id
             return self._evaluate_and_respond(merged)
 
         # Create a new draft with whatever data was extracted
@@ -280,6 +299,7 @@ class LlmBookingFlowHandler:
             "booking_id": booking_id,
             "client_token": client_token,
             "lang": lang,
+            "chat_id": chat_id,
         }
 
         return self._evaluate_and_respond(data)

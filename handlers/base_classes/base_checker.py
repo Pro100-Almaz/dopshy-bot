@@ -288,7 +288,48 @@ class BaseChecker:
             f"👤 {data['customer_name']}\n\n"
             f"{self.asker.localize(lang, 'confirm_question')}"
         )
-        return self.buttons.get_buttons(summary, [
+        buttons = [
             self.asker.localize(lang, "confirm_btn"),
             self.asker.localize(lang, "cancel_btn"),
-        ])
+        ]
+
+        # A start later than the field actually frees up leaves a hole too short
+        # to sell — offer the glued-left equivalent once, as an option.
+        earlier = self._earlier_option(data, lang)
+        if earlier:
+            summary += "\n\n" + self.asker.localize(lang, "earlier_hint", earliest=earlier[0])
+            buttons.insert(1, self.asker.localize(
+                lang, "earlier_btn", earliest=earlier[0], end=earlier[1]))
+
+        return self.buttons.get_buttons(summary, buttons)
+
+    # ── Gap-free start suggestion ───────────────────────────────────────
+
+    def _earlier_option(self, data: dict, lang: str) -> tuple[str, str] | None:
+        """Earlier gap-free start for this draft, or None if there is nothing to offer."""
+        if not all(data.get(k) for k in ("date", "field", "time_start", "time_end")):
+            return None
+        try:
+            suggestion = booking_logic.suggest_earlier_start(
+                booking_logic.get_free_windows(),
+                data["date"], data["field"], data["time_start"], data["time_end"],
+            )
+        except Exception:
+            return None
+        if not suggestion or self._earlier_already_offered(data, lang):
+            return None
+        return suggestion
+
+    def _earlier_already_offered(self, data: dict, lang: str) -> bool:
+        """True if this chat was already nudged — the offer is made once, never repeated."""
+        chat_id = data.get("chat_id")
+        if not chat_id:
+            return False
+        marker = self.asker.localize(lang, "earlier_hint", earliest="00:00").split("00:00")[0].strip()
+        if not marker:
+            return False
+        from chat.conversation import get_history
+        return any(
+            marker in (m.get("content") or "")
+            for m in get_history(chat_id) if m.get("role") == "assistant"
+        )

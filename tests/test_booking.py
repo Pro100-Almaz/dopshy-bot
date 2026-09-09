@@ -26,6 +26,7 @@ from integrations.booking import (
     get_all_booked,
     get_free_windows,
     is_range_free,
+    suggest_earlier_start,
 )
 from utils import today_almaty
 
@@ -620,3 +621,72 @@ class TestFreeWindowsIsRangeFreeConsistency:
         booked = get_all_booked(today, today + timedelta(days=6))
 
         assert is_range_free(booked, target_date, "10:00", "11:00", field_id=field_id) is False
+
+
+# ---------------------------------------------------------------------------
+# suggest_earlier_start — pull a request left so no unsellable gap is left
+# ---------------------------------------------------------------------------
+
+class TestSuggestEarlierStart:
+    """Hand-built windows only — no DB needed."""
+
+    D = "2026-07-06"
+
+    def _win(self, start, end, field=1):
+        from datetime import time as dtime
+        h1, m1 = map(int, start.split(":"))
+        h2, m2 = map(int, end.split(":"))
+        return {
+            "date": date(2026, 7, 6),
+            "time_start": dtime(h1, m1),
+            "time_end": dtime(h2, m2),
+            "field": field,
+            "format": "5x5",
+        }
+
+    def test_pulls_request_to_window_start(self):
+        """19:00-21:00 in a window opening at 17:00 becomes 17:00-19:00."""
+        windows = [self._win("17:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("17:00", "19:00")
+
+    def test_pull_keeps_duration_on_half_hour(self):
+        windows = [self._win("17:30", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("17:30", "19:30")
+
+    def test_already_glued_returns_none(self):
+        windows = [self._win("19:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_other_field_is_ignored(self):
+        windows = [self._win("17:00", "23:00", field=2)]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_other_date_is_ignored(self):
+        windows = [self._win("17:00", "23:00")]
+        assert suggest_earlier_start(windows, "2026-07-07", 1, "19:00", "21:00") is None
+
+    def test_request_spanning_two_windows_returns_none(self):
+        """A range that doesn't fit inside one free window is already impossible."""
+        windows = [self._win("17:00", "20:00"), self._win("21:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_pull_beyond_cap_returns_none(self, monkeypatch):
+        monkeypatch.setattr(config, "BOOKING_MAX_PULL_MIN", 60)
+        windows = [self._win("17:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_cap_zero_means_unlimited(self, monkeypatch):
+        monkeypatch.setattr(config, "BOOKING_MAX_PULL_MIN", 0)
+        windows = [self._win("09:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("09:00", "11:00")
+
+    def test_day_crossing_request_is_left_alone(self):
+        """TRANSITIVE BOOKING: 23:00-01:00 must not be pulled."""
+        windows = [self._win("17:00", "23:59")]
+        assert suggest_earlier_start(windows, self.D, 1, "23:00", "01:00") is None
+
+    def test_accepts_string_times_in_windows(self):
+        windows = [self._win("17:00", "23:00")]
+        windows[0]["time_start"] = "17:00:00"
+        windows[0]["time_end"] = "23:00:00"
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("17:00", "19:00")
