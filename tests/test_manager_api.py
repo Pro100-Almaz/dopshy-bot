@@ -482,3 +482,94 @@ def test_contacts_can_be_paginated(client, monkeypatch):
     assert data["total_pages"] == 2
     assert [row["phone"] for row in data["data"]] == ["77000000003", "77000000004"]
     assert data["data"][0]["paused"] is True
+
+
+@pytest.mark.no_db
+def test_contacts_filter_by_arena_bot_type(client, monkeypatch):
+    calls = {}
+
+    def fake_conversation_contacts(phone_number_id=None):
+        calls["phone_number_id"] = phone_number_id
+        return [{"chat_id": f"{phone_number_id}:77000000001", "updated_at": "2026-08-29 10:00:00"}]
+
+    monkeypatch.setattr("blueprints.manager_api._list_conversation_contacts", fake_conversation_contacts)
+    monkeypatch.setattr(
+        "blueprints.manager_api.repo.get_booking_customers",
+        lambda: [{"phone": "77000000002", "customer_name": "Arena Client", "last_at": "2026-08-28 10:00:00"}],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.academy_repo.get_academy_customers",
+        lambda group_type: pytest.fail("arena contacts should not query academy customers"),
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {phone: {"paused": False, "paused_reason": None} for phone in phones},
+    )
+
+    r = client.get("/api/manager/contacts?bot_type=arena", headers=_HDR)
+
+    assert r.status_code == 200
+    assert calls["phone_number_id"] == config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
+    assert [row["phone"] for row in r.get_json()] == ["77000000001", "77000000002"]
+
+
+@pytest.mark.no_db
+def test_contacts_filter_by_academy_bot_type(client, monkeypatch):
+    calls = {}
+
+    def fake_conversation_contacts(phone_number_id=None):
+        calls["phone_number_id"] = phone_number_id
+        return [{"chat_id": f"{phone_number_id}:77000000003", "updated_at": "2026-08-29 10:00:00"}]
+
+    def fake_academy_customers(group_type):
+        calls["group_type"] = group_type
+        return [{"phone": "77000000004", "customer_name": "Academy Client", "last_at": "2026-08-28 10:00:00"}]
+
+    monkeypatch.setattr("blueprints.manager_api._list_conversation_contacts", fake_conversation_contacts)
+    monkeypatch.setattr(
+        "blueprints.manager_api.repo.get_booking_customers",
+        lambda: pytest.fail("academy contacts should not query booking customers"),
+    )
+    monkeypatch.setattr("blueprints.manager_api.academy_repo.get_academy_customers", fake_academy_customers)
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {phone: {"paused": False, "paused_reason": None} for phone in phones},
+    )
+
+    r = client.get("/api/manager/contacts?bot_type=boxing_academy", headers=_HDR)
+
+    assert r.status_code == 200
+    assert calls["phone_number_id"] == config.WHATSAPP_PHONE_NUMBER_ID_BOT_3
+    assert calls["group_type"] == "boxing"
+    assert [row["phone"] for row in r.get_json()] == ["77000000003", "77000000004"]
+
+
+@pytest.mark.no_db
+def test_contacts_reject_invalid_bot_type(client):
+    r = client.get("/api/manager/contacts?bot_type=bad", headers=_HDR)
+
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "INVALID"
+
+
+@pytest.mark.no_db
+def test_messaging_switch_uses_requested_bot_type(client, monkeypatch):
+    calls = {}
+
+    def fake_set_ycloud_enabled(enabled=None, actor="", bot_name="arena"):
+        calls["enabled"] = enabled
+        calls["bot_name"] = bot_name
+        return bool(enabled)
+
+    monkeypatch.setattr("blueprints.manager_api.postgres.set_ycloud_enabled", fake_set_ycloud_enabled)
+
+    r = client.post(
+        "/api/manager/change_messaging_enabled",
+        headers=_HDR,
+        json={"bot_type": "football_academy", "enabled": False},
+    )
+
+    assert r.status_code == 200
+    assert r.get_json() == {"bot_type": "football_academy", "is_enabled": False}
+    assert calls["enabled"] is False
+    assert calls["bot_name"] == "football_academy"

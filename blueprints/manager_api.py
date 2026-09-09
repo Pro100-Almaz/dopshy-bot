@@ -24,6 +24,7 @@ from flask import Blueprint, jsonify, request
 import config
 from integrations import apipay_client, apipay_service, booking_service, client_notify
 from integrations.apipay_client import ApiPayError, KaspiClientMissing
+from integrations.repo import academy_repo
 from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
     create_or_update_group, on_manual_group_edit, on_manual_group_schedule_edit
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
@@ -49,6 +50,27 @@ _STATE_NOTIFICATIONS = {
     "confirmed": "manager_confirmed",
     "cancelled": "manager_cancelled",
     "unpaid": "manager_unpaid",
+}
+
+_CONTACT_BOT_TYPES = {
+    "arena": {
+        "ycloud_bot_name": "arena",
+        "app_bot_name": "dopsy_bot",
+        "phone_number_id": config.WHATSAPP_PHONE_NUMBER_ID_BOT_1,
+        "group_type": None,
+    },
+    "football_academy": {
+        "ycloud_bot_name": "football_academy",
+        "app_bot_name": "dopsy_fs_school",
+        "phone_number_id": config.WHATSAPP_PHONE_NUMBER_ID_BOT_2,
+        "group_type": "football",
+    },
+    "boxing_academy": {
+        "ycloud_bot_name": "boxing_academy",
+        "app_bot_name": "dopsy_boxing",
+        "phone_number_id": config.WHATSAPP_PHONE_NUMBER_ID_BOT_3,
+        "group_type": "boxing",
+    },
 }
 
 _rate_lock = threading.Lock()
@@ -242,6 +264,32 @@ def _page_args() -> tuple[int, int, int]:
         page_size = config.PAGE_SIZE
     page_size = max(1, min(page_size, 100))
     return page, page_size, (page - 1) * page_size
+
+
+def _contact_bot_type_arg() -> tuple[dict | None, tuple | None]:
+    bot_type = request.args.get("bot_type")
+    if bot_type is None or bot_type == "":
+        return None, None
+    cfg = _CONTACT_BOT_TYPES.get(bot_type)
+    if cfg is None:
+        return None, (jsonify({
+            "ok": False,
+            "code": "INVALID",
+            "message": "bot_type must be arena, football_academy, or boxing_academy.",
+        }), 400)
+    return cfg, None
+
+
+def _bot_type_config(bot_type: str | None) -> tuple[dict | None, tuple | None]:
+    bot_type = bot_type or "arena"
+    cfg = _CONTACT_BOT_TYPES.get(bot_type)
+    if cfg is None:
+        return None, (jsonify({
+            "ok": False,
+            "code": "INVALID",
+            "message": "bot_type must be arena, football_academy, or boxing_academy.",
+        }), 400)
+    return cfg, None
 
 
 def _paginated(rows: list[dict], total: int, page: int, page_size: int):
@@ -1058,6 +1106,10 @@ def list_contacts():
     For compatibility, requests without either pagination parameter still return
     the legacy bare list.
     """
+    bot_cfg, error = _contact_bot_type_arg()
+    if error:
+        return error
+
     wants_pagination = "page" in request.args or "page_size" in request.args
     page, page_size, offset = _page_args()
     contacts: dict[str, dict] = {}
@@ -1101,7 +1153,13 @@ def list_contacts():
             entry["last_activity"] = dt.isoformat()
 
     # WhatsApp texters — sender phone is the part after the last ':' in chat_id.
-    for row in _list_conversation_contacts():
+    phone_number_id = bot_cfg["phone_number_id"] if bot_cfg else None
+    conversation_rows = (
+        _list_conversation_contacts(phone_number_id)
+        if phone_number_id
+        else _list_conversation_contacts()
+    )
+    for row in conversation_rows:
         sender = str(row.get("chat_id", "")).rsplit(":", 1)[-1]
         entry = _touch(sender)
         if entry is None:
@@ -1109,8 +1167,14 @@ def list_contacts():
         entry["texted"] = True
         _bump_activity(entry, row.get("updated_at"))
 
-    # Booking customers.
-    for row in repo.get_booking_customers():
+    # Customers persisted by the selected bot's domain tables.
+    group_type = bot_cfg["group_type"] if bot_cfg else None
+    db_rows = (
+        academy_repo.get_academy_customers(group_type)
+        if group_type
+        else repo.get_booking_customers()
+    )
+    for row in db_rows:
         entry = _touch(row.get("phone"))
         if entry is None:
             continue
@@ -1142,18 +1206,32 @@ def list_contacts():
 
 @manager_api.get("/api/manager/is_messaging_enabled")
 def is_messaging_enabled():
-    return jsonify({"is_enabled": postgres.is_ycloud_enabled()}), 200
+    bot_cfg, error = _bot_type_config(request.args.get("bot_type"))
+    if error:
+        return error
+    return jsonify({
+        "is_enabled": postgres.is_ycloud_enabled(bot_cfg["ycloud_bot_name"]),
+        "bot_type": request.args.get("bot_type") or "arena",
+    }), 200
 
 
 @manager_api.post("/api/manager/change_messaging_enabled")
 def change_enabledness():
     body = request.get_json(silent=True) or {}
+    bot_type = body.get("bot_type") or request.args.get("bot_type")
+    bot_cfg, error = _bot_type_config(bot_type)
+    if error:
+        return error
     enabled = body.get("enabled")
     if enabled is not None and not isinstance(enabled, bool):
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "enabled must be a boolean."}), 400
 
-    new_state = postgres.set_ycloud_enabled(enabled, actor=_api_key_actor())
-    logger.info("[BOT SWITCH] messaging %s by %s",
-                "enabled" if new_state else "disabled", _api_key_actor())
-    return jsonify({"is_enabled": new_state}), 200
+    new_state = postgres.set_ycloud_enabled(
+        enabled,
+        actor=_api_key_actor(),
+        bot_name=bot_cfg["ycloud_bot_name"],
+    )
+    logger.info("[BOT SWITCH] %s messaging %s by %s",
+                bot_type or "arena", "enabled" if new_state else "disabled", _api_key_actor())
+    return jsonify({"is_enabled": new_state, "bot_type": bot_type or "arena"}), 200

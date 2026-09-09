@@ -230,15 +230,22 @@ def delete_session(bot_name: str, chat_id: str) -> None:
 #  Webhook enabledness
 # ---------------------------------------------------------------------------
 
-def is_ycloud_enabled() -> bool:
+def is_ycloud_enabled(bot_name: str = "arena") -> bool:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT is_enabled FROM ycloud_enabled WHERE id = 1")
+            cur.execute(
+                "SELECT is_enabled FROM ycloud_enabled WHERE bot_name = %s",
+                (bot_name,),
+            )
             row = cur.fetchone()
             return row["is_enabled"] if row else True
 
 
-def set_ycloud_enabled(enabled: bool | None = None, actor: str = "") -> bool:
+def set_ycloud_enabled(
+    enabled: bool | None = None,
+    actor: str = "",
+    bot_name: str = "arena",
+) -> bool:
     if enabled is None:
         value_expr, params = "NOT is_enabled", (actor,)
     else:
@@ -249,13 +256,13 @@ def set_ycloud_enabled(enabled: bool | None = None, actor: str = "") -> bool:
             cur.execute(
                 f"UPDATE ycloud_enabled SET is_enabled = {value_expr}, "
                 f"updated_at = NOW(), updated_by = %s "
-                f"WHERE id = 1 RETURNING is_enabled",
-                params,
+                f"WHERE bot_name = %s RETURNING is_enabled",
+                (*params, bot_name),
             )
             row = cur.fetchone()
 
     if row is None:
         raise RuntimeError(
-            "ycloud_enabled has no id = 1 row — migration 035 has not been applied"
+            f"ycloud_enabled has no row for bot_name={bot_name!r} — run migrations and seeds"
         )
     return row["is_enabled"]
