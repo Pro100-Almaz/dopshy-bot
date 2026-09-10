@@ -728,6 +728,47 @@ def get_users_by_type(group_type: str | None = None) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
+def get_academy_customers(group_type: str) -> list[dict]:
+    """Distinct academy contacts for one sport, with latest known activity."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                WITH contacts AS (
+                    SELECT
+                        t.phone,
+                        t.child_name AS customer_name,
+                        GREATEST(t.created_at, COALESCE(t.updated_at, t.created_at)) AS last_at
+                    FROM academy_trials t
+                    JOIN academy_groups g ON g.id = t.group_id
+                    WHERE g.group_type = %s
+                      AND t.phone IS NOT NULL
+                      AND t.phone <> ''
+
+                    UNION ALL
+
+                    SELECT
+                        u.parent_phone AS phone,
+                        u.child_name AS customer_name,
+                        GREATEST(u.created_at, COALESCE(u.updated_at, u.created_at)) AS last_at
+                    FROM academy_users u
+                    JOIN academy_groups g ON g.id = u.assigned_group_id
+                    WHERE g.group_type = %s
+                      AND u.parent_phone IS NOT NULL
+                      AND u.parent_phone <> ''
+                )
+                SELECT
+                    phone,
+                    MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
+                    MAX(last_at) AS last_at
+                FROM contacts
+                GROUP BY phone
+                """,
+                (group_type, group_type),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
 def update_trial_attended(trial_id: int, attended: bool) -> dict | None:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

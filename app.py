@@ -223,6 +223,19 @@ _scheduler.add_job(
 _scheduler.start()
 
 
+def _bot_type_for_phone_number_id(phone_number_id: str | None) -> str:
+    if phone_number_id == config.WHATSAPP_PHONE_NUMBER_ID_BOT_2:
+        return "football_academy"
+    if phone_number_id == config.WHATSAPP_PHONE_NUMBER_ID_BOT_3:
+        return "boxing_academy"
+    return "arena"
+
+
+def _bot_type_for_ycloud_business_phone(phone: str | None) -> str:
+    phone_number_id = config.get_phone_number_id_for_ycloud_from(phone)
+    return _bot_type_for_phone_number_id(phone_number_id)
+
+
 # ---------------------------------------------------------------------------
 # Webhook verification (GET)
 # ---------------------------------------------------------------------------
@@ -289,9 +302,6 @@ def receive_ycloud_message():
     Process each message in a background thread so we return 200 fast
     (Meta requires a 200 response within 20 seconds or it retries).
     """
-    if not postgres.is_ycloud_enabled():
-        return jsonify({"status": "ignored"}), 200
-
     payload = request.get_json(silent=True)
     logger.info("[YCLOUD] webhook received type=%s", (payload or {}).get("type"))
     if not payload:
@@ -302,6 +312,11 @@ def receive_ycloud_message():
     # until a manager turns it back on from the UI.
     if payload.get("type") == "whatsapp.smb.message.echoes":
         customer_phone = (payload.get("whatsappMessage") or {}).get("to")
+        bot_type = _bot_type_for_ycloud_business_phone(
+            (payload.get("whatsappMessage") or {}).get("from")
+        )
+        if not postgres.is_ycloud_enabled(bot_type):
+            return jsonify({"status": "ignored"}), 200
         if customer_phone:
             try:
                 set_bot_paused(customer_phone, True, reason="auto")
@@ -323,6 +338,9 @@ def receive_ycloud_message():
             data.customer.phone,
             data.business.phone,
         )
+        bot_type = _bot_type_for_ycloud_business_phone(data.business.phone)
+        if not postgres.is_ycloud_enabled(bot_type):
+            return jsonify({"status": "ignored"}), 200
         # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
         # if data.customer.phone not in ['+77072479672']:
         #     logger.info({f'IGNORED phone number {data.customer.phone}'})
