@@ -840,36 +840,35 @@ def refresh_academy_groups():
     return jsonify({"ok": True}), 200
 
 
-@manager_api.post("/api/manager/academy_groups")
-def create_academy_group_with_time():
-    # make current capacity 0 by default
-    # this function should receive the payload --> create a grouping and schedule row. Schedule should reveive
-    # this group's id as a Foreign Key
-
-    body = request.get_json(silent=True) or {}
-    schedules = body.get("schedules")
+def _normalize_academy_group_schedules(body: dict) -> tuple[list[dict] | None, tuple | None]:
+    schedules = body.get("training_days")
+    if schedules is None:
+        schedules = body.get("schedules")
     if schedules is None:
         schedules = [{
             "training_day": body.get("training_day"),
+            "training_day_value": body.get("training_day_value"),
             "time_start": body.get("time_start"),
             "time_end": body.get("time_end"),
+            "start_time": body.get("start_time"),
+            "end_time": body.get("end_time"),
+            "field": body.get("field"),
         }]
 
-    required = ("group_type", "group_name", "max_cap")
-
-    if not all(body.get(k) for k in required) or not isinstance(schedules, list) or not schedules:
-        return jsonify({"ok": False, "code": "INVALID",
-                        "message": "group_type, group_name, max_cap and at least one schedule are required."}), 400
+    if not isinstance(schedules, list) or not schedules:
+        return None, (jsonify({"ok": False, "code": "INVALID",
+                               "message": "at least one training day is required."}), 400)
 
     normalized_schedules = []
+    seen = set()
     for schedule in schedules:
-        if not isinstance(schedule, dict) or not all(schedule.get(k) for k in ("training_day", "time_start", "time_end")):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "each schedule needs training_day, time_start, time_end."}), 400
+        if not isinstance(schedule, dict):
+            return None, (jsonify({"ok": False, "code": "INVALID",
+                                   "message": "each training day must be an object."}), 400)
         try:
-            training_day = int(schedule["training_day"])
-            time_start = str(schedule["time_start"])[:5]
-            time_end = str(schedule["time_end"])[:5]
+            training_day = int(schedule.get("training_day_value", schedule.get("training_day")))
+            time_start = str(schedule.get("start_time", schedule.get("time_start")))[:5]
+            time_end = str(schedule.get("end_time", schedule.get("time_end")))[:5]
             field = schedule.get("field")
             field = int(field) if field not in (None, "") else None
             if training_day < 0 or training_day > 6:
@@ -879,14 +878,39 @@ def create_academy_group_with_time():
             if datetime.strptime(time_start, "%H:%M") >= datetime.strptime(time_end, "%H:%M"):
                 raise ValueError("time")
         except (TypeError, ValueError):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "invalid schedule day/time."}), 400
+            return None, (jsonify({"ok": False, "code": "INVALID",
+                                   "message": "invalid training day/time."}), 400)
+        key = (training_day, time_start, time_end)
+        if key in seen:
+            return None, (jsonify({"ok": False, "code": "INVALID",
+                                   "message": "duplicate training day/time."}), 400)
+        seen.add(key)
         normalized_schedules.append({
             "training_day": training_day,
             "time_start": time_start,
             "time_end": time_end,
             "field": field,
         })
+
+    return normalized_schedules, None
+
+
+@manager_api.post("/api/manager/academy_groups")
+def create_academy_group_with_time():
+    # make current capacity 0 by default
+    # this function should receive the payload --> create a grouping and schedule row. Schedule should reveive
+    # this group's id as a Foreign Key
+
+    body = request.get_json(silent=True) or {}
+    normalized_schedules, error = _normalize_academy_group_schedules(body)
+    if error:
+        return error
+
+    required = ("group_type", "group_name", "max_cap")
+
+    if not all(body.get(k) for k in required):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "group_type, group_name, max_cap and at least one schedule are required."}), 400
 
     group_id = create_or_update_group(
         group_name = body['group_name'],
@@ -928,8 +952,6 @@ def create_academy_group_with_time():
         'ok' : True,
         'data' : {
             'group_id' : group_id,
-            "schedules": created_schedules,
-            "schedule_id": created_schedules[0]["schedule_id"] if created_schedules else None,
         }
     }), 201
 
@@ -952,6 +974,7 @@ def edit_academy_group(group_id: int):
     shift = body.get("shift")
     trainer = body.get("trainer")
     is_active = body.get("is_active")
+    replace_schedules = "training_days" in body or "schedules" in body
 
     if max_cap is not None:
         max_cap = int(max_cap)
@@ -1000,7 +1023,15 @@ def edit_academy_group(group_id: int):
         if not group_res["ok"]:
             return jsonify(group_res), 400 if group_res.get("code") == "INVALID_LEVEL" else 404
 
-    if time_start is not None or time_end is not None or previous_training_day is not None or field is not None:
+    if replace_schedules:
+        schedules, error = _normalize_academy_group_schedules(body)
+        if error:
+            return error
+        rows = academy_repo.replace_group_schedules(group_id, schedules)
+        if rows is None:
+            return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Group not found"}), 404
+        schedule_res = {"ok": True, "schedules": rows}
+    elif time_start is not None or time_end is not None or previous_training_day is not None or field is not None:
         if training_day is None and previous_training_day is None:
             return jsonify({
                 "ok": False,
@@ -1036,11 +1067,7 @@ def edit_academy_group(group_id: int):
         }), 400
 
     refresh_all_groups()
-    return jsonify({
-        "ok": True,
-        "group_id": group_id,
-        "schedule": _serialize(schedule_res) if schedule_res else None,
-    }), 200
+    return jsonify({"ok": True, "data": {"group_id": group_id}}), 200
 
 
 @manager_api.post("/api/manager/academy_groups/<int:group_id>")
@@ -1049,7 +1076,31 @@ def delete_academy_group(group_id: int):
     if res["ok"]:
         refresh_all_groups()
 
-    return jsonify(res), (200 if res["ok"] else 404)
+    if not res["ok"]:
+        return jsonify(res), 404
+    return jsonify({"ok": True}), 200
+
+
+@manager_api.delete("/api/manager/academy_groups/<int:group_id>")
+def delete_academy_group_delete(group_id: int):
+    return delete_academy_group(group_id)
+
+
+@manager_api.post("/api/manager/academy_groups/<int:group_id>/students")
+def assign_academy_student_to_group(group_id: int):
+    body = request.get_json(silent=True) or {}
+    if body.get("student_id") is None:
+        return jsonify({"ok": False, "code": "INVALID", "message": "student_id is required."}), 400
+    try:
+        student_id = int(body["student_id"])
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "code": "INVALID", "message": "student_id must be an integer."}), 400
+
+    student = academy_repo.assign_user_to_group(student_id, group_id)
+    if not student:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Student or group not found."}), 404
+    refresh_all_trials()
+    return jsonify({"ok": True}), 200
 
 # ------------TRIALS
 
