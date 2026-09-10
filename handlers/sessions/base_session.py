@@ -96,8 +96,7 @@ class BasePromptBuilder:
                  self.data_localization(lang, "ask_time_header")]
         return lines
 
-    def format_summary(self, params: dict, append_message: str | None = None,
-                       prefix: str | None = None) -> str:
+    def format_summary(self, params: dict, append_message: str | None = None) -> str:
         return ""
 
     @staticmethod
