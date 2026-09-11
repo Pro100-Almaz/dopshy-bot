@@ -1,14 +1,17 @@
 """Tests for the academy/boxing manager API blueprint."""
 
+import pytest
 from flask import Flask
 
 import config
+from blueprints.academy_api import academy_api
 from blueprints.manager_api import manager_api
 from blueprints.manager_boxing_api import manager_boxing_api
 
 
 _KEY = "test-key"
 _HDR = {"X-API-Key": _KEY}
+pytestmark = pytest.mark.no_db
 
 
 def _trial_row(**overrides):
@@ -42,6 +45,8 @@ def _user_row(**overrides):
         "total_trials": 1,
         "assigned_group_id": 3,
         "subscribed": False,
+        "experience": "Beginner",
+        "school_shift": "morning",
     }
     row.update(overrides)
     return row
@@ -52,6 +57,14 @@ def _app():
     app = Flask(__name__)
     app.register_blueprint(manager_api)
     app.register_blueprint(manager_boxing_api)
+    return app
+
+
+def _academy_app():
+    config.X_SERVICE_TOKEN = _KEY
+    app = Flask(__name__)
+    app.register_blueprint(manager_api)
+    app.register_blueprint(academy_api)
     return app
 
 
@@ -252,6 +265,143 @@ def test_get_user_detail_with_trials(monkeypatch):
     assert data["data"]["trials"][0]["trial_id"] == 31
 
 
+def test_create_academy_user(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
+    monkeypatch.setattr(
+        "blueprints.manager_boxing_api.academy_repo.get_group_by_id",
+        lambda group_id: {"id": group_id, "group_type": "football"},
+    )
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _user_row(
+            id=15,
+            child_name=kwargs["child_name"],
+            child_birth_year=kwargs["child_birth_year"],
+            assigned_group_id=kwargs["assigned_group_id"],
+        )
+
+    monkeypatch.setattr("blueprints.manager_boxing_api.academy_repo.create_user", fake_create)
+
+    r = _app().test_client().post(
+        "/api/manager/academy_users",
+        json={"name": "Dias", "birth_year": "2016", "assigned_group_id": 3},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 201
+    assert captured["child_name"] == "Dias"
+    assert captured["child_birth_year"] == 2016
+    assert captured["assigned_group_id"] == 3
+    data = r.get_json()
+    assert data["ok"]
+    assert data["data"]["id"] == 15
+    assert data["data"]["name"] == "Dias"
+
+
+def test_create_academy_user_without_group(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _user_row(id=16, child_name=kwargs["child_name"], assigned_group_id=None)
+
+    monkeypatch.setattr("blueprints.manager_boxing_api.academy_repo.create_user", fake_create)
+
+    r = _app().test_client().post(
+        "/api/manager/academy_users",
+        json={"name": "Unassigned"},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 201
+    assert captured == {"child_name": "Unassigned"}
+    data = r.get_json()
+    assert data["data"]["assigned_group_id"] == ""
+
+
+def test_create_academy_user_rejects_missing_group(monkeypatch):
+    monkeypatch.setattr("blueprints.manager_boxing_api.academy_repo.get_group_by_id", lambda group_id: None)
+
+    r = _app().test_client().post(
+        "/api/manager/academy_users",
+        json={"name": "Dias", "assigned_group_id": 999},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 404
+    assert r.get_json()["code"] == "NOT_FOUND"
+
+
+def test_patch_academy_user(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
+
+    def fake_update(user_id, **kwargs):
+        captured["user_id"] = user_id
+        captured.update(kwargs)
+        return _user_row(id=user_id, child_name=kwargs["child_name"], school_shift=kwargs["school_shift"])
+
+    monkeypatch.setattr("blueprints.manager_boxing_api.academy_repo.update_user", fake_update)
+
+    r = _app().test_client().patch(
+        "/api/manager/academy_users/7",
+        json={"name": "Ali Updated", "school_shift": "afternoon"},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert captured == {"user_id": 7, "child_name": "Ali Updated", "school_shift": "afternoon"}
+    data = r.get_json()
+    assert data["data"]["name"] == "Ali Updated"
+    assert data["data"]["school_shift"] == "afternoon"
+
+
+def test_assign_academy_user(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
+
+    def fake_assign(user_id, group_id):
+        captured["user_id"] = user_id
+        captured["group_id"] = group_id
+        return _user_row(id=user_id, assigned_group_id=group_id)
+
+    monkeypatch.setattr("blueprints.manager_boxing_api.academy_repo.assign_user_to_group", fake_assign)
+
+    r = _app().test_client().patch(
+        "/api/manager/academy_users/7/assignment",
+        json={"group_id": "3"},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert captured == {"user_id": 7, "group_id": 3}
+    assert r.get_json()["data"]["assigned_group_id"] == 3
+
+
+def test_deassign_academy_user_from_sport(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
+
+    def fake_deassign(user_id, group_type=None):
+        captured["user_id"] = user_id
+        captured["group_type"] = group_type
+        return _user_row(id=user_id, assigned_group_id=None)
+
+    monkeypatch.setattr("blueprints.manager_boxing_api.academy_repo.deassign_user_from_group", fake_deassign)
+
+    r = _app().test_client().delete(
+        "/api/manager/academy_users/7/assignment?group_type=football",
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert captured == {"user_id": 7, "group_type": "football"}
+    assert r.get_json()["data"]["assigned_group_id"] == ""
+
+
 def test_boxing_patch_user_subscribed_updates(monkeypatch):
     monkeypatch.setattr("blueprints.manager_boxing_api.refresh_all_trials", lambda: None)
     monkeypatch.setattr(
@@ -270,3 +420,67 @@ def test_boxing_patch_user_subscribed_updates(monkeypatch):
     assert data["ok"]
     assert data["data"]["id"] == 7
     assert data["data"]["subscribed"] is True
+
+
+def test_sport_student_create_rejects_group_from_other_sport(monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.academy_api.academy_repo.get_group_by_id",
+        lambda group_id: {"id": group_id, "group_type": "boxing"},
+    )
+
+    r = _academy_app().test_client().post(
+        "/api/football/students",
+        json={"name": "Dias", "assigned_group_id": 3},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 404
+    assert r.get_json()["code"] == "NOT_FOUND"
+
+
+def test_sport_student_create_requires_group():
+    r = _academy_app().test_client().post(
+        "/api/football/students",
+        json={"name": "Dias"},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "INVALID"
+
+
+def test_sport_student_assign_rejects_group_from_other_sport(monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.academy_api.academy_repo.get_group_by_id",
+        lambda group_id: {"id": group_id, "group_type": "boxing"},
+    )
+
+    r = _academy_app().test_client().patch(
+        "/api/football/students/7/assignment",
+        json={"group_id": 3},
+        headers=_HDR,
+    )
+
+    assert r.status_code == 404
+    assert r.get_json()["code"] == "NOT_FOUND"
+
+
+def test_sport_student_deassign(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("blueprints.academy_api.refresh_all_trials", lambda: None)
+
+    def fake_deassign(user_id, group_type=None):
+        captured["user_id"] = user_id
+        captured["group_type"] = group_type
+        return _user_row(id=user_id, assigned_group_id=None)
+
+    monkeypatch.setattr("blueprints.academy_api.academy_repo.deassign_user_from_group", fake_deassign)
+
+    r = _academy_app().test_client().delete(
+        "/api/football/students/7/assignment",
+        headers=_HDR,
+    )
+
+    assert r.status_code == 200
+    assert captured == {"user_id": 7, "group_type": "football"}
+    assert r.get_json()["data"]["student"]["assigned_group_id"] is None
