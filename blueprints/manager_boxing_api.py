@@ -1,7 +1,9 @@
 """Manager endpoints for academy/boxing frontend views."""
 
+import psycopg2.errors
 from flask import Blueprint, jsonify, request
 
+from blueprints.academy_user_payload import normalize_user_payload
 from blueprints.manager_api import _authenticate, _serialize
 from integrations.repo import academy_repo
 from integrations.sheets.trial_sheets import WEEKDAY_RU, _HEADERS, _STATES_RUSSIAN, refresh_all_trials
@@ -21,6 +23,10 @@ def _not_found(message: str):
 
 def _invalid(message: str):
     return jsonify({"ok": False, "code": "INVALID", "message": message}), 400
+
+
+def _conflict(message: str):
+    return jsonify({"ok": False, "code": "CONFLICT", "message": message}), 409
 
 
 def _group_type_arg() -> tuple[str | None, tuple | None]:
@@ -67,6 +73,8 @@ def _trial_user(row: dict) -> dict | None:
         "total_trials": row.get("user_total_trials"),
         "assigned_group_id": row.get("user_assigned_group_id"),
         "subscribed": row.get("user_subscribed"),
+        "experience": row.get("user_experience"),
+        "school_shift": row.get("user_school_shift"),
     }
 
 
@@ -107,6 +115,8 @@ def _academy_user(row: dict) -> dict:
         "total_trials": row.get("total_trials"),
         "assigned_group_id": row.get("assigned_group_id"),
         "subscribed": row.get("subscribed"),
+        "experience": row.get("experience"),
+        "school_shift": row.get("school_shift"),
     }
 
 
@@ -116,6 +126,26 @@ def _required_bool(field: str) -> tuple[bool | None, tuple | None]:
     if not isinstance(value, bool):
         return None, _invalid(f"{field} must be a boolean.")
     return value, None
+
+
+def _required_int_body(field: str) -> tuple[int | None, tuple | None]:
+    body = request.get_json(silent=True) or {}
+    value = body.get(field)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None, _invalid(f"{field} must be an integer.")
+    return value, None
+
+
+def _validate_assigned_group(patch: dict) -> tuple[dict | None, tuple | None]:
+    group_id = patch.get("assigned_group_id")
+    if group_id is None:
+        return None, None
+    group = academy_repo.get_group_by_id(group_id)
+    if not group:
+        return None, _not_found("Group not found.")
+    return group, None
 
 
 @manager_boxing_api.get("/api/manager/academy_groups")
@@ -150,6 +180,8 @@ def get_group_trials(group_id: int):
                 "total_trials",
                 "assigned_group_id",
                 "subscribed",
+                "experience",
+                "school_shift",
             ],
             "trial_headers": _HEADERS["trials"],
             "users": [_serialize(_academy_user(user)) for user in users],
@@ -194,9 +226,30 @@ def list_academy_users():
             "total_trials",
             "assigned_group_id",
             "subscribed",
+            "experience",
+            "school_shift",
         ],
         "users": [_serialize(_academy_user(user)) for user in users],
     })
+
+
+@manager_boxing_api.post("/api/manager/academy_users")
+def create_academy_user():
+    body = request.get_json(silent=True) or {}
+    patch, error = normalize_user_payload(body, creating=True)
+    if error:
+        return _invalid(error)
+    _, group_error = _validate_assigned_group(patch)
+    if group_error:
+        return group_error
+
+    try:
+        user = academy_repo.create_user(**patch)
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("User already exists for this phone, name, and group.")
+
+    refresh_all_trials()
+    return jsonify({"ok": True, "data": _serialize(_academy_user(user))}), 201
 
 
 @manager_boxing_api.get("/api/manager/academy_users/<int:user_id>")
@@ -211,6 +264,62 @@ def get_academy_user(user_id: int):
         "trial_headers": _HEADERS["trials"],
         "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
     })
+
+
+@manager_boxing_api.patch("/api/manager/academy_users/<int:user_id>")
+def patch_academy_user(user_id: int):
+    body = request.get_json(silent=True) or {}
+    patch, error = normalize_user_payload(body, creating=False)
+    if error:
+        return _invalid(error)
+    _, group_error = _validate_assigned_group(patch)
+    if group_error:
+        return group_error
+
+    try:
+        user = academy_repo.update_user(user_id, **patch)
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("User already exists for this phone, name, and group.")
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))
+
+
+@manager_boxing_api.patch("/api/manager/academy_users/<int:user_id>/assignment")
+def assign_academy_user(user_id: int):
+    group_id, error = _required_int_body("group_id")
+    if error:
+        return error
+
+    try:
+        user = academy_repo.assign_user_to_group(user_id, group_id)
+    except ValueError as exc:
+        if str(exc) == "GROUP_NOT_FOUND":
+            return _not_found("Group not found.")
+        raise
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("User already exists for this phone, name, and group.")
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))
+
+
+@manager_boxing_api.delete("/api/manager/academy_users/<int:user_id>/assignment")
+def deassign_academy_user(user_id: int):
+    group_type = request.args.get("group_type")
+    if group_type not in (None, "football", "boxing"):
+        return _invalid("group_type must be football or boxing.")
+
+    user = academy_repo.deassign_user_from_group(user_id, group_type)
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))
 
 
 @manager_boxing_api.patch("/api/manager/academy_trials/<int:trial_id>/attended")

@@ -4,8 +4,10 @@ from datetime import date, datetime
 from decimal import Decimal
 import uuid
 
+import psycopg2.errors
 from flask import Blueprint, jsonify, request
 
+from blueprints.academy_user_payload import normalize_user_payload
 from blueprints.manager_api import _authenticate
 from integrations.repo import academy_repo
 from integrations.sheets.trial_sheets import refresh_all_trials
@@ -25,6 +27,10 @@ def _invalid(message: str):
 
 def _not_found(message: str):
     return jsonify({"ok": False, "code": "NOT_FOUND", "message": message}), 404
+
+
+def _conflict(message: str):
+    return jsonify({"ok": False, "code": "CONFLICT", "message": message}), 409
 
 
 def _serialize_value(value):
@@ -133,7 +139,29 @@ def _student(row: dict) -> dict:
         "total_trials": row.get("total_trials"),
         "assigned_group_id": row.get("assigned_group_id"),
         "subscribed": row.get("subscribed"),
+        "experience": row.get("experience"),
+        "school_shift": row.get("school_shift"),
     })
+
+
+def _validate_student_group(patch: dict, group_type: str) -> tuple[dict | None, tuple | None]:
+    group_id = patch.get("assigned_group_id")
+    if group_id is None:
+        return None, None
+    group = academy_repo.get_group_by_id(group_id)
+    if not group or group.get("group_type") != group_type:
+        return None, _not_found("Group not found.")
+    return group, None
+
+
+def _required_int_body(field: str) -> tuple[int | None, tuple | None]:
+    body = request.get_json(silent=True) or {}
+    value = body.get(field)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None, _invalid(f"{field} must be an integer.")
+    return value, None
 
 
 @academy_api.get("/api/<string:sport>/groups")
@@ -161,6 +189,71 @@ def list_students(sport: str):
         return error
     rows = academy_repo.get_users_by_type(group_type)
     return _ok({"students": [_student(row) for row in _subscribed_filter(rows)]})
+
+
+@academy_api.post("/api/<string:sport>/students")
+def create_student(sport: str):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    patch, payload_error = normalize_user_payload(body, creating=True)
+    if payload_error:
+        return _invalid(payload_error)
+    if patch.get("assigned_group_id") is None:
+        return _invalid("assigned_group_id is required for sport-scoped student creation.")
+    _, group_error = _validate_student_group(patch, group_type)
+    if group_error:
+        return group_error
+
+    try:
+        student = academy_repo.create_user(**patch)
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("Student already exists for this phone, name, and group.")
+
+    refresh_all_trials()
+    return jsonify({"ok": True, "data": {"student": _student(student)}}), 201
+
+
+@academy_api.patch("/api/<string:sport>/students/<int:student_id>/assignment")
+def assign_student(sport: str, student_id: int):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    group_id, body_error = _required_int_body("group_id")
+    if body_error:
+        return body_error
+    _, group_error = _validate_student_group({"assigned_group_id": group_id}, group_type)
+    if group_error:
+        return group_error
+
+    try:
+        student = academy_repo.assign_user_to_group(student_id, group_id)
+    except ValueError as exc:
+        if str(exc) == "GROUP_NOT_FOUND":
+            return _not_found("Group not found.")
+        raise
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("Student already exists for this phone, name, and group.")
+    if not student:
+        return _not_found("Student not found.")
+
+    refresh_all_trials()
+    return _ok({"student": _student(student)})
+
+
+@academy_api.delete("/api/<string:sport>/students/<int:student_id>/assignment")
+def deassign_student(sport: str, student_id: int):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+
+    student = academy_repo.deassign_user_from_group(student_id, group_type)
+    if not student:
+        return _not_found("Student not found.")
+
+    refresh_all_trials()
+    return _ok({"student": _student(student)})
 
 
 @academy_api.patch("/api/<string:sport>/trials/<int:trial_id>/attended")
@@ -203,6 +296,32 @@ def patch_trial_subscribed(sport: str, trial_id: int):
         return _not_found("Trial not found.")
     refresh_all_trials()
     return _ok({"trial": _trial(trial)})
+
+
+@academy_api.patch("/api/<string:sport>/students/<int:student_id>")
+def patch_student(sport: str, student_id: int):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    if not academy_repo.user_belongs_to_type(student_id, group_type):
+        return _not_found("Student not found.")
+    body = request.get_json(silent=True) or {}
+    patch, payload_error = normalize_user_payload(body, creating=False)
+    if payload_error:
+        return _invalid(payload_error)
+    _, group_error = _validate_student_group(patch, group_type)
+    if group_error:
+        return group_error
+
+    try:
+        student = academy_repo.update_user(student_id, **patch)
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("Student already exists for this phone, name, and group.")
+    if not student:
+        return _not_found("Student not found.")
+
+    refresh_all_trials()
+    return _ok({"student": _student(student)})
 
 
 @academy_api.patch("/api/<string:sport>/students/<int:student_id>/subscribed")
