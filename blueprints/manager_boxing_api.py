@@ -34,7 +34,9 @@ def _group_type_arg() -> tuple[str | None, tuple | None]:
 
 def _sheet_group(row: dict) -> dict:
     training_day = row.get("training_day")
+    training_day_label = WEEKDAY_RU.get(training_day, "") if training_day is not None else ""
     return {
+        "id": row.get("schedule_id") or f"{row.get('id')}-{training_day}-{str(row.get('time_start'))[:5]}",
         "group_id": row.get("id"),
         "group_name": row.get("group_name"),
         "group_type": row.get("group_type"),
@@ -49,8 +51,9 @@ def _sheet_group(row: dict) -> dict:
         "shift": row.get("shift"),
         "is_active": row.get("is_active"),
         "field": row.get("field"),
-        "training_day": training_day,
-        "training_day_label": WEEKDAY_RU.get(training_day, ""),
+        "training_day": training_day_label,
+        "training_day_value": training_day,
+        "training_day_label": training_day_label,
         "start_time": row.get("time_start"),
         "end_time": row.get("time_end"),
     }
@@ -59,13 +62,17 @@ def _sheet_group(row: dict) -> dict:
 def _trial_user(row: dict) -> dict | None:
     if row.get("user_id") is None:
         return None
+    assigned_group_id = row.get("user_assigned_group_id")
+    assigned_group_name = row.get("user_assigned_group_name")
     return {
         "id": row.get("user_id"),
         "name": row.get("user_child_name"),
         "birth_year": row.get("user_child_birth_year"),
         "parent_phone": row.get("user_parent_phone"),
         "total_trials": row.get("user_total_trials"),
-        "assigned_group_id": row.get("user_assigned_group_id"),
+        "assigned_group_id": assigned_group_id,
+        "assigned_group_name": assigned_group_name,
+        "assigned_group": assigned_group_name,
         "subscribed": row.get("user_subscribed"),
     }
 
@@ -99,13 +106,17 @@ def _sheet_trial(row: dict) -> dict:
 
 
 def _academy_user(row: dict) -> dict:
+    assigned_group_id = row.get("assigned_group_id")
+    assigned_group_name = row.get("assigned_group_name")
     return {
         "id": row.get("id"),
         "name": row.get("child_name"),
         "birth_year": row.get("child_birth_year"),
         "parent_phone": row.get("parent_phone"),
         "total_trials": row.get("total_trials"),
-        "assigned_group_id": row.get("assigned_group_id"),
+        "assigned_group_id": assigned_group_id,
+        "assigned_group_name": assigned_group_name,
+        "assigned_group": assigned_group_name,
         "subscribed": row.get("subscribed"),
     }
 

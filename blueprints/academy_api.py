@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from blueprints.manager_api import _authenticate
 from integrations.repo import academy_repo
-from integrations.sheets.trial_sheets import refresh_all_trials
+from integrations.sheets.trial_sheets import WEEKDAY_RU, refresh_all_groups, refresh_all_trials
 
 
 academy_api = Blueprint("academy_api", __name__)
@@ -76,8 +76,68 @@ def _school_time(row: dict) -> str | None:
     return None
 
 
+def _normalize_group_schedules(body: dict) -> tuple[list[dict] | None, tuple | None]:
+    raw = body.get("training_days")
+    if raw is None:
+        raw = body.get("schedules")
+    if raw is None:
+        raw = [{
+            "training_day": body.get("training_day"),
+            "training_day_value": body.get("training_day_value"),
+            "start_time": body.get("start_time"),
+            "end_time": body.get("end_time"),
+            "time_start": body.get("time_start"),
+            "time_end": body.get("time_end"),
+            "field": body.get("field"),
+        }]
+
+    if not isinstance(raw, list) or not raw:
+        return None, _invalid("at least one training day is required.")
+
+    schedules = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            return None, _invalid("each training day must be an object.")
+
+        training_day = item.get("training_day_value", item.get("training_day"))
+        time_start = item.get("start_time", item.get("time_start"))
+        time_end = item.get("end_time", item.get("time_end"))
+        field = item.get("field")
+
+        try:
+            training_day = int(training_day)
+            time_start = str(time_start)[:5]
+            time_end = str(time_end)[:5]
+            field = int(field) if field not in (None, "") else None
+            if training_day < 0 or training_day > 6:
+                raise ValueError("weekday")
+            if field is not None and (field < 1 or field > 3):
+                raise ValueError("field")
+            if datetime.strptime(time_start, "%H:%M") >= datetime.strptime(time_end, "%H:%M"):
+                raise ValueError("time")
+        except (TypeError, ValueError):
+            return None, _invalid("invalid training day/time.")
+
+        key = (training_day, time_start, time_end)
+        if key in seen:
+            return None, _invalid("duplicate training day/time.")
+        seen.add(key)
+        schedules.append({
+            "training_day": training_day,
+            "time_start": time_start,
+            "time_end": time_end,
+            "field": field,
+        })
+
+    return schedules, None
+
+
 def _group(row: dict) -> dict:
+    training_day = row.get("training_day")
+    training_day_label = WEEKDAY_RU.get(training_day, "") if training_day is not None else ""
     return _serialize({
+        "id": row.get("schedule_id") or f"{row.get('id')}-{training_day}-{str(row.get('time_start'))[:5]}",
         "group_id": row.get("id"),
         "group_name": row.get("group_name"),
         "group_type": row.get("group_type"),
@@ -88,7 +148,9 @@ def _group(row: dict) -> dict:
         "level": row.get("level") or [],
         "trainer": row.get("trainer"),
         "field": row.get("field"),
-        "training_day": row.get("training_day"),
+        "training_day": training_day_label,
+        "training_day_value": training_day,
+        "training_day_label": training_day_label,
         "start_time": row.get("time_start"),
         "end_time": row.get("time_end"),
         "age_min": row.get("age_min"),
@@ -122,6 +184,8 @@ def _trial(row: dict) -> dict:
 
 
 def _student(row: dict) -> dict:
+    assigned_group_id = row.get("assigned_group_id")
+    assigned_group_name = row.get("assigned_group_name")
     return _serialize({
         "student_id": row.get("id"),
         "id": row.get("id"),
@@ -131,7 +195,9 @@ def _student(row: dict) -> dict:
         "birth_year": row.get("child_birth_year"),
         "parent_phone": row.get("parent_phone"),
         "total_trials": row.get("total_trials"),
-        "assigned_group_id": row.get("assigned_group_id"),
+        "assigned_group_id": assigned_group_id,
+        "assigned_group_name": assigned_group_name,
+        "assigned_group": assigned_group_name,
         "subscribed": row.get("subscribed"),
     })
 
@@ -143,6 +209,138 @@ def list_groups(sport: str):
         return error
     rows = academy_repo.get_groups_by_type_for_frontend(group_type)
     return _ok({"groups": [_group(row) for row in rows]})
+
+
+@academy_api.post("/api/<string:sport>/groups")
+def create_group(sport: str):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    if not body.get("group_name") or body.get("max_cap") is None:
+        return _invalid("group_name and max_cap are required.")
+
+    schedules, error = _normalize_group_schedules(body)
+    if error:
+        return error
+
+    try:
+        max_cap = int(body["max_cap"])
+        age_min = int(body["age_min"]) if body.get("age_min") is not None else None
+        age_max = int(body["age_max"]) if body.get("age_max") is not None else None
+    except (TypeError, ValueError):
+        return _invalid("max_cap, age_min, and age_max must be integers when provided.")
+    if "is_active" in body and not isinstance(body.get("is_active"), bool):
+        return _invalid("is_active must be a boolean.")
+
+    group_id = academy_repo.create_or_update_group(
+        group_name=body["group_name"],
+        group_type=group_type,
+        max_cap=max_cap,
+        is_active=body.get("is_active", True),
+        level=body.get("level"),
+        levels=body.get("levels"),
+        age_min=age_min,
+        age_max=age_max,
+        shift=body.get("shift"),
+        trainer=body.get("trainer"),
+    )
+    schedule_rows = academy_repo.replace_group_schedules(group_id, schedules) or []
+    refresh_all_groups()
+    return jsonify({"ok": True, "data": {
+        "group_id": group_id,
+    }}), 201
+
+
+@academy_api.patch("/api/<string:sport>/groups/<int:group_id>")
+def patch_group(sport: str, group_id: int):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    group = academy_repo.get_group_by_id(group_id)
+    if not group or group.get("group_type") != group_type:
+        return _not_found("Group not found.")
+
+    body = request.get_json(silent=True) or {}
+    group_fields = {key for key in (
+        "group_name", "max_cap", "level", "levels", "age_min", "age_max", "shift", "trainer", "is_active"
+    ) if key in body}
+    schedules_present = "training_days" in body or "schedules" in body
+    if not group_fields and not schedules_present:
+        return _invalid("No fields to update.")
+
+    if group_fields:
+        if "is_active" in body and not isinstance(body.get("is_active"), bool):
+            return _invalid("is_active must be a boolean.")
+        try:
+            max_cap = int(body["max_cap"]) if "max_cap" in body and body.get("max_cap") is not None else None
+            age_min = int(body["age_min"]) if "age_min" in body and body.get("age_min") is not None else None
+            age_max = int(body["age_max"]) if "age_max" in body and body.get("age_max") is not None else None
+        except (TypeError, ValueError):
+            return _invalid("max_cap, age_min, and age_max must be integers when provided.")
+        res = academy_repo.on_manual_group_edit(
+            group_id=group_id,
+            group_name=body.get("group_name") if "group_name" in body else None,
+            max_cap=max_cap,
+            level=body.get("level") if "level" in body else None,
+            levels=body.get("levels") if "levels" in body else None,
+            age_min=age_min,
+            age_max=age_max,
+            shift=body.get("shift") if "shift" in body else None,
+            trainer=body.get("trainer") if "trainer" in body else None,
+            is_active=body.get("is_active") if "is_active" in body else None,
+        )
+        if not res["ok"]:
+            return jsonify(res), 400 if res.get("code") == "INVALID_LEVEL" else 404
+
+    schedule_rows = None
+    if schedules_present:
+        schedules, error = _normalize_group_schedules(body)
+        if error:
+            return error
+        schedule_rows = academy_repo.replace_group_schedules(group_id, schedules)
+        if schedule_rows is None:
+            return _not_found("Group not found.")
+
+    refresh_all_groups()
+    return _ok({
+        "group_id": group_id,
+    })
+
+
+@academy_api.delete("/api/<string:sport>/groups/<int:group_id>")
+def delete_group(sport: str, group_id: int):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    group = academy_repo.get_group_by_id(group_id)
+    if not group or group.get("group_type") != group_type:
+        return _not_found("Group not found.")
+    res = academy_repo.deactivate_group_repo(group_id)
+    if not res["ok"]:
+        return jsonify(res), 404
+    refresh_all_groups()
+    return jsonify({"ok": True}), 200
+
+
+@academy_api.post("/api/<string:sport>/groups/<int:group_id>/students")
+def assign_student_to_group(sport: str, group_id: int):
+    group_type, error = _sport_arg(sport)
+    if error:
+        return error
+    body = request.get_json(silent=True) or {}
+    if body.get("student_id") is None:
+        return _invalid("student_id is required.")
+    try:
+        student_id = int(body["student_id"])
+    except (TypeError, ValueError):
+        return _invalid("student_id must be an integer.")
+
+    student = academy_repo.assign_user_to_group(student_id, group_id, group_type)
+    if not student:
+        return _not_found("Student or group not found.")
+    refresh_all_trials()
+    return jsonify({"ok": True}), 200
 
 
 @academy_api.get("/api/<string:sport>/trials")
