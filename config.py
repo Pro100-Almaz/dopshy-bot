@@ -70,6 +70,13 @@ GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Bookings")
 BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "00:00")
 BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:59")
 BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
+# Earlier-start suggestion (see booking.suggest_earlier_start). When a request
+# leaves L minutes free to its left, offer to move it to window_start + BUFFER.
+# BUFFER must stay below MIN_L: the shift is only ever leftward because of it,
+# which is what makes the suggestion safe to build without bounds checks.
+BOOKING_PULL_MIN_L: int = int(os.getenv("BOOKING_PULL_MIN_L", "60"))      # exclusive
+BOOKING_PULL_MAX_L: int = int(os.getenv("BOOKING_PULL_MAX_L", "180"))     # inclusive
+BOOKING_PULL_BUFFER: int = int(os.getenv("BOOKING_PULL_BUFFER", "30"))    # minutes
 BOOKING_FIELDS: list = _json.loads(
     os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"6x6"},'
                                 '{"id":2,"format":"5x5"},'
@@ -115,3 +122,10 @@ HOLIDAYS: set = {
     datetime.date(datetime.strptime(d.strip(), "%Y-%m-%d"))
     for d in _raw_holidays.split(",") if d.strip()
 }
+
+# ---------------------------------------------------------------------------
+# Time ranges for earlier_booking_time_suggestion
+# ---------------------------------------------------------------------------
+BOOKING_PULL_MIN_L=60
+BOOKING_PULL_MAX_L=180
+BOOKING_PULL_BUFFER=30
