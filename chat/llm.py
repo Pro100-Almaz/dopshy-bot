@@ -60,7 +60,9 @@ def get_ai_response(
         max_completion_tokens=512,
     )
     if not is_dopsy:
-        kwargs["tools"] = [START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL]
+        # start_trial retired: trial_new / trial_continue reach LlmTrialFlowHandler
+        # through the intent router, before this call happens.
+        kwargs["tools"] = [EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL]
         kwargs["tool_choice"] = "auto"
 
     response = _client.chat.completions.create(**kwargs)
@@ -70,7 +72,7 @@ def get_ai_response(
     if msg.tool_calls:
         for tc in msg.tool_calls:
             name = tc.function.name
-            if name in ("start_trial", "edit_trial", "cancel_trial"):
+            if name in ("edit_trial", "cancel_trial"):
                 args: dict = {}
                 if name in ("edit_trial"):
                     try:
@@ -121,14 +123,23 @@ def get_booking_reply(
     return response.choices[0].message.content.strip()
 
 
-def route_incoming_message(history: list, user_message: str) -> tuple[str, str]:
+def route_incoming_message(history: list, user_message: str,
+                           prompt: str | None = None,
+                           tool: dict | None = None) -> tuple[str, str]:
     """Classify the intent and language of the latest user message.
+
+    Defaults to the arena classifier. The academy bots pass sp_academy's
+    TRIAL_INTENT_PROMPT with SELECT_TRIAL_INTENT_LLM — a different intent enum
+    over the same call shape. "other" remains the failure value in both enums.
 
     Returns:
         (intent, lang) — intent is one of the strict enum values ("other" on failure),
         lang is "ru" or "kk".
     """
-    messages = [{"role": "system", "content": INTENT_PROMPT}]
+    prompt = prompt or INTENT_PROMPT
+    tool = tool or SELECT_INTENT_LLM
+
+    messages = [{"role": "system", "content": prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
@@ -137,8 +148,9 @@ def route_incoming_message(history: list, user_message: str) -> tuple[str, str]:
             model=config.INTENT_MODEL,
             temperature=0,
             messages=messages,
-            tools=[SELECT_INTENT_LLM],
-            tool_choice={"type": "function", "function": {"name": "route_message"}}
+            tools=[tool],
+            tool_choice={"type": "function",
+                         "function": {"name": tool["function"]["name"]}}
         )
 
         tool_calls = response.choices[0].message.tool_calls

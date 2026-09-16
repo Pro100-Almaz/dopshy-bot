@@ -302,6 +302,70 @@ def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
     return "\n".join(lines)
 
 
+def _to_time(value) -> time:
+    """Accept a time object or an 'HH:MM[:SS]' string, return a time.
+
+    Wider than _parse_time on purpose: free windows carry time objects, the LLM
+    extractor hands over 'HH:MM' strings, and Postgres rows come back as
+    'HH:MM:SS'. The [:5] slice is what absorbs the seconds.
+    """
+    if isinstance(value, time):
+        return value
+    return datetime.strptime(str(value)[:5], "%H:%M").time()
+
+
+def _minutes(t: time) -> int:
+    """Minutes since midnight — time objects don't support subtraction."""
+    return t.hour * 60 + t.minute
+
+
+def suggest_earlier_start(free_windows: list[dict], date_str: str, field_id: int,
+                          time_start: str, time_end: str) -> tuple[str, str] | None:
+    """Offer to move a request earlier when free time sits idle to its left.
+
+    L is the gap between the start of the containing free window and the
+    requested start. When L is worth acting on, the request is moved to
+    window_start + BOOKING_PULL_BUFFER, keeping its duration:
+
+        window 17:00-23:00, request 19:00-21:00 (L=120) -> ("17:30", "19:30")
+
+    Returns None when there is nothing to offer: the range crosses midnight, it
+    does not sit inside a single free window for this date/field, or L falls
+    outside (BOOKING_PULL_MIN_L, BOOKING_PULL_MAX_L].
+
+    Pure: no DB, no logging, no localization — callers pass free_windows in.
+    """
+    if time_start > time_end:  # TRANSITIVE BOOKING: day-crossing, leave alone
+        return None
+
+    req_start = _to_time(time_start)
+    req_end = _to_time(time_end)
+
+    for w in free_windows:
+        # Windows carry a date object and an int field; callers may hold either
+        # as a string, so normalise both sides before comparing.
+        if str(w["date"]) != str(date_str) or int(w["field"]) != int(field_id):
+            continue
+        w_start, w_end = _to_time(w["time_start"]), _to_time(w["time_end"])
+        if not (w_start <= req_start and req_end <= w_end):
+            continue  # not this window — a request inside none of them isn't free
+
+        pull = _minutes(req_start) - _minutes(w_start)
+        if not (config.BOOKING_PULL_MIN_L < pull <= config.BOOKING_PULL_MAX_L):
+            return None
+
+        # Safe without bounds checks: BUFFER < MIN_L < pull, so the range only
+        # ever moves left, keeping new_end below req_end and inside the window.
+        new_start_total = _minutes(w_start) + config.BOOKING_PULL_BUFFER
+        duration = _minutes(req_end) - _minutes(req_start)
+        new_end_total = new_start_total + duration
+        new_start = time(new_start_total // 60, new_start_total % 60)
+        new_end = time(new_end_total // 60, new_end_total % 60)
+        return new_start.strftime("%H:%M"), new_end.strftime("%H:%M")
+
+    return None
+
+
 def find_free_field(booked: list[dict], date_str: str, time_start: str, time_end: str, format_: str) -> int | None:
     """Return a free field id for the given date/time-range/format, or None if all are taken."""
     for f in config.BOOKING_FIELDS:

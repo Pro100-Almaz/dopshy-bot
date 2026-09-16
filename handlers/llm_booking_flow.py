@@ -96,6 +96,13 @@ T = {
                              "kk": "❌ {fmt} бос емес {date} {ts}–{te}."},
     "alternatives":         {"ru": "Доступные варианты:",
                              "kk": "Бос нұсқалар:"},
+    "earlier_hint":         {"ru": "Кстати, поле свободно уже с {start} — можно начать пораньше 🙂",
+                             "kk": "Айтпақшы, алаң {start}-ден бастап бос — ертерек бастауға болады 🙂"},
+    # Button titles are capped at 20 chars by WhatsApp; both forms are 18.
+    # The accept path parses both times straight out of this title, so they
+    # must stay in it verbatim.
+    "earlier_btn":          {"ru": "Начать {start}–{end}",
+                             "kk": "{start}–{end} бастау"},
     "no_free_fields_slot":  {"ru": "Нет свободных полей {date} {ts}–{te}.",
                              "kk": "{date} {ts}–{te} бос алаң жоқ."},
     "available_time":       {"ru": "Доступное время:",
@@ -218,6 +225,16 @@ T = {
 
 
 _FIELD_BTN_RE = re.compile(r'(?:Поле|Алаң)\s*(\d+)\s*\((\S+)\)')
+# Earlier-start button reply: "Начать 17:30–19:30" (ru) / "17:30–19:30 бастау" (kk).
+# The verb sits on opposite sides in the two languages, hence the alternation —
+# it leaves four groups with only two filled, so callers take the non-empty ones.
+# The dash class covers en dash (what the T strings actually use), em dash and
+# hyphen, so an edit to the button title cannot silently stop this matching.
+_EARLIER_BTN_RE = re.compile(
+    r'(?:Начать)\s*(\d{1,2}:\d{2})\s*[–—-]\s*(\d{1,2}:\d{2})'
+    r'|(\d{1,2}:\d{2})\s*[–—-]\s*(\d{1,2}:\d{2})\s*бастау',
+    re.IGNORECASE,
+)
 _FORMAT_BTN_RE = re.compile(r'\b(\d+x\d+)\b')
 
 
@@ -305,6 +322,18 @@ class LlmBookingFlowHandler:
             if any(f["format"] == fmt for f in config.BOOKING_FIELDS):
                 data["format"] = fmt
                 data["field"] = self._resolve_field_id(fmt, data)
+
+        # Handle earlier-start button reply (e.g., "Начать 17:30–19:30").
+        # Both times come from the button title itself, so the shift never
+        # depends on the extractor having read its own button correctly.
+        # Must stay below the floor_time_to_30_minutes loop above: flooring an
+        # off-grid suggestion (18:29 → 18:00) would drag the start earlier than
+        # the field is actually free, straight into the preceding booking.
+        earlier_btn = _EARLIER_BTN_RE.search(user_message)
+        if earlier_btn:
+            groups = [g for g in earlier_btn.groups() if g]
+            data["time_start"], data["time_end"] = groups[0], groups[1]
+            logger.info("[LLM_FLOW] Earlier-start button: %s-%s", groups[0], groups[1])
 
         # Handle legacy field button reply (e.g., "Поле 1 (5x5)")
         if not data.get("field") and not fmt_btn:

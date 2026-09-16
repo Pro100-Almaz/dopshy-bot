@@ -355,7 +355,11 @@ def replace_group_schedules(group_id: int, schedules: list[dict]) -> list[dict] 
 
 
 def get_groups_info(bot_name: str):
-    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    """Every active training slot for this bot's curriculum.
+
+    group_name/max_cap/curr_cap ride along so the LLM trial flow can name a
+    class and reject a full one without a second round-trip per candidate.
+    """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(

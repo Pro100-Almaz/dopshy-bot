@@ -30,7 +30,6 @@ from integrations.sheets.trial_sheets import refresh_all_trials
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message as _send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
-from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import (
     handle_edit_request as handle_edit_trial_request,
@@ -169,7 +168,7 @@ _LOCATION_MESSAGE = (
     "📍 Сығанақ 6Ф, Mechta және Tumar СО қарсы.\n"
     "Кіру және кіреберіс Тәттімбет көшесі жағынан.\n"
     "Көлік тұрағы да сол жерде\n"
-    "2GIS сілтемесі: https://2gis.kz/astana/geo/700000010748\n"
+    "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
 )
 
 _ACADEMY_ADMIN_PHONE = "+7 700 555 6000"
@@ -520,20 +519,43 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
 
         else:
+            # Academy bots (chatbot_2, dopsy_boxing) — mirrors the arena branch:
+            #   (a) Active deterministic session → the old step handler finishes it
+            #   (b) Otherwise → LLM1 (intent + extraction) → LLM2 (trial flow)
+            #   (c) Questions and anything else → fall through to RAG/LLM
+            bot_name = bot_config["name"]
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
-            trial_reply = handle_trial_turn(
-                chat_id, phone_number_id, sender_id, user_text, bot_config["name"]
-            )
-            if trial_reply is not None:
-                logger.info(
-                    "[TRIAL] Trial branch handled message — skipping RAG/LLM. "
-                    "Reply preview: %.120s", trial_reply
+
+            # (a) A step-flow conversation started before this deploy must be
+            # allowed to finish; both flows write the same draft row, so the
+            # session has to win while it exists.
+            if _pg.get_active_session(bot_name, chat_id):
+                trial_reply = handle_trial_turn(
+                    chat_id, phone_number_id, sender_id, user_text, bot_name
                 )
+                if trial_reply is not None:
+                    logger.info(
+                        "[TRIAL] Session handler replied: %.120s", trial_reply,
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", trial_reply)
+                    send_text_message(phone_number_id, sender_id, trial_reply)
+                    return
+
+            intent, lang = route_incoming_message(
+                history, user_text, TRIAL_INTENT_PROMPT, SELECT_TRIAL_INTENT_LLM,
+            )
+            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s", intent, lang)
+
+            if intent in ('trial_new', 'trial_continue'):
+                extracted = extract_trial_details(history, user_text)
+                logger.info("[TRIAL] Data Extracted: %s", extracted)
+                handler = LlmTrialFlowHandler(bot_name)
+                reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", trial_reply)
                 send_text_message(channel, sender_id, trial_reply)
                 return
-            logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
             if is_trial_greeting(user_text):
                 handle_reply = (

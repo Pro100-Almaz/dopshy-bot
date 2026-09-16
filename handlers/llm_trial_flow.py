@@ -1,4 +1,41 @@
+"""
+Non-deterministic LLM-driven trial-signup flow (academy bots).
+
+The arena counterpart is llm_booking_flow.py. Same architecture:
+- Accepts signup data in any order (no fixed step sequence)
+- Uses the LLM to extract intent + params from natural language
+- Creates or continues a draft trial based on whatever data is available
+- Identifies a continuation by phone + state='draft' + group_type, so no
+  trial_sessions row is needed and out-of-order data cannot break step ordering
+
+What is NOT ported from the arena flow:
+- the earlier-start suggestion (BaseChecker._offer_earlier_start and friends) —
+  it only makes sense for a free-form slot that can slide leftward
+- pricing, payment receipts and the reservation TTL — a trial is free
+- field/format resolution — a class is one dimension, not two
+
+Where it necessarily differs: an academy has no free-form slot grid. The parent
+picks one of a handful of existing weekly classes, so the arena's seven checking
+rules collapse into four, and the class supplies time_end and group_id rather
+than the parent supplying them (see _evaluate_and_respond).
+
+Registration data is identical to the deterministic flow (trial_session.py):
+date, start/end time, group, child name, child age.
+"""
+
 import logging
+import uuid
+
+from chat.conversation import clear_history
+from handlers.base_classes.base_asker import BaseAsker
+from handlers.base_classes.base_button import BaseButton
+from handlers.base_classes.base_checker import BaseChecker
+from handlers.base_classes.base_format import BaseFormat
+from handlers.base_classes.base_helper import BaseHelper
+from integrations import trial as trial_logic
+from integrations.repo import academy_repo, postgres
+from integrations.sheets.trial_sheets import refresh_all_trials
+from utils import is_past_booking_time
 import re
 from datetime import date, datetime
 
