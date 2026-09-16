@@ -364,7 +364,7 @@ def assign_student_to_group(sport: str, group_id: int):
     except (TypeError, ValueError):
         return _invalid("student_id must be an integer.")
 
-    student = academy_repo.assign_user_to_group(student_id, group_id, group_type)
+    student = academy_repo.assign_user_to_group_for_sport(student_id, group_id, group_type)
     if not student:
         return _not_found("Student or group not found.")
     refresh_all_trials()

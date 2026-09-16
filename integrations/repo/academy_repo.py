@@ -1048,7 +1048,13 @@ def get_users_by_type(group_type: str | None = None) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
-def assign_user_to_group(user_id: int, group_id: int, group_type: str | None = None) -> dict | None:
+def assign_user_to_group_for_sport(user_id: int, group_id: int, group_type: str | None = None) -> dict | None:
+    """Assign a user to a group, optionally validating the group's sport.
+
+    Unlike assign_user_to_group(), this does a plain overwrite of
+    assigned_group_id with no sibling-per-sport awareness — only use this
+    where the caller already scopes the operation to a single sport itself.
+    """
     group_filter = "AND group_type = %s" if group_type is not None else ""
     group_params = [group_id]
     if group_type is not None:
