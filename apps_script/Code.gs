@@ -15,11 +15,37 @@
 
 var COL = {
   BOOKING_ID: 1, FIELD: 2, DATE: 3, START: 4, END: 5,
-  CUSTOMER: 6, NOTES: 7, STATUS: 8, LAST_SYNCED: 9
+  CUSTOMER: 6, PHONE: 7, NOTES: 8, STATUS: 9, LAST_SYNCED: 10, UPDATED_BY: 11, RESERVED_UNTIL: 12,
+  PRICE_TOTAL: 13, PAYMENT_CURRENT: 14, REMAINDER: 15, RECEIPT_DATE: 16, KASPI_QR: 17, CASH: 18
 };
 var GROUP_COL = {
   GROUP_ID: 1, GROUP_NAME: 2, MAX_CAP : 3, CURR_CAP: 4,
-  TRAINGING_DAY: 5, START_TIME: 6, END_TIME: 7
+  BIRTH_YEARS: 5, LOCATION: 6, LEVEL: 7,
+  FIELD: 8, TRAINGING_DAY: 9, START_TIME: 10, END_TIME: 11
+}
+const user = Session.getActiveUser();
+
+function _groupTrainingDayValue(value) {
+  var days = {
+    'Понедельник': 0,
+    'Вторник': 1,
+    'Среда': 2,
+    'Четверг': 3,
+    'Пятница': 4,
+    'Суббота': 5,
+    'Воскресенье': 6
+  };
+  if (typeof value === 'number') return value;
+  var text = String(value).trim();
+  if (/^[0-6]$/.test(text)) return Number(text);
+  return days[text];
+}
+
+function _groupTimeValue(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'HH:mm');
+  }
+  return String(value).trim();
 }
 
 function onOpen() {
@@ -43,7 +69,7 @@ function onOpen() {
  * Free-edit columns (customer, notes) are PATCHed to the backend. On failure
  * the cell is reverted to its previous value.
  */
-function onEditManual() {
+function onEditManual(e) {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = spreadsheet.getActiveSheet();
   var sheetName = sheet.getName();
@@ -59,15 +85,22 @@ function onEditManual() {
 
   if (!groupSheets.includes(sheetName)){
 
-    if (col !== COL.CUSTOMER && col !== COL.NOTES) return;
+    var editableCols = [COL.CUSTOMER, COL.NOTES, COL.KASPI_QR, COL.CASH];
+    if (!editableCols.includes(col)) return;
 
     var bookingId = sheet.getRange(row, COL.BOOKING_ID).getValue();
     if (!bookingId) return; // unsynced row being typed manually
 
-    var field = col === COL.CUSTOMER ? 'customer' : 'notes';
+    var colFieldMap = {};
+    colFieldMap[COL.CUSTOMER] = 'customer';
+    colFieldMap[COL.NOTES] = 'notes';
+    colFieldMap[COL.KASPI_QR] = 'paid_kaspi_qr';
+    colFieldMap[COL.CASH] = 'paid_cash';
+    var field = colFieldMap[col];
 
     var patch = {};
     patch[field] = sheet.getRange(row, col).getValue();
+    patch["source"] = user.getEmail();
 
     try {
       apiPatch(bookingId, patch);
@@ -81,7 +114,12 @@ function onEditManual() {
 
     var allowedGroupCols = [
       GROUP_COL.GROUP_NAME,
-      GROUP_COL.MAX_CAP
+      GROUP_COL.MAX_CAP,
+      GROUP_COL.LEVEL,
+      GROUP_COL.FIELD,
+      GROUP_COL.TRAINGING_DAY,
+      GROUP_COL.START_TIME,
+      GROUP_COL.END_TIME
     ];
 
     if (!allowedGroupCols.includes(col)) return;
@@ -107,13 +145,38 @@ function onEditManual() {
 
         apiRefreshGroupTables();
         return;
-      }else{
+      } else{
         field = 'max_cap';
       }
+    } else if (col === GROUP_COL.LEVEL) {
+      field = 'level';
+    } else if (col === GROUP_COL.FIELD) {
+      field = 'field';
+    } else if (col === GROUP_COL.TRAINGING_DAY) {
+      field = 'training_day';
+    } else if (col === GROUP_COL.START_TIME) {
+      field = 'time_start';
+    } else if (col === GROUP_COL.END_TIME) {
+      field = 'time_end';
     }
 
     var patch = {};
-    patch[field] = sheet.getRange(row, col).getValue();
+    if (field === 'training_day') {
+      if (!e || e.oldValue === undefined) {
+        SpreadsheetApp.getUi().alert('Не удалось определить предыдущий день недели. Таблица будет обновлена с сервера.');
+        apiRefreshGroupTables();
+        return;
+      }
+      patch.previous_training_day = _groupTrainingDayValue(e.oldValue);
+      patch.training_day = _groupTrainingDayValue(sheet.getRange(row, GROUP_COL.TRAINGING_DAY).getValue());
+    } else if (field === 'time_start' || field === 'time_end' || field === 'field') {
+      patch.training_day = _groupTrainingDayValue(sheet.getRange(row, GROUP_COL.TRAINGING_DAY).getValue());
+      patch[field] = field === 'field'
+        ? String(sheet.getRange(row, col).getValue()).replace(/^Field\\s*/i, '')
+        : _groupTimeValue(sheet.getRange(row, col).getValue());
+    } else {
+      patch[field] = sheet.getRange(row, col).getValue();
+    }
     try {
       apiPatchGrouping(groupId, patch);
       spreadsheet.toast('Обновлено: ' + field, 'Менеджер', 3);

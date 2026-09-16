@@ -266,7 +266,7 @@ class TestStepTimeHandling:
         assert reply is not None
         session_after = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         assert session_after is not None
-        assert session_after["state"] in ("step_players", "step_field")
+        assert session_after["state"] in ("step_name", "step_field")
 
         fields = _get_draft_fields(booking_id)
         assert str(fields["time_start"])[:5] == "10:00"
@@ -288,7 +288,7 @@ class TestStepTimeHandling:
 
         assert reply is not None
         session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
-        assert session["state"] in ("step_players", "step_field")
+        assert session["state"] in ("step_name", "step_field")
 
     def test_invalid_time_plain_text_stays_on_step_time(self):
         from utils import today_almaty
@@ -376,7 +376,7 @@ class TestFullHappyPath:
         assert session["state"] == "step_time"
         assert _get_draft_fields(booking_id)["date"] is not None
 
-        # ── step_time → step_players (single field free) or step_field ───────
+        # ── step_time → step_name (single field free) or step_field ──────────
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
                 reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "11:00 до 13:00")
@@ -390,18 +390,13 @@ class TestFullHappyPath:
                 reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
             session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
 
-        assert session["state"] == "step_players"
+        # Players count is no longer collected — flow goes straight to the name step.
+        assert session["state"] == "step_name"
+        assert "имя" in reply.lower() or "укажите" in reply.lower()
         draft = _get_draft_fields(booking_id)
         assert str(draft["time_start"])[:5] == "11:00"
         assert str(draft["time_end"])[:5] == "13:00"
         assert draft["field"] is not None
-
-        # ── step_players → step_name ─────────────────────────────────────────
-        reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "10")
-        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
-        assert session["state"] == "step_name"
-        assert "имя" in reply.lower() or "укажите" in reply.lower()
-        assert _get_draft_fields(booking_id)["players"] == 10
 
         # ── step_name → step_confirm ─────────────────────────────────────────
         reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "Алибек Джаксыбеков")
@@ -564,7 +559,7 @@ class TestMidFlowCancel:
         assert get_active_session(bot_name='dopsy_bot', chat_id=chat_id) is None
         assert _booking_state(booking_id) == "cancelled"
 
-    def test_передумал_at_step_players_cancels(self):
+    def test_передумал_after_field_cancels(self):
         from utils import today_almaty
         chat_id = _chat_id()
         target = today_almaty() + timedelta(days=3)
@@ -706,55 +701,33 @@ class TestStepDate:
 
 
 # ---------------------------------------------------------------------------
-# step_players — integer parsing
+# players step removed — flow skips straight from field/time to name
 # ---------------------------------------------------------------------------
 
-class TestStepPlayers:
-    def _reach_step_players(self, chat_id: str, target: date) -> int:
+class TestPlayersStepRemoved:
+    def test_field_selection_advances_to_name_not_players(self):
+        from utils import today_almaty
+        chat_id = _chat_id()
+        target = today_almaty() + timedelta(days=3)
         fake = _fake_windows_for_date(target)
+
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             start_booking_flow(chat_id, SENDER_PHONE)
             handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
 
-        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
-        booking_id = session["params"]["booking_id"]
-
         with patch("handlers.booking_session.booking_logic.get_free_windows", return_value=fake):
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
-                handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "11:00 до 13:00")
+                reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "11:00 до 13:00")
 
         session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
         if session and session["state"] == "step_field":
             with patch("handlers.booking_session.booking_logic.get_all_booked", return_value=[]):
-                handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
+                reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "1")
+            session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
 
-        return booking_id
-
-    def test_valid_player_count_advances(self):
-        from utils import today_almaty
-        chat_id = _chat_id()
-        target = today_almaty() + timedelta(days=3)
-        bid = self._reach_step_players(chat_id, target)
-        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
-        assert session["state"] == "step_players"
-
-        handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "8")
-        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
+        # Never lands on a players step; asks for the name instead.
         assert session["state"] == "step_name"
-        assert _get_draft_fields(bid)["players"] == 8
-
-    def test_non_numeric_input_stays_on_step_players(self):
-        from utils import today_almaty
-        chat_id = _chat_id()
-        target = today_almaty() + timedelta(days=3)
-        self._reach_step_players(chat_id, target)
-        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
-        assert session["state"] == "step_players"
-
-        reply = handle_booking_turn(chat_id, PHONE_NUMBER_ID, SENDER_PHONE, "много")
-        session = get_active_session(bot_name='dopsy_bot', chat_id=chat_id)
-        assert session["state"] == "step_players"
-        assert "количество" in reply.lower() or "введите" in reply.lower()
+        assert "имя" in reply.lower() or "укажите" in reply.lower()
 
 
 # ---------------------------------------------------------------------------

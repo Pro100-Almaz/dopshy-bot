@@ -28,27 +28,22 @@ function submitNewBooking(form) {
       time_start: form.start,          // HH:MM
       time_end: form.end,              // HH:MM
       customer: form.customer || '',
+      phone: form.phone || '',
       notes: form.notes || '',
       repeat: form.repeat || 'none',    // none, daily, weekly, monthly
       end_date: form.endDate,
-      client_token: Utilities.getUuid()
+      client_token: Utilities.getUuid(),
+      reserved_until: form.reservedUntil,
+      updated_by: user.getEmail(),
     };
     var res = apiCreateBooking(payload);
     if (!res.ok) return { ok: false, message: res.message || 'Ошибка' };
 
-
-
-    var bookingId = res.data.booking_id;
-    var sheet = _bookingsSheet();
-    sheet.appendRow([
-      bookingId, payload.field, payload.date, payload.time_start, payload.time_end,
-      payload.customer, payload.notes, (res.data.status || 'CONFIRMED'),
-      Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm')
-    ]);
-
     refreshFromServer();
 
+    var bookingId = res.data.booking_id;
     return { ok: true, message: 'Бронь создана (#' + bookingId + ')' };
+
   } catch (err) {
     return { ok: false, message: err.message };
   }

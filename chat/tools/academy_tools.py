@@ -11,11 +11,142 @@ START_TRIAL_TOOL = {
             "сам спросит всё необходимое и сам сообщит, если записаться на занятие сейчас нельзя. "
             "НЕ пытайся СОБРАТЬ дату/время/личную информацию в свободном тексте ДО вызова функции. "
             "Ты должен сперва только узнать намерение "
-            "и вызывать эту функцию если есть намерение записаться на пробный урок/занятие"
+            "и вызывать эту функцию если есть намерение записаться на пробный урок/занятие. "
+            "НЕ вызывай эту функцию для взрослых, персональных, индивидуальных, one-on-one "
+            "тренировок или консультации по цене — по таким вопросам нужно отвечать текстом "
+            "и направлять к администратору. "
             "НЕ вызывай эту функцию, если пользователь хочет ИЗМЕНИТЬ, ОТМЕНИТЬ уже существующую запись — "
             "для этого есть cancel_booking."
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
+SELECT_TRIAL_INTENT_LLM = {
+    "type": "function",
+    "function": {
+        "name": "route_trial_message",
+        "description": (
+            "Classify the latest message for an academy trial/QA WhatsApp bot. "
+            "Return exactly one intent and the user's language."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "question_price",
+                        "question_schedule",
+                        "question_location",
+                        "question_age",
+                        "question_trial_rules",
+                        "question_personal_training",
+                        "question_adult_training",
+                        "question_child_training",
+                        "question_payment",
+                        "question_discounts",
+                        "question_contacts",
+                        "trial_new",
+                        "trial_continue",
+                        "trial_edit",
+                        "trial_status",
+                        "trial_cancel",
+                        "human_help",
+                        "other",
+                    ],
+                    "description": "Single best intent for the user's latest message.",
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["ru", "kk"],
+                    "description": "Language of the user's latest message.",
+                },
+            },
+            "required": ["type", "lang"],
+        },
+    },
+}
+
+
+EXTRACT_TRIAL_DATA_LLM = {
+    "type": "function",
+    "function": {
+        "name": "extract_trial_data",
+        "description": (
+            "Extract structured intake data and preferred schedule from a trial "
+            "signup conversation. Return null for side questions, greetings, "
+            "acknowledgements, bot-identity questions, or small talk. Preferences "
+            "are not final group/date/time choices."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "child_name": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Child's name. Null unless explicitly provided as a plausible name. "
+                        "Never use questions, greetings, acknowledgements, commands, or "
+                        "whole sentences as a name."
+                    ),
+                },
+                "child_birth_year": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "Four-digit student's birth year. If the user clearly gives their own "
+                        "age for self-signup, such as 'мне 15 лет' or 'маған 15 жас', return the "
+                        "estimated birth year using the current year. Null unless explicit."
+                    ),
+                },
+                "experience": {
+                    "type": ["string", "null"],
+                    "enum": ["Beginner", "Intermediate", "Advanced", None],
+                    "description": (
+                        "Training level. Map beginner/новичок/бастапқы to Beginner, "
+                        "intermediate/средний/орта to Intermediate, advanced/продвинутый/жоғары to Advanced."
+                    ),
+                },
+                "school_shift": {
+                    "type": ["string", "null"],
+                    "enum": ["morning", "afternoon", None],
+                    "description": (
+                        "Child's school shift, not desired training time. "
+                        "morning means studies in the morning; afternoon means studies in the afternoon."
+                    ),
+                },
+                "preferred_date": {
+                    "type": ["string", "null"],
+                    "description": "Preferred trial date as YYYY-MM-DD, or null.",
+                },
+                "preferred_weekday": {
+                    "type": ["integer", "null"],
+                    "description": "Preferred weekday 0=Monday through 6=Sunday, or null.",
+                },
+                "preferred_time_start": {
+                    "type": ["string", "null"],
+                    "description": "Preferred start time HH:MM, or null.",
+                },
+                "preferred_time_end": {
+                    "type": ["string", "null"],
+                    "description": "Preferred end time HH:MM, or null.",
+                },
+            },
+            "required": [
+                "child_name",
+                "child_birth_year",
+                "experience",
+                "school_shift",
+                "preferred_date",
+                "preferred_weekday",
+                "preferred_time_start",
+                "preferred_time_end",
+            ],
+        },
     },
 }
 
@@ -51,9 +182,9 @@ EDIT_TRIAL_TOOL = {
                     "type": "string",
                     "description": "Новое значение смены учебы ребенка клиента. Опускай, если смена учебы не меняется.",
                 },
-                "child_age": {
+                "child_birth_year": {
                     "type": "integer",
-                    "description": "Новый возраст ребенка клиента. Опускай, если возраст ребенка клиента не меняется.",
+                    "description": "Новый год рождения ребенка клиента. Опускай, если год рождения не меняется.",
                 },
                 "child_name": {
                     "type": "string",

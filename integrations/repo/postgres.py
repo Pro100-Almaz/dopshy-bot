@@ -8,7 +8,8 @@ import psycopg2.extras
 import psycopg2.pool
 
 import config
-from integrations.booking_service import _record_event
+from integrations.booking_service import _record_event, _record_status_change, _history_source
+from integrations.repo.history_repo import _record_history
 from integrations.repo.utils import _conn, _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _ACADEMY_DRAFT_FIELDS = {
     "trial_day", "start_time", "end_time", "notes", "group_id",
-    "state", "language", "client_token", "phone", "child_age", "child_name",
-    "group_type",
+    "state", "language", "client_token", "phone", "child_name",
+    "child_birth_year", "experience", "school_shift",
+    "preferred_date", "preferred_weekday", "preferred_time_start",
+    "preferred_time_end",
 }
 
 _ARENA_DRAFT_FIELDS = {
@@ -33,7 +36,7 @@ draft_types = {"academy": _ACADEMY_DRAFT_FIELDS, "arena": _ARENA_DRAFT_FIELDS}
 
 _DRAFTS_BY_BOTS = {
     "dopsy_bot": "arena",
-    "chatbot_2": "academy",
+    "dopsy_fs_school": "academy",
     "dopsy_boxing": "academy",
 }
 
@@ -61,6 +64,7 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
                 object_id = row["id"]
                 if type_string == "booking":
                     _record_event(cur, object_id, "draft_created", "whatsapp", chat_id)
+                    _record_history(cur, object_id, "chatbot:Бот", key="booking_created")
             else:
                 cur.execute(
                     f"SELECT id FROM {table_name} WHERE client_token = %s", (patch['client_token'],)
@@ -97,11 +101,14 @@ def update_draft(bot_name: str, object_id: int, state: str = 'draft', **patch) -
     return _err("BOOKING_WRONG_STATE", "Эту запись уже нельзя изменить.")
 
 
-def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whatsapp",
-                   actor_id: str | None = None, reason: str | None = None) -> dict:
+def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatbot:Бот",
+                   actor_id: str | None = None, reason: str | None = None,
+                   target_state: str = "cancelled") -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
     table_name = "bookings" if bot_name == "dopsy_bot" else "academy_trials"
+    cancelled = False
+    row = None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             extra = ""
@@ -115,29 +122,57 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "whats
                     )
                 """
                 params = (object_id, object_id)
+            cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
+            _prev = cur.fetchone()
+            old_state = _prev["state"] if _prev else None
+            # The id/group_transition alternatives are bracketed as ONE term, so
+            # the terminal-state guard covers both. Without the brackets AND
+            # binds tighter than OR, `id = %s` matches on its own, and a second
+            # cancel re-cancels a row that is already gone: another event, another
+            # history line, another "your booking is cancelled" to the client —
+            # and a cancelled booking silently re-stated as 'unpaid' by the TTL
+            # sweeper, which passes its own target_state.
             cur.execute(
-                f"UPDATE {table_name} SET state = 'cancelled', updated_at = NOW() "
-                f"WHERE (id = %s ) {extra}"
-                "AND state NOT IN ('cancelled', 'failed') RETURNING id",
-                params,
+                f"UPDATE {table_name} SET state = %s, updated_at = NOW() "
+                f"WHERE ((id = %s) {extra}) "
+                "AND state NOT IN ('cancelled', 'failed', 'unpaid') RETURNING id",
+                (target_state,) + params,
             )
             if cur.fetchone():
                 table_del = "trial_sessions"
                 types_string = "trial"
                 if bot_name == "dopsy_bot":
-                    _record_event(cur, object_id, "cancelled", actor_type, actor_id, reason)
+                    _record_event(cur, object_id, target_state, actor_type, actor_id, reason)
+                    _record_status_change(cur, object_id, old_state, target_state,
+                                          _history_source(actor_type, actor_id))
                     table_del = "booking_sessions"
                     types_string = "booking"
 
                 cur.execute(
                     f"DELETE FROM {table_del} WHERE {types_string}_id = {object_id}"
                 )
-                return _ok({"object_id": object_id})
-            cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
-            row = cur.fetchone()
+                cancelled = True
+            else:
+                cur.execute(f"SELECT state FROM {table_name} WHERE id = %s", (object_id,))
+                row = cur.fetchone()
+
+    if cancelled:
+        if bot_name == "dopsy_bot":
+            # AFTER commit: cancels any open ApiPay invoice covering this booking
+            # (and re-issues for the rest of its batch), so the client can no
+            # longer pay for a slot that was just released. Never raises.
+            from integrations import apipay_service  # local import avoids import cycle
+            apipay_service.on_bookings_cancelled(
+                [object_id], reason=reason or target_state)
+        # `cancelled` says this call is what moved the row, as opposed to
+        # finding it already gone. Callers that notify the client key on it:
+        # both branches answer ok, and a second DELETE must not send a second
+        # "your booking is cancelled" message.
+        return _ok({"object_id": object_id, "cancelled": True})
     if not row:
         return _err("NOT_FOUND", "Запись не найдена.")
-    return _ok({"object_id": object_id}, message="Запись уже была отменена.")
+    return _ok({"object_id": object_id, "cancelled": False},
+               message="Запись уже была отменена.")
 
 
 # ---------------------------------------------------------------------------
@@ -189,3 +224,45 @@ def delete_session(bot_name: str, chat_id: str) -> None:
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {table_name} WHERE chat_id = %s", (chat_id,))
+
+
+# ---------------------------------------------------------------------------
+#  Webhook enabledness
+# ---------------------------------------------------------------------------
+
+def is_ycloud_enabled(bot_name: str = "arena") -> bool:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT is_enabled FROM ycloud_enabled WHERE bot_name = %s",
+                (bot_name,),
+            )
+            row = cur.fetchone()
+            return row["is_enabled"] if row else True
+
+
+def set_ycloud_enabled(
+    enabled: bool | None = None,
+    actor: str = "",
+    bot_name: str = "arena",
+) -> bool:
+    if enabled is None:
+        value_expr, params = "NOT is_enabled", (actor,)
+    else:
+        value_expr, params = "%s", (enabled, actor)
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE ycloud_enabled SET is_enabled = {value_expr}, "
+                f"updated_at = NOW(), updated_by = %s "
+                f"WHERE bot_name = %s RETURNING is_enabled",
+                (*params, bot_name),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"ycloud_enabled has no row for bot_name={bot_name!r} — run migrations and seeds"
+        )
+    return row["is_enabled"]

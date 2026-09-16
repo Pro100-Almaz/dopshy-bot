@@ -17,6 +17,88 @@ def today_almaty() -> date:
     return now_almaty().date()
 
 
+_END_OF_DAY = ("23:59", "24:00")
+
+
+def normalize_end_time(time_start: str, time_end: str) -> str:
+    """Normalize an end-of-day end-time to the stored 23:59 sentinel.
+
+    A booking ending at 00:00 or 24:00 means "until the end of the day", not a
+    day-crossing (transitive) range, so it should be stored as a single
+    booking. Return 23:59 in that case. "24:00" is the explicit end-of-day
+    marker the manager frontend sends and is always end-of-day (even for a
+    full-day 00:00-24:00 slot). A true zero-duration 00:00-00:00 range (start
+    is also midnight) is left untouched so the caller can reject it as invalid.
+    """
+    ts, te = str(time_start)[:5], str(time_end)[:5]
+    if te == "24:00":
+        return "23:59"
+    if te == "00:00" and ts != "00:00":
+        return "23:59"
+    return te
+
+
+def display_end_time(time_end) -> str:
+    """Show an end-of-day end time to users as 00:00.
+
+    A booking that runs to the end of the day is stored as 23:59 (or the
+    transitive first-half boundary 23:59:59, which floors to 24:00). Display
+    that as 00:00, which reads as midnight on the sheet and in WhatsApp.
+    """
+    te = str(time_end)[:5]
+    return "00:00" if te in _END_OF_DAY else te
+
+
+def is_valid_time_str(value) -> bool:
+    """True if value is a real 24-hour time in HH:MM form.
+
+    Accepts 00:00–23:59 and the end-of-day marker 24:00. Rejects impossible
+    values the LLM extractor may emit, e.g. "24:30", "25:00", "18:70", so
+    downstream datetime parsing never raises.
+    """
+    if not value:
+        return False
+    s = str(value)[:5]
+    if s == "24:00":
+        return True
+    try:
+        datetime.strptime(s, "%H:%M")
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def is_valid_date_str(value) -> bool:
+    """True if value is a real calendar date in YYYY-MM-DD form.
+
+    Rejects impossible values the LLM extractor may emit, e.g. "2026-13-40",
+    "2026-02-30", so downstream date parsing never raises.
+    """
+    if not value:
+        return False
+    try:
+        date.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def parse_player_count(value) -> int | None:
+    """Return a positive int player count, or None if value isn't a valid one.
+
+    Guards against the extractor emitting a non-integer (e.g. "много", 3.5,
+    "10 человек") where int() would otherwise raise. Invalid input becomes
+    None rather than being coerced.
+    """
+    if value is None:
+        return None
+    try:
+        n = int(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+    return n if n > 0 else None
+
+
 def is_past_booking_time(date_str: str, time_start_str: str | None = None) -> bool:
     """True if the booking date (+ optional start time) has already passed in BOOKING_TIMEZONE."""
     now = now_almaty()

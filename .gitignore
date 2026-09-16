@@ -13,3 +13,5 @@ build/
 CLAUDE.md
 secrets/
 *.db
+.omc/
+nginx/.omc/

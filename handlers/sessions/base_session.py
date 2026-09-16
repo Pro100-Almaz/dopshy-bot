@@ -6,7 +6,7 @@ from datetime import date, datetime, time
 from chat.conversation import clear_history
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import postgres
-from utils import today_almaty, is_past_booking_time
+from utils import today_almaty, is_past_booking_time, normalize_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ class BaseStepHandler:
             return "no"
         return ""
 
-    def get_free_now(self, days: list | None = None):
+    def get_free_now(self, days: list | None = None, params: dict | None = None):
         return {}
 
     def handle_step_confirm(
@@ -183,7 +183,7 @@ class BaseStepHandler:
                 postgres.cancel_booking_trial(
                     self.builder.bot_name,
                     object_id=params[id_type],
-                    actor_type="whatsapp",
+                    actor_type="chatbot:Бот",
                     actor_id=chat_id,
                     reason="user_declined"
                 )
@@ -200,7 +200,7 @@ class BaseStepHandler:
         lang = params.get("lang", "ru")
         # Always recompute available_days here so a session that crossed midnight
         # doesn't keep offering yesterday's date.
-        free_now = self.get_free_now()
+        free_now = self.get_free_now(params=params)
         available_days = sorted({w["date"] for w in free_now})
         params["available_days"] = [str(d) for d in available_days]
         logger.info(self.LOGGER_MESSAGES["step_date_info"], available_days, user_text)
@@ -245,12 +245,17 @@ class BaseStepHandler:
             logger.info(self.LOGGER_MESSAGES["step_date_rejected"], chosen, available_days)
             return self.builder.ask_date(available_days, lang) + "\n\n" + self.builder.data_localization(lang, "ask_date_invalid")
 
-        free = self.get_free_now([chosen.weekday()])
+        free = self.get_free_now([chosen.weekday()], params=params)
         day_windows = [w for w in free if w["date"] == chosen]
         logger.info(self.LOGGER_MESSAGES["step_date_accepted"],chosen, len(day_windows))
 
         params["date"] = str(chosen)
-        postgres.update_draft(self.builder.bot_name, object_id=params[f"{self.builder.booking_or_trial}_id"], date=str(chosen))
+        date_field = "date" if self.builder.booking_or_trial == "booking" else "trial_day"
+        postgres.update_draft(
+            self.builder.bot_name,
+            object_id=params[f"{self.builder.booking_or_trial}_id"],
+            **{date_field: str(chosen)},
+        )
         self.save_session(chat_id, "step_time", params)
         return self.builder.ask_time(chosen, day_windows, lang)
 
@@ -307,6 +312,11 @@ class BaseStepHandler:
                 "response": f"{self.builder.data_localization(lang, "time_inverted")}\n\n" +
                                 f"{self.builder.ask_time(chosen_date, day_windows, lang)}"
             }
+
+        # A midnight end-time (00:00) means "until end of day", not a day
+        # transition — store it as a single booking ending at 23:59 so it is
+        # not split into a redundant 00:00→00:00 second booking.
+        time_end = normalize_end_time(time_start, time_end)
 
         if is_past_booking_time(params["date"], time_start):
             return {

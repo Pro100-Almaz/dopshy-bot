@@ -16,9 +16,18 @@ import json
 import os
 import sqlite3
 import threading
+from datetime import datetime
 from typing import TypedDict
+from zoneinfo import ZoneInfo
 
 import config
+
+_LOCAL_TZ = ZoneInfo(config.BOOKING_TIMEZONE)
+
+
+def _local_now() -> str:
+    """Current Asia/Almaty time as 'YYYY-MM-DD HH:MM:SS' (matches SQLite's format)."""
+    return datetime.now(_LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Message(TypedDict):
@@ -68,12 +77,12 @@ def _save_to_db(chat_id: str, messages: list[Message]) -> None:
         conn.execute(
             """
             INSERT INTO conversations (chat_id, messages, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 messages   = excluded.messages,
                 updated_at = excluded.updated_at
             """,
-            (chat_id, json.dumps(messages, ensure_ascii=False)),
+            (chat_id, json.dumps(messages, ensure_ascii=False), _local_now()),
         )
 
 
@@ -111,3 +120,23 @@ def clear_history(chat_id: str) -> None:
         _cache[chat_id] = []
         _loaded.add(chat_id)
         _save_to_db(chat_id, [])
+
+
+def list_contacts(phone_number_id: str | None = None) -> list[dict]:
+    """Return every conversation's raw chat_id and last-activity timestamp.
+
+    chat_id is stored as "<phone_number_id>:<sender_phone>" (older rows may be a
+    bare phone). Callers extract and normalize the sender phone themselves — this
+    reader stays free of phone-format concerns so it has no cross-module deps.
+    """
+    with sqlite3.connect(config.CONVERSATION_DB_PATH) as conn:
+        if phone_number_id:
+            rows = conn.execute(
+                "SELECT chat_id, updated_at FROM conversations WHERE chat_id LIKE ?",
+                (f"{phone_number_id}:%",),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT chat_id, updated_at FROM conversations"
+            ).fetchall()
+    return [{"chat_id": r[0], "updated_at": r[1]} for r in rows]

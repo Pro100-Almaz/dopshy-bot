@@ -17,8 +17,8 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 _HEADERS = {
-        'groups' : ['group_id', 'group_name', 'max_cap', 'curr_cap', 'training_day', 'start_time',	'end_time'],
-        'trials' : ['trial_id',	'child_name',	'child_age',	'language',	'phone',	'group_id',	'trial_day',
+        'groups' : ['group_id', 'group_name', 'max_cap', 'curr_cap', 'birth_years', 'location', 'level', 'trainer', 'field', 'training_day', 'start_time',	'end_time'],
+        'trials' : ['trial_id',	'child_name',	'child_birth_year',	'language',	'phone',	'group_id',	'trial_day',
                     'start_time',	'end_time',	'state',	'notes',	'attended',	'subscribed']
     }
 
@@ -86,6 +86,11 @@ def _group_to_row(g: dict) -> list:
         str(g["group_name"]),
         g["max_cap"],
         g.get("curr_cap", 0),
+        ", ".join(str(year) for year in (g.get("birth_years") or [])),
+        g.get("location"),
+        ", ".join(g.get("level") or []),
+        g.get("trainer"),
+        f"Field {g.get('field')}" if g.get("field") else "",
         WEEKDAY_RU[g["training_day"]],
         str(g["time_start"]),
         str(g["time_end"]),
@@ -96,7 +101,7 @@ def _trial_to_row(g: dict) -> list:
     return [
         str(g["id"]),
         str(g["child_name"]),
-        g["child_age"],
+        g.get("child_birth_year"),
         g["language"],
         str(g["phone"]),
         g["group_id"],
@@ -158,18 +163,19 @@ def refresh_all_groups() -> None:
 # ------------ Trials
 
 def upsert_trial_row(trial: dict) -> None:
-    """Insert or update the row for a single grouping (matched by booking_id in col A)."""
+    """Insert or update the row for a single trial (matched by trial_id in col A)."""
     if not config.GOOGLE_SPREADSHEET_ID:
         return
     try:
-        curriculum = get_group_by_id(trial['group_id'])['curriculum']
+        group = get_group_by_id(trial['group_id'])
+        curriculum = group.get('curriculum') or group.get('group_type')
         ws = _get_worksheet(curriculum, 'trials')
         row_values = _trial_to_row(trial)
         col_a = ws.col_values(1)  # includes header in row 1
         target = str(trial["id"])
         try:
             idx = col_a.index(target) + 1  # 1-based sheet row
-            ws.update(f"A{idx}:{_last_col_letter(_GROUP_COL_COUNT)}{idx}", [row_values],
+            ws.update(f"A{idx}:{_last_col_letter(_TRIAL_COL_COUNT)}{idx}", [row_values],
                       value_input_option="USER_ENTERED")
         except ValueError:
             ws.append_row(row_values, value_input_option="USER_ENTERED")
@@ -194,7 +200,3 @@ def refresh_all_trials() -> None:
             logger.info("Refreshed TRIAL sheets — %d rows.", len(rows))
     except Exception as exc:
         logger.error("Sheets refresh_all_trials failed: %s", exc)
-
-
-
-

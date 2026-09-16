@@ -38,3 +38,49 @@ def test_parse(name, bank, amount, bin_, phone, ref):
 
 def test_halyk_recipient_name():
     assert "Мухтар" in _parse("halyk_receipt_3125347834.pdf")["name"]
+
+
+# --- Kazakh-language receipts -------------------------------------------------
+# No committed Kazakh sample PDFs, so exercise the full parse_receipt() path by
+# feeding representative extracted text (labels the Kaspi/Halyk KZ UIs emit).
+
+def _parse_text(monkeypatch, text):
+    monkeypatch.setattr("integrations.receipt_parser.extract_text", lambda _b: text)
+    return parse_receipt(b"pdf")
+
+
+def test_kazakh_kaspi(monkeypatch):
+    text = (
+        "Фискалдық түбіртек\n"
+        "Kaspi.kz\n"
+        "Түбіртек № QR15586394175\n"
+        "Сатушының ЖСН/БСН 870203301478\n"
+        "Алушы DOPSHY\n"
+        "20 000 ₸\n"
+        "26.07.2026 12:30\n"
+    )
+    d = _parse_text(monkeypatch, text)
+    assert d["bank"] == "kaspi"
+    assert d["amount"] == 20000
+    assert d["bin"] == "870203301478"
+    assert d["ref"] == "QR15586394175"
+    assert d["name"] and "DOPSHY" in d["name"]
+    assert d["date"] is not None
+
+
+def test_kazakh_halyk(monkeypatch):
+    text = (
+        "Ақша аудару\n"
+        "Түбіртек № 3125347834\n"
+        "Алушы Мухтар А.\n"
+        "Қайда +7 702 972 1819\n"
+        "25 000 ₸\n"
+        "26.07.2026 12:30\n"
+    )
+    d = _parse_text(monkeypatch, text)
+    assert d["bank"] == "halyk"
+    assert d["amount"] == 25000
+    assert d["ref"] == "3125347834"
+    assert d["phone"] == "77029721819"
+    assert "Мухтар" in d["name"]
+    assert d["date"] is not None

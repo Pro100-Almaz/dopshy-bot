@@ -18,8 +18,6 @@ class BaseAsker:
             return self.localize(lang, "ask_time")
         if data.get("field") is None:
             return self.localize(lang, "ask_field")
-        if data.get("players") is None:
-            return self.localize(lang, "ask_players")
         if data.get("customer_name") is None:
             return self.localize(lang, "ask_name")
         return ""

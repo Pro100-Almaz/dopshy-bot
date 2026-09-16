@@ -37,12 +37,20 @@ from handlers.base_classes.base_checker import BaseChecker
 from handlers.base_classes.base_draft_handler import BaseDraftHandler
 from handlers.base_classes.base_format import BaseFormat
 from handlers.base_classes.base_helper import BaseHelper
+from integrations import apipay_client, apipay_service
 from integrations import booking as booking_logic
 from integrations import booking_service
+from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
-from utils import is_past_booking_time
+from utils import (
+    is_past_booking_time,
+    is_valid_date_str,
+    is_valid_time_str,
+    normalize_end_time,
+    parse_player_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +125,8 @@ T = {
                              "kk": "⚽ {fmt}, {date}\nБос уақыт: {times}"},
     "field_full_week":      {"ru": "{fmt} занято в ближайшие 7 дней.",
                              "kk": "{fmt} жақын 7 күнде бос емес."},
-    "field_slots":          {"ru": "⚽ {fmt} — свободные слоты:",
-                             "kk": "⚽ {fmt} — бос слоттар:"},
+    "field_slots":          {"ru": "⚽ Давайте забронируем поле {fmt}!",
+                             "kk": "⚽ {fmt} алаңын борндайық!"},
     "confirm_header":       {"ru": "📋 Детали брони:",
                              "kk": "📋 Брондау деректері:"},
     "confirm_question":     {"ru": "Подтвердить?",
@@ -137,22 +145,69 @@ T = {
                                     "📅 {date}\n"
                                     "⏰ {ts}–{te}\n"
                                     "⚽ {fmt}\n"
-                                    "👥 Игроков: {players}\n"
                                     "👤 Имя: {name}\n"
                                     "💰 {price}\n\n"
                                     "Оплатите аванс на сумму не менее 10тысяч тг:\n{pay_url}\n"
+                                    "💳 По желанию вы можете оплатить полную сумму сразу.\n"
                                     "⚠️ Возврат при неявке не производится\n\n"
-                                    "Отправьте PDF-чек сюда 🙏\n⚠️ 15 мин без оплаты — бронь отменится."),
+                                    "⚠️ 20 мин без оплаты — бронь отменится."),
                              "kk": ("📋 Брондау тіркелді!\n\n"
                                     "📅 {date}\n"
                                     "⏰ {ts}–{te}\n"
                                     "⚽ {fmt}\n"
-                                    "👥 Ойыншылар: {players}\n"
                                     "👤 Аты: {name}\n"
                                     "💰 {price}\n\n"
                                     "Аванс ретінде кемінде 10мың тг төлем жасаңыз:\n{pay_url}\n"
+                                    "💳 Қаласаңыз толық соманы бірден төлей аласыз.\n"
                                     "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
-                                    "PDF-чек жіберіңіз 🙏\n⚠️ 15 мин төлемсіз — брондау жойылады.")},
+                                    "⚠️ 20 мин төлемсіз — брондау жойылады.")},
+    # ApiPay path: the client confirms the push in their own Kaspi app, so
+    # there is no link to follow and no receipt to send back.
+    "booking_done_apipay":  {"ru": ("📋 Бронь оформлена!\n\n"
+                                    "📅 {date}\n"
+                                    "⏰ {ts}–{te}\n"
+                                    "⚽ {fmt}\n"
+                                    "👤 Имя: {name}\n"
+                                    "💰 {price}\n\n"
+                                    "💳 Счёт на аванс {avans} отправлен в ваше приложение Kaspi — "
+                                    "подтвердите оплату там.\n"
+                                    "Остаток оплачивается на месте.\n"
+                                    "⚠️ Возврат при неявке не производится\n\n"
+                                    "⚠️ 20 мин без оплаты — бронь отменится."),
+                             "kk": ("📋 Брондау тіркелді!\n\n"
+                                    "📅 {date}\n"
+                                    "⏰ {ts}–{te}\n"
+                                    "⚽ {fmt}\n"
+                                    "👤 Аты: {name}\n"
+                                    "💰 {price}\n\n"
+                                    "💳 {avans} аванс шоты Kaspi қосымшаңызға жіберілді — "
+                                    "төлемді сол жерде растаңыз.\n"
+                                    "Қалған сома орында төленеді.\n"
+                                    "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
+                                    "⚠️ 20 мин төлемсіз — брондау жойылады.")},
+    # The avans invoice could not be raised, so the booking was not kept. The
+    # provider's own wording goes in verbatim ({error}) — it is the only thing
+    # that tells a manager what actually happened when the client forwards this.
+    "apipay_failed":        {"ru": ("⚠️ Не удалось выставить счёт на аванс.\n"
+                                    "{error}\n\n"
+                                    "Бронь не создана — слот остался свободным.\n"
+                                    "📞 Позвоните менеджеру, он забронирует вручную."),
+                             "kk": ("⚠️ Аванс шотын жасау мүмкін болмады.\n"
+                                    "{error}\n\n"
+                                    "Брондау жасалмады — слот бос қалды.\n"
+                                    "📞 Менеджерге қоңырау шалыңыз, ол қолмен брондайды.")},
+    # The number is not registered in Kaspi, so the avans cannot be pushed to
+    # it at all. Checked before the slot is reserved — nothing was created, and
+    # the client can only be helped by a manager (their WhatsApp number is the
+    # one we would bill, so there is nothing for them to correct here).
+    "apipay_no_kaspi":      {"ru": ("⚠️ Номер {phone} не зарегистрирован в Kaspi.\n\n"
+                                    "Аванс выставляется в приложение Kaspi, поэтому "
+                                    "бронь не создана — слот остался свободным.\n"
+                                    "📞 Позвоните менеджеру: он забронирует вручную."),
+                             "kk": ("⚠️ {phone} нөмірі Kaspi-де тіркелмеген.\n\n"
+                                    "Аванс Kaspi қосымшасына жіберіледі, сондықтан "
+                                    "брондау жасалмады — слот бос қалды.\n"
+                                    "📞 Менеджерге қоңырау шалыңыз, ол қолмен брондайды.")},
     "cancelled":            {"ru": "Бронь отменена. Напишите, если что! 🙂",
                              "kk": "Брондау тоқтатылды. Қаласаңыз жазыңыз! 🙂"},
     "general_header":       {"ru": "Давайте забронируем! Свободные слоты:",
@@ -212,6 +267,7 @@ class LlmBookingFlowHandler:
         user_message: str,
         phone: str,
         lang: str = "ru",
+        provider: str = "ycloud",
     ) -> str | None:
         """
         Process one user message through the LLM booking flow.
@@ -222,11 +278,33 @@ class LlmBookingFlowHandler:
         """
         data["lang"] = lang
 
+        # Guard against malformed values the extractor may emit despite the
+        # prompt (e.g. "24:30", "2026-13-40", a non-numeric player count).
+        # Invalid data is dropped to None — never normalized/guessed — so the
+        # flow simply re-asks for it instead of crashing on datetime parsing.
+        if not is_valid_date_str(data.get("date")):
+            if data.get("date"):
+                logger.warning("[LLM_FLOW] Dropping invalid date: %r", data.get("date"))
+            data["date"] = None
+        for key in ("time_start", "time_end"):
+            if data.get(key) and not is_valid_time_str(data[key]):
+                logger.warning("[LLM_FLOW] Dropping invalid %s: %r", key, data[key])
+                data[key] = None
+        data["players"] = parse_player_count(data.get("players"))
+
         for key in ("time_start", "time_end"):
             if data.get(key):
+                # "24:00" (end-of-day) isn't a parseable clock time; floor it as
+                # 00:00 — normalize_end_time() below restores the end-of-day value.
+                hhmm = "00:00" if str(data[key])[:5] == "24:00" else str(data[key])[:5]
                 data[key] = floor_time_to_30_minutes(
-                    datetime.strptime(data[key], "%H:%M").time()
+                    datetime.strptime(hhmm, "%H:%M").time()
                 )
+
+        # A midnight end-time (00:00) means "until end of day" — keep it a
+        # single booking ending 23:59 instead of a day-crossing pair.
+        if data.get("time_start") and data.get("time_end"):
+            data["time_end"] = normalize_end_time(data["time_start"], data["time_end"])
 
         # data["field"] from the extractor is a format string ("5x5", "6x6"),
         # not a field ID.
@@ -280,7 +358,7 @@ class LlmBookingFlowHandler:
                 confirm = self.checker.check_confirm_response(user_message)
                 if confirm == "yes":
                     logger.info("[LLM_FLOW] YES → finalize id=%d", draft["id"])
-                    return self._finalize_booking(draft, chat_id, phone, lang)
+                    return self._finalize_booking(draft, chat_id, phone, lang, provider)
                 if confirm == "no":
                     logger.info("[LLM_FLOW] NO → cancel id=%d", draft["id"])
                     return self._cancel_draft(draft, chat_id, lang)
@@ -362,14 +440,56 @@ class LlmBookingFlowHandler:
 
     def _finalize_booking(
         self, draft: dict, chat_id: str, phone: str, lang: str = "ru",
+        provider: str = "ycloud",
     ) -> str:
         """
         Transition draft → awaiting_payment via booking_service.request_payment.
+
+        When ApiPay is configured the client's number is checked against Kaspi
+        first (a number Kaspi does not know can never pay an invoice), the avans
+        invoice is QUEUED in the same transaction that reserves the slot, then
+        sent once that has committed — so a failed send can never erase the
+        record of what was asked for. The
+        Kaspi link + PDF-receipt flow stays as the fallback for when ApiPay is
+        off or the send did not go through.
         """
         booking_id = draft["id"]
         client_token = str(draft.get("client_token", ""))
 
-        result = booking_service.request_payment(booking_id, client_token)
+        invoice_hook = None
+        if config.APIPAY_ENABLED:
+            try:
+                apipay_client.normalize_phone(phone)
+            except ApiPayError as exc:
+                logger.warning("[LLM_FLOW] Телефон %s не годится для ApiPay: %s", phone, exc)
+            else:
+                # Kaspi is asked about the number BEFORE the slot is reserved.
+                # An invoice to a number it does not know is accepted by ApiPay
+                # and only fails minutes later as a webhook — the client would be
+                # told their booking is waiting for a payment request that can
+                # never arrive, hold the slot until the TTL, and the dead invoice
+                # would still be counted against the daily quota.
+                try:
+                    apipay_service.ensure_kaspi_client(phone)
+                except KaspiClientMissing:
+                    logger.warning("[LLM_FLOW] Номер %s не в Kaspi — бронь id=%d не создана",
+                                   phone, booking_id)
+                    return self.asker.localize(lang, "apipay_no_kaspi", phone=phone)
+                except ApiPayError as exc:
+                    logger.error("[LLM_FLOW] Проверка номера %s в Kaspi не удалась: %s",
+                                 phone, exc)
+                    return self.asker.localize(lang, "apipay_failed", error=str(exc))
+
+                def invoice_hook(cur, booking_ids):  # noqa: F811
+                    return {"invoice": apipay_service.queue_invoice(
+                        cur, phone, booking_ids, slot_count=1,
+                        description="Аванс за бронь", source="bot",
+                        notify_chat_id=chat_id, notify_provider=provider,
+                        notify_lang=lang,
+                    )}
+
+        result = booking_service.request_payment(booking_id, client_token,
+                                                 on_reserved=invoice_hook)
 
         if not result["ok"]:
             if result["code"] == "SLOT_TAKEN":
@@ -392,24 +512,46 @@ class LlmBookingFlowHandler:
         name = draft.get("customer_name", "")
 
         logger.info("[LLM_FLOW] Booking id=%d → awaiting_payment", booking_id)
+
+        # The reservation is committed; the ApiPay call is deliberately out here.
+        # No invoice means no booking: the reservation is taken back and the
+        # client is told what went wrong and to call a manager, rather than
+        # being left holding a slot with no way to pay for it.
+        queued = (result.get("data") or {}).get("invoice")
+        sent = None
+        if queued:
+            try:
+                sent = apipay_service.send_invoice(queued)
+            except ApiPayError as exc:
+                apipay_service.rollback_failed_send(queued, str(exc))
+                logger.error("[LLM_FLOW] Счёт не выставлен для брони id=%d — "
+                             "бронь отменена: %s", booking_id, exc)
+                clear_history(chat_id)
+                refresh_all_bookings()
+                refresh_week_sheet()
+                return self.asker.localize(lang, "apipay_failed", error=str(exc))
+
         clear_history(chat_id)
         refresh_all_bookings()
         refresh_week_sheet()
 
         total = calculate_full_booking_price(fmt, d, ts, te)
+        common = dict(date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
+                      fid=field_id, fmt=fmt, name=name, price=fmt_price(total))
 
+        if sent:
+            return self.asker.localize(
+                lang, "booking_done_apipay",
+                avans=fmt_price(sent["amount"]), **common)
         return self.asker.localize(lang, "booking_done",
-                  date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
-                  fid=field_id, fmt=fmt, players=players,
-                  name=name, price=fmt_price(total),
-                  pay_url=config.KASPI_PAYMENT_URL)
+                                   pay_url=config.KASPI_PAYMENT_URL, **common)
 
     def _cancel_draft(self, draft: dict, chat_id: str, lang: str = "ru") -> str:
         """Cancel the draft and return user-facing confirmation."""
         clear_history(chat_id)
         postgres.cancel_booking_trial(
             self.BOT_NAME, draft["id"],
-            actor_type="whatsapp", reason="user_cancel_llm_flow",
+            actor_type="chatbot:Бот", reason="user_cancel_llm_flow",
         )
         logger.info("[LLM_FLOW] Draft id=%d cancelled", draft["id"])
         return self.asker.localize(lang, "cancelled")
@@ -429,7 +571,6 @@ class LlmBookingFlowHandler:
         has_ts = data.get("time_start") is not None
         has_te = data.get("time_end") is not None
         has_field = data.get("field") is not None
-        has_players = data.get("players") is not None
         has_name = data.get("customer_name") is not None
 
         # ── Rule 6: only one of start/end provided → ask for both ──
@@ -468,17 +609,15 @@ class LlmBookingFlowHandler:
                 fl = "\n".join(f"  • {fmt}" for fmt in formats)
                 return self.asker.localize(lang, "field_not_found") + "\n" + fl
 
-        # ── Rule 7: validate players ──
-        if has_players and int(data["players"]) <= 0:
-            return self.asker.localize(lang, "players_invalid")
-        if has_players and int(data["players"]) > config.MAX_PLAYERS:
+        # ── Players count is optional and no longer asked for. If the user
+        #    volunteered an out-of-range value, just drop it rather than block. ──
+        if data.get("players") is not None and (
+            int(data["players"]) <= 0 or int(data["players"]) > config.MAX_PLAYERS
+        ):
             data["players"] = None
-            has_players = False
-            return (self.asker.localize(lang, "players_overflow")
-                    + "\n" + self.asker.localize(lang, "ask_players"))
 
-        # ── All 6 fields → confirm ──
-        if has_date and has_time and has_field and has_players and has_name:
+        # ── All required fields → confirm ──
+        if has_date and has_time and has_field and has_name:
             return self.checker.check_and_confirm(data)
 
         # ── Rule 4: date + time + field → check slot, ask remaining ──

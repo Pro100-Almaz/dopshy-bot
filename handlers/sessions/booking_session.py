@@ -6,7 +6,6 @@ States
 step_date       Show numbered list of available days; user picks one.
 step_time       Show free windows for chosen day; user enters "HH:MM до HH:MM".
 step_field      If multiple fields free for that time: user picks one. (Auto-skipped if only one.)
-step_players    Ask player count; user enters an integer.
 step_name       Ask customer name; user enters free text.
 step_confirm    Show summary; user replies да / нет.
 
@@ -29,6 +28,7 @@ from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
+from utils import display_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,8 @@ _T = {
                                 "kk": "Алаң өлшемін таңдаңыз:"},
     "ask_field_invalid":      {"ru": "Пожалуйста, выберите размер поля.",
                                 "kk": "Алаң өлшемін таңдаңыз."},
-    "field_free_advance":     {"ru": "{fmt} — свободно ✅\n\nСколько игроков будет?",
-                                "kk": "{fmt} — бос ✅\n\nҚанша ойыншы болады?"},
+    "field_free_advance":     {"ru": "{fmt} — свободно ✅\n\nУкажите ваше имя:",
+                                "kk": "{fmt} — бос ✅\n\nАтыңызды жазыңыз:"},
     "ask_players":            {"ru": "Сколько игроков будет?",
                                 "kk": "Қанша ойыншы болады?"},
     "ask_players_invalid":    {"ru": "Пожалуйста, введите количество игроков (например: *8*).",
@@ -69,8 +69,8 @@ _T = {
                                 "kk": f"Макс. ойыншы саны: {config.MAX_PLAYERS}"},
     "ask_name":               {"ru": "Укажите ваше имя:",
                                 "kk": "Атыңызды жазыңыз:"},
-    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Игроков: {players}\n👤 Имя: {name}\n💰 {price}\n\nПодтвердить? Ответьте *да* или *нет*.",
-                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👥 Ойыншылар: {players}\n👤 Аты: {name}\n💰 {price}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
+    "summary":                {"ru": "📋 Детали брони:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👤 Имя: {name}\n💰 {price}\n\nПодтвердить? Ответьте *да* или *нет*.",
+                                "kk": "📋 Брондау деректері:\n📅 {date}\n⏰ {start}–{end}\n⚽ {fmt}\n👤 Аты: {name}\n💰 {price}\n\nРастайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "confirm_reshow":         {"ru": "Подтвердить бронь? Ответьте *да* или *нет*.",
                                 "kk": "Брондауды растайсыз ба? *иә* немесе *жоқ* деп жауап беріңіз."},
     "declined":               {"ru": "Бронирование отменено. Если захотите снова — просто напишите, что хотите забронировать поле. 🙂",
@@ -84,23 +84,21 @@ _T = {
     "booking_pending":        {"ru": "📋 Бронь зарегистрирована, но ещё не подтверждена!\n\n"
                                      "📅 {date}\n⏰ {start}–{end}\n"
                                      "⚽ {fmt}\n"
-                                     "👥 {players} игроков\n"
                                      "👤 {name}\n"
                                      "💰 {price}\n\n⏳ Статус: ожидает оплаты\n\n"
                                      "Для подтверждения брони оплатите аванс НЕ МЕНЕЕ 10тысяч тг по ссылке:\n{pay_url}\n"
+                                     "💳 По желанию вы можете оплатить полную сумму сразу.\n"
                                      "(⚠️ПРИМЕЧАНИЕ⚠️Возврат денежных средств не производится в случае неявки на игру.)\n\n"
-                                     "После оплаты отправьте PDF-чек из Kaspi сюда в чат — и мы сразу подтвердим вашу бронь. 🙏\n\n"
-                                     "⚠️ Если оплата не поступит в течении 15 минут — бронь будет автоматически отменена.",
+                                     "⚠️ Если оплата не поступит в течении 20 минут — бронь будет автоматически отменена.",
                                 "kk": "📋 Брондау тіркелді, бірақ әлі расталмады!\n\n"
                                       "📅 {date}\n⏰ {start}–{end}\n"
                                       "⚽ {fmt}\n"
-                                      "👥 {players} ойыншы\n"
                                       "👤 {name}\n"
                                       "💰 {price}\n\n⏳ Статус: төлем күтілуде\n\n"
                                       "Брондауды растау үшін КЕМІНДЕ 10мың тг көлемінде төлем жасаңыз:\n{pay_url}\n"
+                                      "💳 Қаласаңыз толық соманы бірден төлей аласыз.\n"
                                       "(⚠️ЕСКЕРТУ⚠️Ойынға келмей қалған жағдайда төлем қайтарылмайды.)\n\n"
-                                      "Төлегеннен кейін Kaspi-дің PDF-чекін осы чатқа жіберіңіз — брондауыңызды бірден растаймыз. 🙏\n\n"
-                                      "⚠️ 15 минут ішінде төлем келмесе — бронь автоматты түрде жойылады."},
+                                      "⚠️ 20 минут ішінде төлем келмесе — бронь автоматты түрде жойылады."},
     "field_label":            {"ru": "Поле", "kk": "Алаң"},
     "time_in_past":           {"ru": "⏰ Это время уже прошло. Укажите будущее время.",
                                 "kk": "⏰ Бұл уақыт өтіп кетті. Болашақ уақытты жазыңыз."},
@@ -276,7 +274,7 @@ def handle_booking_turn(
             bid = params.get("booking_id")
             if bid:
                 postgres.cancel_booking_trial(
-                    _BOT_NAME, bid, actor_type="whatsapp", actor_id=chat_id, reason="user_cancel_mid_flow"
+                    _BOT_NAME, bid, actor_type="chatbot:Бот", actor_id=chat_id, reason="user_cancel_mid_flow"
                 )
             else:
                 postgres.delete_session(_BOT_NAME, chat_id)
@@ -304,7 +302,9 @@ def handle_booking_turn(
         if state == "step_field":
             return handler.handle_step_field(chat_id, user_text, params)
         if state == "step_players":
-            return handler.handle_step_players(chat_id, user_text, params)
+            # Legacy in-flight session from before players was removed from the
+            # flow — treat their reply as the name step so they aren't stranded.
+            return handler.handle_step_name(chat_id, user_text, params)
         if state == "step_name":
             return handler.handle_step_name(chat_id, user_text, params)
         if state == "step_confirm":
@@ -343,7 +343,7 @@ class BookingStepHandler(BaseStepHandler):
         self.builder = BookingPromptBuilder(bot_name)
         super().__init__(logger_messages=_LOGGER_MESSAGES, builder=self.builder)
 
-    def get_free_now(self, days: list | None = None):
+    def get_free_now(self, days: list | None = None, params: dict | None = None):
         return booking_logic.get_free_windows()
 
     def handle_step_await_date(self, chat_id: str, sender_phone: str, user_text: str, params: dict) -> str:
@@ -422,7 +422,7 @@ class BookingStepHandler(BaseStepHandler):
         if not free_fields:
             logger.info(self.LOGGER_MESSAGES["step_time_fields_reject"])
             return (
-                    f"{self.builder.data_localization(lang, "no_free_fields", start=time_start, end=time_end)}"
+                    f"{self.builder.data_localization(lang, "no_free_fields", start=time_start, end=display_end_time(time_end))}"
                     f"\n\n{self.builder.ask_time(chosen_date, day_windows, lang)}"
             )
 
@@ -435,12 +435,12 @@ class BookingStepHandler(BaseStepHandler):
             f = free_fields[0]
             params["field"] = f["id"]
             params["format"] = f["format"]
-            logger.info("[BOOKING:step_time] single free format=%s (field=%d) — advancing to step_players", f["format"], f["id"])
+            logger.info("[BOOKING:step_time] single free format=%s (field=%d) — advancing to step_name", f["format"], f["id"])
             postgres.update_draft(
                 _BOT_NAME, params["booking_id"], time_start=time_start, time_end=time_end,
                 field=f["id"], format=f["format"],
             )
-            self.save_session(chat_id, "step_players", params)
+            self.save_session(chat_id, "step_name", params)
             return self.builder.data_localization(lang, "field_free_advance", id=f["id"], fmt=f["format"])
 
         logger.info(self.LOGGER_MESSAGES["step_time_advance"],
@@ -474,23 +474,6 @@ class BookingStepHandler(BaseStepHandler):
         postgres.update_draft(
             self.builder.bot_name, params["booking_id"], field=chosen_field["id"], format=chosen_field["format"]
         )
-        self.save_session(chat_id, "step_players", params)
-        return self.builder.data_localization(lang, "ask_players")
-
-    def handle_step_players(self, chat_id: str, user_text: str, params: dict) -> str:
-        lang = params.get("lang", "ru")
-        m = re.search(r"\b(\d+)\b", user_text)
-        if not m:
-            logger.info(self.LOGGER_MESSAGES["step_players_reject"], user_text)
-            return self.builder.data_localization(lang, "ask_players_invalid")
-
-        players = int(m.group(1))
-        if players > config.MAX_PLAYERS:
-            return (self.builder.data_localization(lang, "players_overflow")
-                    + "\n" + self.builder.data_localization(lang, "ask_players"))
-        params["players"] = players
-        logger.info(self.LOGGER_MESSAGES["step_players_advance"], params["players"])
-        postgres.update_draft(self.builder.bot_name, params["booking_id"], players=params["players"])
         self.save_session(chat_id, "step_name", params)
         return self.builder.data_localization(lang, "ask_name")
 
@@ -546,10 +529,9 @@ class BookingPromptBuilder(BasePromptBuilder):
             "booking_pending",
             date=self.fmt_date(params["date"], lang),
             start=time_start_str,
-            end=time_end_str,
+            end=display_end_time(time_end_str),
             field=field,
             fmt=params["format"],
-            players=params.get("players"),
             name=params.get("customer_name", ""),
             price=fmt_price(total),
             pay_url=config.KASPI_PAYMENT_URL,
@@ -594,10 +576,9 @@ class BookingPromptBuilder(BasePromptBuilder):
             "summary",
             date=self.fmt_date(params.get("date", ""), lang),
             start=params.get("time_start", "?"),
-            end=params.get("time_end", "?"),
+            end=display_end_time(params.get("time_end", "?")),
             field=params.get("field", "?"),
             fmt=params.get("format", "?"),
-            players=params.get("players", "?"),
             name=params.get("customer_name", "?"),
             price=fmt_price(total),
         )

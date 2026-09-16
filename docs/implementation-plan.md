@@ -160,7 +160,7 @@ Single "Bookings" worksheet, columns A–I:
 ### Phase 8 — `manager_api` Flask blueprint
 **Files:** `blueprints/manager_api.py` (new), `app.py`
 
-Auth: `X-API-Key` vs `config.MANAGER_API_KEY`. Rate limit 60/min per IP.
+Auth: `X-API-Key` vs `config.X_SERVICE_TOKEN`. Rate limit 60/min per IP.
 
 | Endpoint | Behaviour |
 |---|---|
@@ -191,7 +191,7 @@ Response envelope mirrors the service layer.
 ### New `.env`
 | Variable | Purpose | Default |
 |---|---|---|
-| `MANAGER_API_KEY` | auth for `/api/manager/*` | — (required) |
+| `X_SERVICE_TOKEN` | auth for `/api/manager/*` | — (required) |
 | `MANAGER_RATE_LIMIT` | requests/min per IP | `60` |
 
 Optional dependency: `flask-limiter` for Phase 8. No other new Python deps.

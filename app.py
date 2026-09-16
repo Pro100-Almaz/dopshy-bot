@@ -8,14 +8,19 @@ Endpoints:
 """
 
 import logging
-import threading
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
+from flask_cors import CORS
 
 import config
-from handlers.message_handler import handle_incoming_message
+from integrations import client_notify
+from handlers.message_batcher import enqueue_incoming_message
+from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
+from integrations.providers.payload import OutboundChannel
+from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
+from integrations.repo.bot_pause_repo import set_bot_paused
 from integrations.sheets.booking_sheets import refresh_week_sheet
 
 logging.basicConfig(
@@ -37,6 +42,32 @@ app = Flask(__name__)
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402
 app.register_blueprint(manager_api)
+from blueprints.manager_boxing_api import manager_boxing_api  # noqa: E402
+app.register_blueprint(manager_boxing_api)
+from blueprints.academy_api import academy_api  # noqa: E402
+app.register_blueprint(academy_api)
+from blueprints.document_api import document_api  # noqa: E402
+app.register_blueprint(document_api)
+
+# ApiPay.kz payment webhook (POST /webhooks/apipay) — self-disables when the
+# APIPAY_* env vars are absent.
+from blueprints import apipay_webhook as _apipay_webhook  # noqa: E402
+_apipay_webhook.register(app)
+
+# CORS — only the manager API is browser-facing; webhooks/admin are server-to-server.
+# Origins come from config (CORS_ALLOWED_ORIGINS env, default "*"). The custom
+# X-API-Key header must be allow-listed so browsers don't strip it on preflight.
+CORS(
+    app,
+    resources={
+        r"/api/manager/*": {"origins": config.CORS_ALLOWED_ORIGINS},
+        r"/api/football/*": {"origins": config.CORS_ALLOWED_ORIGINS},
+        r"/api/boxing/*": {"origins": config.CORS_ALLOWED_ORIGINS},
+    },
+    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    max_age=86400,
+)
 
 # ---------------------------------------------------------------------------
 # Scheduler: refresh Google Sheet every Monday 06:00 Almaty time
@@ -68,10 +99,25 @@ def _cancel_expired_bookings():
         if not expired:
             return
 
-        # Cancel each through the service layer so every transition is audited.
+        # Cancel the ApiPay invoices BEFORE releasing the slots — otherwise the
+        # client could still confirm the payment in their Kaspi app for a
+        # booking that no longer exists.
+        #
+        # Done in bulk here, deliberately: cancel_booking_trial below also
+        # cancels invoices, but re-issues one for any booking of the batch that
+        # is still awaiting payment. In a TTL sweep the whole batch expires
+        # together, so the per-booking path would raise a new invoice for a
+        # booking that is about to expire microseconds later — a pointless Kaspi
+        # push to the client. Cancelling up front makes those calls no-ops.
+        from integrations import apipay_service
+        apipay_service.cancel_invoices_for_bookings(
+            [b["id"] for b in expired], reason="ttl_expired")
+
         for b in expired:
+            target = "unpaid" if b["state"] == "awaiting_payment" else "cancelled"
             postgres.cancel_booking_trial(
-                config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name'], b["id"], actor_type="system", reason="ttl_expired"
+                config.BOT_CONFIGS[config.WHATSAPP_PHONE_NUMBER_ID_BOT_1]['name'], b["id"],
+                actor_type="system", reason="ttl_expired", target_state=target,
             )
 
         # Only awaiting_payment expiries are user-facing (drafts never reserved a slot).
@@ -93,13 +139,15 @@ def _cancel_expired_bookings():
                 ts = str(b["time_start"])[:5]
                 te = str(b["time_end"])[:5]
                 send_text_message(
-                    config.WHATSAPP_PHONE_NUMBER_ID_BOT_1,
-                    b["phone"],
+                    OutboundChannel(provider="ycloud", phone_number_id=config.WHATSAPP_PHONE_NUMBER_ID_BOT_1),
+                    # A booking phone is not an inbound id: manager-entered rows
+                    # hold '8…' or '+7 700 …', and YCloud takes E.164 only.
+                    client_notify.normalize_recipient(b["phone"]),
                     f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
-                    f"была отменена — оплата не поступила в течении 15 минут.\n"
+                    f"была отменена — оплата не поступила в течении 20 минут.\n"
                     f"Хотите забронировать снова? Просто напишите нам!\n\n"
                     f"Өкінішке орай, брондауыңыз {b['date']} ({ts}–{te}, {b.get('format', '')}) "
-                    f"15 минут ішінде төленбегендіктен жойылды.\n"
+                    f"20 минут ішінде төленбегендіктен жойылды.\n"
                     f"Қайта брондау үшін жазыңыз!",
                 )
             except Exception as exc:
@@ -108,6 +156,40 @@ def _cancel_expired_bookings():
 
     except Exception as exc:
         logger.error("[PAYMENT] Auto-cancel job failed: %s", exc)
+
+
+def _sweep_apipay_outbox():
+    """Re-send invoices committed but never delivered to ApiPay.
+
+    Without this a crash or an ApiPay outage between the booking commit and the
+    send would leave a client holding a reserved slot they were never asked to
+    pay for — until the TTL silently dropped it.
+    """
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import apipay_service
+        apipay_service.sweep_pending_sends()
+    except Exception as exc:
+        logger.error("[APIPAY] Outbox sweep failed: %s", exc)
+
+
+def _reconcile_apipay():
+    """Pull the status of invoices whose webhook never arrived.
+
+    The webhook is the fast path, not the only one: a deploy, a certificate or
+    DNS problem, or an outage longer than ApiPay's ~2h of retries silently
+    swallows a delivery. Without this, a paid invoice would sit 'processing'
+    until the TTL released the slot — the client pays, loses the booking, and
+    nothing in the system knows.
+    """
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import apipay_service
+        apipay_service.reconcile_open_invoices()
+    except Exception as exc:
+        logger.error("[APIPAY] Reconciliation failed: %s", exc)
 
 
 _scheduler = BackgroundScheduler(timezone=config.BOOKING_TIMEZONE)
@@ -123,7 +205,35 @@ _scheduler.add_job(
     trigger="interval",
     minutes=5,
 )
+# Tighter than the TTL sweep: an unsent invoice is a client waiting for a
+# payment request that never arrived, inside a 20-minute reservation window.
+_scheduler.add_job(
+    _sweep_apipay_outbox,
+    trigger="interval",
+    minutes=1,
+)
+# Each pass only looks at invoices quiet for 5+ minutes, so a paid-but-lost
+# webhook is found well inside the 30-minute reservation window — the client
+# keeps the slot they paid for instead of it being released under them.
+_scheduler.add_job(
+    _reconcile_apipay,
+    trigger="interval",
+    minutes=2,
+)
 _scheduler.start()
+
+
+def _bot_type_for_phone_number_id(phone_number_id: str | None) -> str:
+    if phone_number_id == config.WHATSAPP_PHONE_NUMBER_ID_BOT_2:
+        return "football_academy"
+    if phone_number_id == config.WHATSAPP_PHONE_NUMBER_ID_BOT_3:
+        return "boxing_academy"
+    return "arena"
+
+
+def _bot_type_for_ycloud_business_phone(phone: str | None) -> str:
+    phone_number_id = config.get_phone_number_id_for_ycloud_from(phone)
+    return _bot_type_for_phone_number_id(phone_number_id)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +264,9 @@ def verify_webhook():
 
 @app.post("/webhook")
 def receive_message():
+
+
+    # return jsonify({"status": "ok"}), 200
     """
     Receive WhatsApp message events from Meta.
     Process each message in a background thread so we return 200 fast
@@ -167,13 +280,83 @@ def receive_message():
     if payload.get("object") != "whatsapp_business_account":
         return jsonify({"status": "ignored"}), 200
 
-    # Process in background so the webhook response is immediate
-    thread = threading.Thread(
-        target=handle_incoming_message,
-        args=(payload,),
-        daemon=True,
-    )
-    thread.start()
+    try:
+        data = parse_meta(payload)
+    except WhatsappPayloadParserError:
+        logger.error({'Failed to parse Meta webhook'})
+        return jsonify({"status": "ignored"}), 200
+
+    if data is None:
+        return jsonify({"status": "ignored"}), 200
+
+    # Buffer + debounce: fragments sent in quick succession are combined into a
+    # single message before hitting the pipeline. Non-blocking — returns at once.
+    enqueue_incoming_message(data)
+
+    return jsonify({"status": "ok"}), 200
+
+@app.post("/webhook/ycloud")
+def receive_ycloud_message():
+    """
+    Receive WhatsApp message events from YCloud Provider.
+    Process each message in a background thread so we return 200 fast
+    (Meta requires a 200 response within 20 seconds or it retries).
+    """
+    payload = request.get_json(silent=True)
+    logger.info("[YCLOUD] webhook received type=%s", (payload or {}).get("type"))
+    if not payload:
+        abort(400)
+
+    # A human agent replied from the WhatsApp Business app — YCloud echoes it
+    # back here. Auto-pause the bot for that customer so it stops replying
+    # until a manager turns it back on from the UI.
+    if payload.get("type") == "whatsapp.smb.message.echoes":
+        customer_phone = (payload.get("whatsappMessage") or {}).get("to")
+        bot_type = _bot_type_for_ycloud_business_phone(
+            (payload.get("whatsappMessage") or {}).get("from")
+        )
+        if not postgres.is_ycloud_enabled(bot_type):
+            return jsonify({"status": "ignored"}), 200
+        if customer_phone:
+            try:
+                set_bot_paused(customer_phone, True, reason="auto")
+                logger.info("[AUTO-PAUSE] Manager replied to %s — bot paused", customer_phone)
+            except Exception:
+                logger.exception("Failed to auto-pause bot for %s", customer_phone)
+        return jsonify({"status": "ok"}), 200
+
+    # Confirm this is a WhatsApp Business Account event
+    if payload.get("type") != "whatsapp.inbound_message.received":
+        logger.info("[YCLOUD] ignored webhook type=%s", payload.get("type"))
+        return jsonify({"status": "ignored"}), 200
+
+    try:
+        data = parser_ycloud(payload)
+        logger.info(
+            "[YCLOUD] parsed inbound message type=%s from=%s to=%s",
+            data.message_type,
+            data.customer.phone,
+            data.business.phone,
+        )
+        bot_type = _bot_type_for_ycloud_business_phone(data.business.phone)
+        if not postgres.is_ycloud_enabled(bot_type):
+            return jsonify({"status": "ignored"}), 200
+        # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
+        # if data.customer.phone not in ['+77072479672']:
+        #     logger.info({f'IGNORED phone number {data.customer.phone}'})
+        #     return jsonify({"status": "ignored"}), 200
+
+    except WhatsappPayloadParserError:
+        logger.exception("Failed to parse YCloud webhook")
+        return jsonify({"status": "ignored"}), 200
+
+    if data is None:
+        logger.info("[YCLOUD] parser returned no message")
+        return jsonify({"status": "ignored"}), 200
+
+    # Buffer + debounce: fragments sent in quick succession are combined into a
+    # single message before hitting the pipeline. Non-blocking — returns at once.
+    enqueue_incoming_message(data)
 
     return jsonify({"status": "ok"}), 200
 

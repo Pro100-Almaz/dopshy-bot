@@ -6,13 +6,15 @@ class BaseHelper:
 
     @staticmethod
     def is_ready_for_confirm(draft: dict) -> bool:
-        """True when all 6 booking fields are filled in the draft."""
+        """True when all required booking fields are filled in the draft.
+
+        Players count is no longer collected, so it is not part of readiness.
+        """
         return all([
             draft.get("date"),
             draft.get("time_start"),
             draft.get("time_end"),
             draft.get("field"),
-            draft.get("players"),
             draft.get("customer_name"),
         ])
 

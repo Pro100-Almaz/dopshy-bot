@@ -7,7 +7,8 @@ Every function returns a typed result envelope:
 human-friendly RU text the bot echoes to the user.
 
 State machine: draft → awaiting_payment → confirmed
-                            ├→ cancelled (TTL expired / user cancelled)
+                            ├→ cancelled (user cancelled)
+                            ├→ unpaid    (TTL expired without payment)
                             └→ failed    (payment rejected)
 
 Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
@@ -17,10 +18,10 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from decimal import Decimal
+from datetime import datetime, time, timedelta
 
-from utils import is_past_booking_time
-from dateutil.relativedelta import relativedelta
+from utils import is_past_booking_time, normalize_end_time
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -30,6 +31,8 @@ import psycopg2.extras
 import config
 from handlers.payment.pricing import calculate_booking_price
 from integrations.repo.utils import _conn, _err, _ok
+from integrations.repo.history_repo import _record_history
+from integrations.status_labels import STATES_RUSSIAN as _STATES_RUSSIAN
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +51,42 @@ def _record_event(cur, booking_id: int, event: str, actor_type: str,
     )
 
 
+def _history_source(actor_type: str, actor_id: str | None = None) -> str:
+    """booking_history.source: 'whatsapp' for the bot, else the manager id/email."""
+    if actor_type == "chatbot:Бот":
+        return "chatbot:Бот"
+    return actor_id or actor_type
+
+
+def _record_status_change(cur, booking_id: int, old_status, new_status,
+                          source: str) -> None:
+    """Log a booking status transition to booking_history (no-op if unchanged).
+
+    Raw DB states are rendered via _STATES_RUSSIAN (uppercase RU labels).
+    """
+    if old_status is None or old_status == new_status:
+        return
+    _record_history(cur, booking_id, source, key="status_change",
+                    old_status=_STATES_RUSSIAN.get(old_status, old_status),
+                    new_status=_STATES_RUSSIAN.get(new_status, new_status))
+
+
 # ---------------------------------------------------------------------------
 # Service functions
 # ---------------------------------------------------------------------------
 
 
-def request_payment(booking_id: int, client_token: str) -> dict:
+def request_payment(booking_id: int, client_token: str,
+                    on_reserved=None) -> dict:
     """Transition DRAFT → AWAITING_PAYMENT: reserve the slot and start the TTL.
 
     The EXCLUDE constraint atomically rejects a slot already held by another
     awaiting_payment/confirmed booking → SLOT_TAKEN.
+
+    ``on_reserved(cur, booking_ids)`` runs inside this transaction once the slot
+    is held, and whatever it returns is merged into the result. The bot uses it
+    to queue an ApiPay invoice, so the reservation and the record of what the
+    client owes are committed together — the send itself happens afterwards.
 
     TRANSITIVE BOOKING: if time_start > time_end (day transition, e.g. 23:00→01:00),
     the draft is split into two bookings linked by group_transition UUID:
@@ -84,6 +113,18 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     return _err("INVALID_TIME", "Не все данные брони заполнены.")
                 if is_past_booking_time(str(row["date"]), str(row["time_start"])[:5]):
                     return _err("TIME_IN_PAST", "Указанное время уже прошло.")
+
+                # A midnight end-time (00:00) means "until end of day", not a
+                # day transition. Pin it to 23:59:59 so it stays a single
+                # booking instead of being split with a redundant 00:00→00:00
+                # second half. (Interactive/LLM flows normalize this earlier;
+                # this guards any draft that still reached here as 00:00.)
+                if row["time_end"] == time(0, 0) and row["time_start"] != time(0, 0):
+                    cur.execute(
+                        "UPDATE bookings SET time_end = '23:59:59'::time WHERE id = %s",
+                        (booking_id,),
+                    )
+                    row["time_end"] = time(23, 59, 59)
 
                 # TRANSITIVE BOOKING: split if time_start > time_end (day transition)
                 is_transitive = row["time_start"] > row["time_end"]
@@ -143,13 +184,31 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                      booking_id, booking_id),
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
+                _record_status_change(cur, booking_id, row["state"],
+                                      "awaiting_payment", "chatbot:Бот")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
                 reserved_until = cur.fetchone()["reserved_until"]
+
+                hook_data = {}
+                if on_reserved is not None:
+                    # Both halves of a day-crossing booking, so an invoice
+                    # covers the whole slot the client actually reserved.
+                    cur.execute(
+                        "SELECT id FROM bookings "
+                        " WHERE id = %s OR (group_transition IS NOT NULL "
+                        "   AND group_transition = (SELECT group_transition FROM bookings "
+                        "                            WHERE id = %s)) "
+                        " ORDER BY id",
+                        (booking_id, booking_id),
+                    )
+                    covered = [r["id"] for r in cur.fetchall()]
+                    hook_data = on_reserved(cur, covered) or {}
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] request_payment id=%d — slot taken (exclusion)", booking_id)
         return _err("SLOT_TAKEN", "К сожалению, этот слот только что заняли.")
 
-    return _ok({"booking_id": booking_id, "reserved_until": reserved_until})
+    return _ok({"booking_id": booking_id, "reserved_until": reserved_until,
+                **hook_data})
 
 
 def submit_payment_proof(booking_id: int, parsed: dict | None = None,
@@ -160,6 +219,10 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
     number is stored with a UNIQUE index → reused receipts return PAYMENT_DUPLICATE.
     """
     parsed = parsed or {}
+    if not parsed.get("ref"):
+        logger.warning("[BOOKING_SERVICE] refusing payment without receipt ref for booking %d",
+                       booking_id)
+        return _err("PAYMENT_NO_REF", "Не удалось распознать номер чека.")
     receipt_dt = None
     if parsed.get("date"):
         receipt_dt = parsed["date"].replace(tzinfo=ZoneInfo(config.BOOKING_TIMEZONE))
@@ -191,10 +254,29 @@ def submit_payment_proof(booking_id: int, parsed: dict | None = None,
                 )
                 _record_event(cur, booking_id, "payment_received", "whatsapp",
                               note=parsed.get("ref"))
+                _record_history(cur, booking_id, "chatbot:Бот", key="payment_bot",
+                                amount=parsed.get("amount") or 0)
+                _record_status_change(cur, booking_id, row["state"],
+                                      "confirmed", "chatbot:Бот")
     except psycopg2.errors.UniqueViolation:
         logger.warning("[BOOKING_SERVICE] duplicate receipt ref=%s for booking %d",
                        parsed.get("ref"), booking_id)
         return _err("PAYMENT_DUPLICATE", "Этот чек уже был использован.")
+
+    # Paid by receipt — so retire any ApiPay invoice still standing for this
+    # booking. Both payment paths stay available (ApiPay push and Kaspi link +
+    # receipt), and without this the client could settle by receipt and then
+    # also confirm the Kaspi push, paying twice for one slot. Runs after the
+    # commit: cancellation reads the booking back. Never raises — the payment
+    # is already accepted.
+    try:
+        from integrations import apipay_service
+        apipay_service.cancel_invoices_for_bookings(
+            [booking_id], reason="paid_by_receipt")
+    except Exception:
+        logger.exception("[BOOKING_SERVICE] Не удалось снять счёт ApiPay для брони %d",
+                         booking_id)
+
     return _ok({"booking_id": booking_id})
 
 
@@ -228,6 +310,8 @@ def reject_payment(booking_id: int, reason: str, parsed: dict | None = None) -> 
                 (booking_id, parsed.get("bank"), parsed.get("amount"), reason),
             )
             _record_event(cur, booking_id, "payment_rejected", "whatsapp", note=reason)
+            _record_history(cur, booking_id, "chatbot:Бот", key="payment_rejected",
+                            reject_reason=reason or "")
     return _ok({"booking_id": booking_id})
 
 
@@ -241,33 +325,59 @@ def get_payment_recipients() -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
-def cancel_all_bookings(booking_id: int, actor_type: str = "whatsapp",
+def cancel_all_bookings(booking_id: int, actor_type: str = "chatbot:Бот",
                    actor_id: str | None = None, reason: str | None = None) -> dict:
     """Cancel a booking (DRAFT or AWAITING_PAYMENT or CONFIRMED). Releases the slot
     and clears any conversation session still referencing it."""
+    cancelled_ids: list[int] = []
+    row = None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT state, date, customer_name, phone FROM bookings WHERE id = %s",
+                (booking_id,),
+            )
+            _prev = cur.fetchone()
             cur.execute(
                 "UPDATE bookings SET state = 'cancelled', updated_at = NOW() FROM bookings "
                 "target WHERE target.id = %s AND "
                 "(bookings.id = target.id "
                 "OR bookings.group_repetition = target.group_repetition "
                 "OR bookings.group_transition = target.group_transition) "
-                "AND bookings.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed') "
+                "AND bookings.date >= target.date AND bookings.state NOT IN ('cancelled', 'failed', 'unpaid') "
                 "RETURNING bookings.id",
                 (booking_id,),
             )
-            if cur.fetchone():
+            cancelled_ids = [r["id"] for r in cur.fetchall()]
+            if cancelled_ids:
                 _record_event(cur, booking_id, "cancelled", actor_type, actor_id, reason)
+                _record_history(
+                    cur, booking_id, _history_source(actor_type, actor_id),
+                    key="cancel_all_bookings",
+                    date=_prev["date"] if _prev else "",
+                    customer_name=(_prev["customer_name"] if _prev else "") or "",
+                    customer_phone=(_prev["phone"] if _prev else "") or "",
+                )
                 cur.execute(
                     "DELETE FROM booking_sessions WHERE booking_id = %s", (booking_id,)
                 )
-                return _ok({"booking_id": booking_id})
-            cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
-            row = cur.fetchone()
+            else:
+                cur.execute("SELECT state FROM bookings WHERE id = %s", (booking_id,))
+                row = cur.fetchone()
+
+    if cancelled_ids:
+        # AFTER commit — see cancel_booking_trial. Never raises.
+        from integrations import apipay_service  # local import avoids import cycle
+        apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason or "cancelled")
+        # `cancelled_ids` is every occurrence this call took down, so a caller
+        # notifying the client can list the dates instead of saying "some of
+        # your bookings"; empty means the series was already cancelled and no
+        # message is owed.
+        return _ok({"booking_id": booking_id, "cancelled_ids": cancelled_ids})
     if not row:
         return _err("NOT_FOUND", "Бронь не найдена.")
-    return _ok({"booking_id": booking_id}, message="Бронь уже была отменена.")
+    return _ok({"booking_id": booking_id, "cancelled_ids": []},
+               message="Бронь уже была отменена.")
 
 
 # Fields a client may patch via the self-service edit flow.
@@ -354,6 +464,9 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 new_ts      = diff.get("time_start",    str(row["time_start"])[:5])
                 # TRANSITIVE BOOKING: use logical end time (from second booking) as the base
                 new_te      = diff.get("time_end",      logical_time_end)
+                # A midnight end (00:00) means "until end of day" → keep it a
+                # single booking ending 23:59, not a day-crossing pair.
+                new_te      = normalize_end_time(new_ts, new_te)
                 new_field   = int(diff.get("field",     row["field"]))
                 new_players = diff.get("players",       row["players"])
                 new_name    = diff.get("customer_name", row["customer_name"])
@@ -406,6 +519,8 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                     note=json.dumps({"from": old_snap, "to": new_snap},
                                     ensure_ascii=False, default=str),
                 )
+                _record_status_change(cur, booking_id, row["state"], "cancelled",
+                                      "chatbot:Бот")
 
                 # 2) Insert new booking(s) with state preserved.
                 # TRANSITIVE BOOKING: if new range crosses midnight, create two bookings
@@ -530,50 +645,114 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source",}
+_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash", "paid_avans"}
+_MANAGER_SLOT_FIELDS = ("field", "date", "time_start", "time_end")
+
+# Manager-editable payment-amount columns → their history template key.
+_PAYMENT_HISTORY_KEYS = {
+    "paid_avans":    "manager_avans_change",
+    "paid_kaspi_qr": "manager_kaspi_qr_change",
+    "paid_cash":     "manager_cash_change",
+}
+
+
+def _to_decimal(v) -> Decimal:
+    """Coerce a money value (Decimal/int/float/str/None) to Decimal for comparison."""
+    return Decimal(str(v)) if v is not None else Decimal(0)
+
+
+def _fmt_amount(v) -> str:
+    """Money value for history text: plain digits, trailing .00 dropped."""
+    d = _to_decimal(v)
+    d = d.to_integral_value() if d == d.to_integral_value() else d.normalize()
+    return f"{d:f}"
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
-    """Manager edit of free-edit fields (customer_name, notes, price_total)."""
+    """Manager edit of free-edit fields (customer_name, notes, price_total, state, …)
+    and slot fields (field, date, time_start, time_end).
+
+    Rescheduling (any slot field) recomputes start_at/end_at from the effective
+    new-or-existing values so the bookings_no_overlap EXCLUDE constraint stays
+    consistent; a clashing slot returns SLOT_TAKEN. `end_date` is not a
+    single-booking column and is ignored here (it only affects repeat generation
+    at create time).
+    """
     patch = {k: v for k, v in fields.items() if k in _MANAGER_PATCH_FIELDS}
-    if not patch:
+    slot = {k: fields[k] for k in _MANAGER_SLOT_FIELDS if k in fields}
+    if not patch and not slot:
         return _ok({"booking_id": booking_id})
-    set_clause = ", ".join(f"{k} = %s" for k in patch) + ", updated_at = NOW()"
-    vals = list(patch.values()) + [booking_id]
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
-            )
-            if cur.fetchone():
-                _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
-                return _ok({"booking_id": booking_id})
+
+    # Reject unknown field numbers up front: an invalid field would otherwise
+    # commit to the DB and then crash the downstream sheet sync (KeyError).
+    if slot.get("field") is not None:
+        valid_fields = {int(f["id"]) for f in config.BOOKING_FIELDS}
+        if int(slot["field"]) not in valid_fields:
+            return _err("INVALID_FIELD", "Такого поля не существует.")
+
+    set_parts = [f"{k} = %s" for k in patch]
+    vals = list(patch.values())
+
+    if slot:
+        # SET expressions read the row's OLD values, so COALESCE(param, column)
+        # keeps unchanged slot fields at their current value.
+        for k in _MANAGER_SLOT_FIELDS:
+            set_parts.append(f"{k} = COALESCE(%s, {k})")
+            vals.append(slot.get(k))
+        set_parts.append("start_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_start)) AT TIME ZONE %s")
+        vals += [slot.get("date"), slot.get("time_start"), config.BOOKING_TIMEZONE]
+        set_parts.append("end_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_end)) AT TIME ZONE %s")
+        vals += [slot.get("date"), slot.get("time_end"), config.BOOKING_TIMEZONE]
+
+    set_clause = ", ".join(set_parts) + ", updated_at = NOW()"
+    vals.append(booking_id)
+
+    # Columns whose before-values we need to render history (state + payments).
+    history_cols = (["state"] if "state" in patch else []) + \
+                   [f for f in _PAYMENT_HISTORY_KEYS if f in patch]
+
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                old = {}
+                if history_cols:
+                    cur.execute(
+                        f"SELECT {', '.join(history_cols)} FROM bookings WHERE id = %s",
+                        (booking_id,),
+                    )
+                    _prev = cur.fetchone()
+                    old = dict(_prev) if _prev else {}
+                cur.execute(
+                    f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
+                )
+                if cur.fetchone():
+                    src = fields.get("source", "manager:Unknown")
+                    _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
+                    if "state" in patch:
+                        _record_status_change(cur, booking_id, old.get("state"),
+                                              patch["state"], src)
+                    for f, key in _PAYMENT_HISTORY_KEYS.items():
+                        if f in patch and _to_decimal(old.get(f)) != _to_decimal(patch[f]):
+                            _record_history(cur, booking_id, src, key=key,
+                                            old_amount=_fmt_amount(old.get(f)),
+                                            new_amount=_fmt_amount(patch[f]))
+                    # `old_state` (None unless `state` was patched) lets the
+                    # caller tell a real transition from a manager re-saving the
+                    # status it already had — only the former is worth a message
+                    # to the client.
+                    return _ok({"booking_id": booking_id,
+                                "old_state": old.get("state")})
+    except psycopg2.errors.ExclusionViolation:
+        logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
+        return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     return _err("NOT_FOUND", "Бронь не найдена.")
 
 
-def manager_create_booking(field: int, date: str, time_start: str, time_end: str,
-                           end_date: str, repeat: str = 'none',
-                           customer: str | None = None, phone: str | None = None,
-                           notes: str | None = None, price_total=None,
-                           actor_id: str | None = None,
-                           client_token: str | None = None,
-                           format_: str | None = None, reserved_until: int = 30,
-                           updated_by: str = 'manager') -> dict:
-    """Manager-created booking: DRAFT is skipped, goes straight to CONFIRMED."""
-    if format_ is None:
-        conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
-        format_ = conf["format"] if conf else ""
-    try:
-        dates = list(generate_dates(date, end_date, time_start, time_end, repeat))
-        is_repetitive = repeat != "none"
-        group_repetition = str(uuid.uuid4())
-
-
-        exec_string = """INSERT INTO bookings
+_INSERT_BOOKING_SQL = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
-                          notes, price_total, state, source, client_token, start_at, end_at,
+                          notes, price_total, paid_avans, state, source, client_token, start_at, end_at,
                           group_repetition, group_transition, repeat, reserved_until)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'awaiting_payment', %s,
+                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
                                  (%s::date + %s::time) AT TIME ZONE %s,
@@ -584,26 +763,74 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                                      END)
                          RETURNING id"""
 
+
+def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: str,
+                         end_date: str, repeat: str = 'none',
+                         customer: str | None = None, phone: str | None = None,
+                         notes: str | None = None, price_total=None, prepayment=None,
+                         actor_id: str | None = None, client_token: str | None = None,
+                         format_: str | None = None, reserved_until: int = 30,
+                         updated_by: str = 'manager',
+                         state: str = "awaiting_payment") -> list[int]:
+    """Insert one or more booking rows on the caller's cursor and return their ids."""
+    if format_ is None:
+        conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
+        format_ = conf["format"] if conf else ""
+    dates = list(generate_dates(date, end_date, time_start, time_end, repeat))
+    is_repetitive = repeat != "none"
+    group_repetition = str(uuid.uuid4())
+
+    ids: list[int] = []
+    for i, (d, st, et, group_transition, is_latter) in enumerate(dates):
+        d_str = datetime.strftime(d, format="%Y-%m-%d")
+        row_price = price_total
+        if row_price is None:
+            row_price = calculate_booking_price(format_, d_str, st, et)
+        skip_reserved = is_repetitive or is_latter
+        # The prepayment/avans belongs to the MAIN booking only.
+        # Coalesce: paid_avans is NOT NULL, and callers routinely omit prepayment.
+        row_avans = (prepayment or 0) if i == 0 else 0
+        row_notes = notes if i == 0 else None
+
+        cur.execute(
+            _INSERT_BOOKING_SQL,
+            (phone, customer, d_str, st, et, int(field), format_,
+             row_notes, row_price, row_avans, state, updated_by, client_token,
+             d_str, st, config.BOOKING_TIMEZONE,
+             d_str, et, config.BOOKING_TIMEZONE,
+             group_repetition, group_transition,
+             is_repetitive, skip_reserved, reserved_until),
+        )
+        client_token = str(uuid.uuid4())
+        booking_id = cur.fetchone()["id"]
+        _record_event(cur, booking_id, "manager_created", updated_by, actor_id)
+        _record_history(cur, booking_id, updated_by, key="booking_created")
+        ids.append(booking_id)
+    return ids
+
+
+def manager_create_booking(field: int, date: str, time_start: str, time_end: str,
+                           end_date: str, repeat: str = 'none',
+                           customer: str | None = None, phone: str | None = None,
+                           notes: str | None = None, price_total=None,
+                           actor_id: str | None = None,
+                           client_token: str | None = None,
+                           format_: str | None = None, reserved_until: int = 30,
+                           updated_by: str = 'manager',
+                           state: str = "confirmed") -> dict:
+    """Manager-created booking: DRAFT is skipped, inserted directly as confirmed."""
+    try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                for d, st, et, group_transition, is_latter in dates:
-                    d_str = datetime.strftime(d, format="%Y-%m-%d")
-                    row_price = price_total
-                    if row_price is None:
-                        row_price = calculate_booking_price(format_, d_str, st, et)
-                    skip_reserved = is_repetitive or is_latter
-                    cur.execute(
-                        exec_string,
-                        (phone, customer, d_str, st, et, int(field), format_,
-                         notes, row_price, updated_by, client_token,
-                         d_str, st, config.BOOKING_TIMEZONE,
-                         d_str, et, config.BOOKING_TIMEZONE,
-                         group_repetition, group_transition,
-                         is_repetitive, skip_reserved, reserved_until),
-                    )
-                    client_token = str(uuid.uuid4())
-                    booking_id = cur.fetchone()["id"]
-                    _record_event(cur, booking_id, "manager_created", updated_by, actor_id)
+                ids = _insert_booking_rows(
+                    cur, field=field, date=date, time_start=time_start,
+                    time_end=time_end, end_date=end_date, repeat=repeat,
+                    customer=customer, phone=phone, notes=notes,
+                    price_total=price_total, actor_id=actor_id,
+                    client_token=client_token, format_=format_,
+                    reserved_until=reserved_until, updated_by=updated_by,
+                    state=state,
+                )
     except psycopg2.errors.ExclusionViolation:
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     except psycopg2.errors.UniqueViolation:
@@ -615,22 +842,62 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         if row:
             return _ok({"booking_id": row["id"], "status": "ОЖИДАНИЕ"})
         raise
-    return _ok({"booking_id": booking_id, "status": "ОЖИДАНИЕ"})
+    return _ok({"booking_id": ids[-1], "status": "ОЖИДАНИЕ"})
+
+
+def occurrence_dates(start_date, end_date, repeat):
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = max(datetime.strptime(end_date, "%Y-%m-%d"), start)
+
+    if repeat == "none":
+        return [start]
+
+    out: list[datetime] = []
+    if repeat == "daily":
+        step = timedelta(days=1)
+        cur = start
+        while cur <= end:
+            out.append(cur)
+            cur += step
+    elif repeat == "weekly":
+        step = timedelta(weeks=1)
+        cur = start
+        while cur <= end:
+            out.append(cur)
+            cur += step
+    elif repeat == "monthly":
+        base_month = start.year * 12 + (start.month - 1)
+        i = 0
+        while True:
+            ym = base_month + i
+            year, month = ym // 12, ym % 12 + 1
+            if datetime(year, month, 1) > end:
+                break
+            try:
+                cand = start.replace(year=year, month=month)
+            except ValueError:
+                i += 1
+                continue
+            if start <= cand <= end:
+                out.append(cand)
+            i += 1
+    else:
+        raise ValueError("Unknown repeat type")
+    return out
 
 
 def generate_dates(start_date, end_date, start_time, end_time, repeat):
     """Yield (date, start_time, end_time, group_transition, is_latter) tuples.
 
     TRANSITIVE BOOKING: when start_time > end_time (day transition), yields two
-    entries per iteration — first half (start→23:59:59, is_latter=False) and
+    entries per occurrence — first half (start→23:59:59, is_latter=False) and
     second half (00:00→end, is_latter=True). The latter booking should not get
     a reserved_until value since payments are checked on the former.
     """
-    current = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
+    end_time = normalize_end_time(start_time, end_time)
     transitive = (datetime.strptime(start_time, "%H:%M") > datetime.strptime(end_time, "%H:%M"))
 
-    while current <= end:
+    for current in occurrence_dates(start_date, end_date, repeat):
         group_transition = str(uuid.uuid4())
         if transitive:
             yield current, start_time, "23:59:59", group_transition, False
@@ -638,13 +905,447 @@ def generate_dates(start_date, end_date, start_time, end_time, repeat):
         else:
             yield current, start_time, end_time, group_transition, False
 
-        if repeat == "none":
-            break
-        elif repeat == "daily":
-            current += timedelta(days=1)
-        elif repeat == "weekly":
-            current += timedelta(weeks=1)
-        elif repeat == "monthly":
-            current += relativedelta(months=1)
+
+def _merge_slots(slots: list[dict]) -> list[tuple]:
+    """Merge overlapping/adjacent slots per field into absolute datetime intervals.
+    Returns a list of (field, start_dt, end_dt) tuples, sorted by field/start.
+    """
+    by_field: dict[int, list[list]] = {}
+    for s in slots:
+        field = int(s["field"])
+        d = str(s["date"])[:10]
+        ts = str(s["time_start"])[:5]
+        te = str(s["time_end"])[:5]
+        start_dt = datetime.strptime(f"{d} {ts}", "%Y-%m-%d %H:%M")
+        if te in ("24:00", "23:59"):
+            # End-of-day sentinels. The frontend can't express a midnight-crossing
+            # end as 00:00-next-day, so it marks the boundary as 24:00 (or the
+            # older 23:59). strptime can't parse 24:00 at all, so map both to true
+            # midnight — this also makes a 23:30-24:00 slot abut a following 00:00
+            # slot exactly so the two merge into one continuous interval instead of
+            # leaving a spurious gap.
+            end_dt = datetime.strptime(f"{d} 00:00", "%Y-%m-%d %H:%M") + timedelta(days=1)
         else:
-            raise ValueError("Unknown repeat type")
+            end_dt = datetime.strptime(f"{d} {te}", "%Y-%m-%d %H:%M")
+        if end_dt <= start_dt:  # crosses midnight (e.g. 23:00-00:00 or 23:00-01:00)
+            end_dt += timedelta(days=1)
+        by_field.setdefault(field, []).append([start_dt, end_dt])
+
+    out: list[tuple] = []
+    for field in sorted(by_field):
+        intervals = sorted(by_field[field], key=lambda x: x[0])
+        merged = [intervals[0]]
+        for start_dt, end_dt in intervals[1:]:
+            if start_dt <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end_dt)
+            else:
+                merged.append([start_dt, end_dt])
+        out.extend((field, s, e) for s, e in merged)
+    return out
+
+
+def _split_day_segments(start_dt: datetime, end_dt: datetime):
+    #Only used for the exotic case of a block spanning 2+ midnights
+
+    cur = start_dt
+    while cur < end_dt:
+        next_midnight = datetime.combine(cur.date() + timedelta(days=1), time(0, 0))
+        seg_end = min(end_dt, next_midnight)
+        ts = cur.strftime("%H:%M")
+        te = "23:59" if seg_end == next_midnight else seg_end.strftime("%H:%M")
+        if ts != te:
+            yield cur.strftime("%Y-%m-%d"), ts, te
+        cur = next_midnight
+
+
+# statuses that can take the slots
+_BLOCKING_STATES = ("awaiting_payment", "confirmed")
+
+def _conflict(conflicts: list[dict]) -> dict:
+    """Conflict envelope: nothing was created, `conflicts` lists what collided."""
+    return {"ok": False, "code": "SLOT_TAKEN", "error": "conflict",
+            "conflicts": conflicts, "data": None,
+            "message": "Часть слотов уже занята — ни одна бронь не создана."}
+
+
+def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
+                                  notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
+                                  reserved_until: int = 30, updated_by: str = 'manager',
+                                  on_created=None, avans_per_booking=None
+                                  ) -> dict:
+    """Create bookings for a batch of (possibly repeating) merged intervals.
+
+    Each slot is ``{field, date, time_start, time_end, repeat_mode?, repeat_until?}``.
+    Every slot is expanded to its occurrence dates (see ``occurrence_dates``);
+    each occurrence becomes one booking (day-crossing intervals split into two
+    linked rows). The whole batch is atomic: if ANY occurrence overlaps an
+    existing booking, nothing is created and the collisions are returned.
+
+    Request-shape validation (enum, required repeat_until, occurrence cap) is
+    done by the endpoint; this layer assumes normalized input.
+
+    AVANS / ONLINE PAYMENT
+    ``avans_per_booking`` overrides `prepayment` for NON-repeating slots only —
+    a repeating slot carries no avans. ``on_created(cur, ctx)`` then runs inside
+    the same transaction, after every row is inserted but before commit, with
+    ``ctx = {booking_ids, chargeable_booking_ids, chargeable_count}``; it is
+    where the ApiPay invoice is created. Anything it raises rolls the whole
+    batch back, so bookings never outlive a failed invoice.
+    """
+    from integrations.booking import check_range_free  # local import avoids import cycle
+
+    if not slots:
+        return _err("INVALID", "Не удалось сформировать ни одной брони из слотов.")
+
+    # Expand every slot once; reuse the expansion for both the conflict
+    # pre-check and the covering date range of the existing-bookings query.
+    expanded: list[dict] = []          # per-slot: normalized fields + occurrence base dates
+    min_date: datetime | None = None
+    max_date: datetime | None = None
+    fields: set[int] = set()
+    for s in slots:
+        field = int(s["field"])
+        date = str(s["date"])
+        ts = str(s["time_start"])[:5]
+        te_raw = str(s["time_end"])[:5]
+        te = normalize_end_time(ts, te_raw)          # 24:00 / 00:00 → 23:59
+        repeat_mode = s.get("repeat_mode") or "none"
+        repeat_until = s.get("repeat_until") or date
+        bases = occurrence_dates(date, repeat_until, repeat_mode)
+        fields.add(field)
+        for b in bases:
+            min_date = b if min_date is None else min(min_date, b)
+            # +1 day so the second half of a day-crossing occurrence is covered.
+            top = b + timedelta(days=1)
+            max_date = top if max_date is None else max(max_date, top)
+        expanded.append({"field": field, "ts": ts, "te": te, "te_raw": te_raw,
+                         "repeat_mode": repeat_mode, "repeat_until": repeat_until,
+                         "bases": bases})
+
+    created: list[dict] = []
+    booking_ids: list[int] = []
+    chargeable_ids: list[int] = []     # bookings the batch avans invoice pays for
+    chargeable_count = 0               # non-repeating slots → invoice = count x avans
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT field, date, time_start, time_end
+                         FROM bookings
+                        WHERE field = ANY(%s) AND date BETWEEN %s AND %s
+                          AND state <> 'cancelled' AND state = ANY(%s)
+                          AND time_start IS NOT NULL AND time_end IS NOT NULL""",
+                    (sorted(fields), min_date.strftime("%Y-%m-%d"),
+                     max_date.strftime("%Y-%m-%d"), list(_BLOCKING_STATES)),
+                )
+                booked = [dict(r) for r in cur.fetchall()]
+
+                conflicts: list[dict] = []
+                for e in expanded:
+                    for b in e["bases"]:
+                        d_str = b.strftime("%Y-%m-%d")
+                        if not check_range_free(booked, d_str, e["ts"], e["te"], e["field"]):
+                            conflicts.append({"field": e["field"], "date": d_str,
+                                              "time_start": e["ts"], "time_end": e["te_raw"]})
+                if conflicts:
+                    return _conflict(conflicts)
+
+                for e in expanded:
+                    # A repeating slot is not charged an avans, so it keeps
+                    # whatever prepayment the caller sent.
+                    is_chargeable = (avans_per_booking is not None
+                                     and e["repeat_mode"] == "none")
+                    ids = _insert_booking_rows(
+                        cur, field=e["field"], date=e["bases"][0].strftime("%Y-%m-%d"),
+                        time_start=e["ts"], time_end=e["te_raw"],
+                        end_date=e["repeat_until"], repeat=e["repeat_mode"],
+                        customer=customer, phone=phone, notes=notes,
+                        price_total=price_total,
+                        # prepayment=avans_per_booking if is_chargeable else prepayment,
+                        actor_id=actor_id,
+                        reserved_until=reserved_until, updated_by=updated_by,
+                        state="awaiting_payment",
+                    )
+                    booking_ids.extend(ids)
+                    created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
+                    if is_chargeable:
+                        # Both halves of a day-crossing booking are covered by
+                        # the one avans charged for the slot.
+                        chargeable_ids.extend(ids)
+                        chargeable_count += 1
+
+                if on_created is not None:
+                    hook_data = on_created(cur, {
+                        "booking_ids": booking_ids,
+                        "chargeable_booking_ids": chargeable_ids,
+                        "chargeable_count": chargeable_count,
+                        "prepayment": prepayment,
+                    }) or {}
+                else:
+                    hook_data = {}
+    except psycopg2.errors.ExclusionViolation:
+        # Lost the race with a concurrent booking after the pre-check passed.
+        return _conflict([])
+
+    return _ok({"created": created, "booking_ids": booking_ids,
+                "created_count": len(booking_ids), **hook_data})
+
+
+_CONTRACT_STATES = {"draft", "awaiting_payment", "confirmed", "cancelled", "unpaid", "failed"}
+
+
+def _normalize_contract_slots(slots: list[dict]) -> tuple[list[dict], dict | None]:
+    if not isinstance(slots, list) or not slots:
+        return [], _err("INVALID", "slots must be a non-empty list.")
+
+    valid_modes = ("none", "daily", "weekly", "monthly")
+    total_occurrences = 0
+    normalized: list[dict] = []
+    for s in slots:
+        if not isinstance(s, dict) or not all(s.get(k) for k in ("field", "date", "time_start", "time_end")):
+            return [], _err("INVALID", "each slot needs field, date, time_start, time_end.")
+        mode = s.get("repeat_mode") or "none"
+        if mode not in valid_modes:
+            return [], _err("INVALID", f"repeat_mode must be one of {valid_modes}.")
+        until = s.get("repeat_until") or s.get("end_date") or s["date"]
+        if mode != "none" and str(until) < str(s["date"]):
+            return [], _err("INVALID", "repeat_until must be >= date.")
+        try:
+            total_occurrences += len(occurrence_dates(str(s["date"]), str(until), mode))
+        except (ValueError, TypeError):
+            return [], _err("INVALID", "invalid date or repeat_until.")
+        normalized.append({
+            "field": int(s["field"]),
+            "date": str(s["date"]),
+            "time_start": str(s["time_start"])[:5],
+            "time_end": str(s["time_end"])[:5],
+            "repeat_mode": mode,
+            "repeat_until": str(until),
+        })
+
+    if total_occurrences > 1000:
+        return [], _err("INVALID", "too many occurrences (max 1000); shorten the repeat range.")
+    return normalized, None
+
+
+def _contract_slots_in_range(slots: list[dict], start_date: str, end_date: str) -> bool:
+    for slot in slots:
+        if str(slot["date"]) < str(start_date) or str(slot["repeat_until"]) > str(end_date):
+            return False
+    return True
+
+
+def create_contract(customer_name: str, start_date: str, end_date: str, price,
+                    phone: str | None = None, status: str = "confirmed",
+                    notes: str | None = None, source: str | None = None,
+                    slots: list[dict] | None = None,
+                    actor_id: str | None = None) -> dict:
+    status = status or "confirmed"
+    if status not in _CONTRACT_STATES:
+        return _err("INVALID_STATUS", "Недопустимый статус договора.")
+    normalized_slots = []
+    if slots is not None:
+        normalized_slots, err = _normalize_contract_slots(slots)
+        if err:
+            return err
+        if not _contract_slots_in_range(normalized_slots, start_date, end_date):
+            return _err("INVALID", "contract booking slots must be within start_date and end_date.")
+
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "INSERT INTO contracts "
+                    "  (customer_name, phone, start_date, end_date, price, status, notes, source) "
+                    "VALUES (%s, %s, %s::date, %s::date, %s, %s, %s, %s) "
+                    "RETURNING id",
+                    (customer_name, phone, start_date, end_date, price, status, notes, source),
+                )
+                contract_id = cur.fetchone()["id"]
+                booking_ids: list[int] = []
+                created: list[dict] = []
+                for slot in normalized_slots:
+                    ids = _insert_booking_rows(
+                        cur,
+                        field=slot["field"],
+                        date=slot["date"],
+                        end_date=slot["repeat_until"],
+                        time_start=slot["time_start"],
+                        time_end=slot["time_end"],
+                        repeat=slot["repeat_mode"],
+                        customer=customer_name,
+                        phone=phone,
+                        notes=notes,
+                        price_total=0,
+                        actor_id=actor_id,
+                        reserved_until=0,
+                        updated_by=source or "contract",
+                        state=status,
+                    )
+                    booking_ids.extend(ids)
+                    created.extend({"booking_id": bid, "status": _STATES_RUSSIAN.get(status, status)} for bid in ids)
+                if booking_ids:
+                    cur.executemany(
+                        "INSERT INTO contract_bookings (contract_id, booking_id) VALUES (%s, %s)",
+                        [(contract_id, bid) for bid in booking_ids],
+                    )
+    except psycopg2.errors.ExclusionViolation:
+        return _conflict([])
+    except psycopg2.errors.CheckViolation:
+        return _err("INVALID", "end_date must be >= start_date.")
+
+    return _ok({
+        "contract_id": contract_id,
+        "booking_ids": booking_ids,
+        "created": created,
+        "created_count": len(booking_ids),
+    })
+
+
+def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | None = None,
+                          source: str | None = None) -> dict:
+    normalized_slots, err = _normalize_contract_slots(slots)
+    if err:
+        return err
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, customer_name, phone, status, notes FROM contracts WHERE id = %s FOR UPDATE",
+                    (contract_id,),
+                )
+                contract = cur.fetchone()
+                if not contract:
+                    return _err("NOT_FOUND", "Договор не найден.")
+                if contract["status"] in ("cancelled", "failed", "unpaid"):
+                    return _err("INVALID_STATUS", "Нельзя добавить брони в закрытый договор.")
+                if not _contract_slots_in_range(
+                    normalized_slots, str(contract["start_date"]), str(contract["end_date"])
+                ):
+                    return _err("INVALID", "contract booking slots must be within start_date and end_date.")
+                booking_ids: list[int] = []
+                created: list[dict] = []
+                for slot in normalized_slots:
+                    ids = _insert_booking_rows(
+                        cur,
+                        field=slot["field"],
+                        date=slot["date"],
+                        end_date=slot["repeat_until"],
+                        time_start=slot["time_start"],
+                        time_end=slot["time_end"],
+                        repeat=slot["repeat_mode"],
+                        customer=contract["customer_name"],
+                        phone=contract["phone"],
+                        notes=contract["notes"],
+                        price_total=0,
+                        actor_id=actor_id,
+                        reserved_until=0,
+                        updated_by=source or "contract",
+                        state=contract["status"],
+                    )
+                    booking_ids.extend(ids)
+                    created.extend({"booking_id": bid, "status": _STATES_RUSSIAN.get(contract["status"], contract["status"])} for bid in ids)
+                cur.executemany(
+                    "INSERT INTO contract_bookings (contract_id, booking_id) VALUES (%s, %s)",
+                    [(contract_id, bid) for bid in booking_ids],
+                )
+    except psycopg2.errors.ExclusionViolation:
+        return _conflict([])
+
+    return _ok({"contract_id": contract_id, "booking_ids": booking_ids,
+                "created": created, "created_count": len(booking_ids)})
+
+
+def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> dict:
+    allowed = {"customer_name", "phone", "start_date", "end_date", "price", "status", "notes", "source"}
+    patch = {k: v for k, v in fields.items() if k in allowed}
+    if not patch:
+        return _ok({"contract_id": contract_id})
+    if "status" in patch and patch["status"] not in _CONTRACT_STATES:
+        return _err("INVALID_STATUS", "Недопустимый статус договора.")
+
+    set_clause = ", ".join(f"{k} = %s" for k in patch) + ", updated_at = NOW()"
+    vals = list(patch.values()) + [contract_id]
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"UPDATE contracts SET {set_clause} WHERE id = %s RETURNING id", vals)
+                if not cur.fetchone():
+                    return _err("NOT_FOUND", "Договор не найден.")
+                if "status" in patch:
+                    cur.execute(
+                        "UPDATE bookings b SET state = %s, updated_at = NOW() "
+                        "FROM contract_bookings cb "
+                        "WHERE cb.booking_id = b.id AND cb.contract_id = %s "
+                        "  AND b.state NOT IN ('cancelled', 'failed', 'unpaid') "
+                        "RETURNING b.id",
+                        (patch["status"], contract_id),
+                    )
+                    for row in cur.fetchall():
+                        _record_event(cur, row["id"], "contract_status_updated",
+                                      "manager", actor_id, patch["status"])
+    except psycopg2.errors.ExclusionViolation:
+        return _conflict([])
+    except psycopg2.errors.CheckViolation:
+        return _err("INVALID", "end_date must be >= start_date.")
+    return _ok({"contract_id": contract_id})
+
+
+def cancel_contract(contract_id: int, actor_id: str | None = None, reason: str = "contract_cancel") -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "UPDATE contracts SET status = 'cancelled', updated_at = NOW() "
+                "WHERE id = %s RETURNING id",
+                (contract_id,),
+            )
+            if not cur.fetchone():
+                return _err("NOT_FOUND", "Договор не найден.")
+            cur.execute(
+                "UPDATE bookings b SET state = 'cancelled', updated_at = NOW() "
+                "FROM contract_bookings cb "
+                "WHERE cb.booking_id = b.id AND cb.contract_id = %s "
+                "  AND b.state NOT IN ('cancelled', 'failed', 'unpaid') "
+                "RETURNING b.id",
+                (contract_id,),
+            )
+            cancelled_ids = [r["id"] for r in cur.fetchall()]
+            for bid in cancelled_ids:
+                _record_event(cur, bid, "contract_cancelled", "manager", actor_id, reason)
+
+    if cancelled_ids:
+        from integrations import apipay_service
+        apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason)
+    return _ok({"contract_id": contract_id, "cancelled_ids": cancelled_ids})
+
+
+def cancel_contract_bookings(contract_id: int, booking_ids: list[int] | None = None,
+                             actor_id: str | None = None,
+                             reason: str = "contract_booking_cancel") -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id FROM contracts WHERE id = %s", (contract_id,))
+            if not cur.fetchone():
+                return _err("NOT_FOUND", "Договор не найден.")
+            params = [contract_id]
+            filter_sql = ""
+            if booking_ids:
+                filter_sql = "AND b.id = ANY(%s)"
+                params.append(list(booking_ids))
+            cur.execute(
+                "UPDATE bookings b SET state = 'cancelled', updated_at = NOW() "
+                "FROM contract_bookings cb "
+                "WHERE cb.booking_id = b.id AND cb.contract_id = %s "
+                f"  {filter_sql} "
+                "  AND b.state NOT IN ('cancelled', 'failed', 'unpaid') "
+                "RETURNING b.id",
+                params,
+            )
+            cancelled_ids = [r["id"] for r in cur.fetchall()]
+            for bid in cancelled_ids:
+                _record_event(cur, bid, "contract_booking_cancelled", "manager", actor_id, reason)
+
+    if cancelled_ids:
+        from integrations import apipay_service
+        apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason)
+    return _ok({"contract_id": contract_id, "cancelled_ids": cancelled_ids})

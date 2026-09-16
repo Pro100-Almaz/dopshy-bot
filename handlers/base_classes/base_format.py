@@ -11,19 +11,26 @@ class BaseFormat:
         self.asker = asker
 
     def format_windows_by_field(self, windows: list[dict], lang: str = "ru") -> str:
-        """Group free windows by format, merge intervals, format as multiline text."""
+        """List each free field separately (labeled by format), merging that
+        field's own intervals. Two fields of the same format (e.g. two "5x5")
+        appear as separate lines."""
         if not windows:
             return self.asker.localize(lang, "no_slots_empty")
 
         from integrations.booking import merge_time_intervals
 
-        by_format: dict[str, list] = {}
+        by_field: dict = {}
         for w in windows:
-            by_format.setdefault(w.get("format", "?"), []).append(w)
+            by_field.setdefault(w.get("field"), []).append(w)
 
         lines = []
-        for fmt in sorted(by_format):
-            intervals = [(w["time_start"], w["time_end"]) for w in by_format[fmt]]
+        for field_id in sorted(
+            by_field,
+            key=lambda fid: (by_field[fid][0].get("format", "?"), fid),
+        ):
+            field_windows = by_field[field_id]
+            fmt = field_windows[0].get("format", "?")
+            intervals = [(w["time_start"], w["time_end"]) for w in field_windows]
             merged = merge_time_intervals(intervals)
             times = ", ".join(
                 f"{self.fmt_time(s)}–{self.fmt_time(e)}" for s, e in merged
@@ -77,8 +84,6 @@ class BaseFormat:
             missing.append("  • " + self.asker.localize(lang, "ask_time").lstrip("⏰ "))
         if data.get("field") is None:
             missing.append("  • " + self.asker.localize(lang, "ask_field").lstrip("⚽ "))
-        if data.get("players") is None:
-            missing.append("  • " + self.asker.localize(lang, "ask_players").lstrip("👥 "))
         if data.get("customer_name") is None:
             missing.append("  • " + self.asker.localize(lang, "ask_name").lstrip("👤 "))
 

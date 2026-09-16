@@ -13,13 +13,34 @@ def _load_store() -> Chroma:
     return get_vector_store()
 
 
-def retrieve_context(query: str, k: int = config.TOP_K_RESULTS) -> str:
+def _scope_filter(bot_name: str | None) -> dict | None:
+    if bot_name == "dopsy_bot":
+        return {"scope": "arena"}
+    if bot_name == "dopsy_fs_school":
+        return {"$or": [{"scope": "academy_football"}, {"scope": "academy_shared"}]}
+    if bot_name == "dopsy_boxing":
+        return {"$or": [{"scope": "academy_boxing"}, {"scope": "academy_shared"}]}
+    return None
+
+
+def retrieve_context(
+    query: str,
+    k: int = config.TOP_K_RESULTS,
+    bot_name: str | None = None,
+) -> str:
     """
     Retrieve the top-k most relevant document chunks for a query.
     Returns a single formatted string to inject into the system prompt.
     """
     store = _load_store()
-    results = store.similarity_search(query, k=k)
+    filter_ = _scope_filter(bot_name)
+    try:
+        results = store.similarity_search(query, k=k, filter=filter_)
+    except Exception:
+        if filter_:
+            results = store.similarity_search(query, k=k)
+        else:
+            raise
 
     if not results:
         return ""
@@ -27,7 +48,8 @@ def retrieve_context(query: str, k: int = config.TOP_K_RESULTS) -> str:
     parts = []
     for i, doc in enumerate(results, 1):
         source = doc.metadata.get("source", "unknown")
-        parts.append(f"[{i}] ({source})\n{doc.page_content.strip()}")
+        scope = doc.metadata.get("scope", "unknown")
+        parts.append(f"[{i}] ({source}; {scope})\n{doc.page_content.strip()}")
 
     return "\n\n".join(parts)
 

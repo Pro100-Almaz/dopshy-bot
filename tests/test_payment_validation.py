@@ -78,6 +78,46 @@ def test_accept_genuine_halyk(no_date_limit):
     assert res["ok"], res
 
 
+def test_reject_missing_ref(no_date_limit, monkeypatch):
+    """No parseable receipt reference → can't be deduplicated → reject (not accept)."""
+    from datetime import datetime
+    b = _awaiting()
+    monkeypatch.setattr(
+        payment_validation.booking_service, "get_payment_recipients",
+        lambda: [{"bank": "kaspi", "bin": "870203301478", "name": "DOPSHY", "phone": None}],
+    )
+    parsed = {"bank": "kaspi", "amount": 35000, "bin": "870203301478", "name": "DOPSHY",
+              "phone": None, "date": datetime(2026, 7, 26, 12, 0), "ref": None, "raw_text": ""}
+    monkeypatch.setattr(payment_validation, "parse_receipt", lambda _b: parsed)
+    res = payment_validation.validate_receipt(b, b"x")
+    assert not res["ok"]
+    assert res["code"] == "unreadable"
+
+
+def test_reject_missing_date(monkeypatch):
+    """No parseable date → can't be proven fresh → reject instead of skipping the check."""
+    b = _awaiting()
+    monkeypatch.setattr(
+        payment_validation.booking_service, "get_payment_recipients",
+        lambda: [{"bank": "kaspi", "bin": "870203301478", "name": "DOPSHY", "phone": None}],
+    )
+    parsed = {"bank": "kaspi", "amount": 35000, "bin": "870203301478", "name": "DOPSHY",
+              "phone": None, "date": None, "ref": "REF-NO-DATE-1", "raw_text": ""}
+    monkeypatch.setattr(payment_validation, "parse_receipt", lambda _b: parsed)
+    res = payment_validation.validate_receipt(b, b"x")
+    assert not res["ok"]
+    assert res["code"] == "date"
+
+
+def test_submit_rejects_missing_ref():
+    """Defense in depth: submit_payment_proof refuses a ref-less receipt outright."""
+    b = _awaiting()
+    parsed = {"bank": "kaspi", "amount": 35000, "ref": None, "date": None}
+    res = svc.submit_payment_proof(b["id"], parsed=parsed)
+    assert not res["ok"]
+    assert res["code"] == "PAYMENT_NO_REF"
+
+
 def test_receipt_dedup():
     b1 = _awaiting(field=1, ts="18:00", te="19:00")
     b2 = _awaiting(field=2, ts="18:00", te="19:00", phone="7711")

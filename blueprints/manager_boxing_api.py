@@ -1,0 +1,382 @@
+"""Manager endpoints for academy/boxing frontend views."""
+
+import psycopg2.errors
+from flask import Blueprint, jsonify, request
+
+from blueprints.academy_user_payload import normalize_user_payload
+from blueprints.manager_api import _authenticate, _serialize
+from integrations.repo import academy_repo
+from integrations.sheets.trial_sheets import WEEKDAY_RU, _HEADERS, _STATES_RUSSIAN, refresh_all_trials
+
+
+manager_boxing_api = Blueprint("manager_boxing_api", __name__)
+manager_boxing_api.before_request(_authenticate)
+
+
+def _ok(data):
+    return jsonify({"ok": True, "data": data}), 200
+
+
+def _not_found(message: str):
+    return jsonify({"ok": False, "code": "NOT_FOUND", "message": message}), 404
+
+
+def _invalid(message: str):
+    return jsonify({"ok": False, "code": "INVALID", "message": message}), 400
+
+
+def _conflict(message: str):
+    return jsonify({"ok": False, "code": "CONFLICT", "message": message}), 409
+
+
+def _group_type_arg() -> tuple[str | None, tuple | None]:
+    group_type = request.args.get("group_type")
+    if group_type is None:
+        return None, None
+    if group_type not in {"boxing", "football"}:
+        return None, _invalid("group_type must be boxing or football.")
+    return group_type, None
+
+
+def _sheet_group(row: dict) -> dict:
+    training_day = row.get("training_day")
+    training_day_label = WEEKDAY_RU.get(training_day, "") if training_day is not None else ""
+    return {
+        "id": row.get("schedule_id") or f"{row.get('id')}-{training_day}-{str(row.get('time_start'))[:5]}",
+        "group_id": row.get("id"),
+        "group_name": row.get("group_name"),
+        "group_type": row.get("group_type"),
+        "max_cap": row.get("max_cap"),
+        "curr_cap": row.get("curr_cap", 0),
+        "birth_years": row.get("birth_years") or [],
+        "location": row.get("location"),
+        "level": row.get("level") or [],
+        "trainer": row.get("trainer"),
+        "age_min": row.get("age_min"),
+        "age_max": row.get("age_max"),
+        "shift": row.get("shift"),
+        "is_active": row.get("is_active"),
+        "field": row.get("field"),
+        "training_day": training_day_label,
+        "training_day_value": training_day,
+        "training_day_label": training_day_label,
+        "start_time": row.get("time_start"),
+        "end_time": row.get("time_end"),
+    }
+
+
+def _trial_user(row: dict) -> dict | None:
+    if row.get("user_id") is None:
+        return None
+    assigned_group_id = row.get("user_assigned_group_id")
+    assigned_group_name = row.get("user_assigned_group_name")
+    return {
+        "id": row.get("user_id"),
+        "name": row.get("user_child_name"),
+        "birth_year": row.get("user_child_birth_year"),
+        "parent_phone": row.get("user_parent_phone"),
+        "total_trials": row.get("user_total_trials"),
+        "assigned_group_id": assigned_group_id,
+        "assigned_group_name": assigned_group_name,
+        "assigned_group": assigned_group_name,
+        "subscribed": row.get("user_subscribed"),
+        "experience": row.get("user_experience"),
+        "school_shift": row.get("user_school_shift"),
+    }
+
+
+def _sheet_trial(row: dict) -> dict:
+    return {
+        "trial_id": row.get("id"),
+        "child_name": row.get("child_name"),
+        "child_birth_year": row.get("child_birth_year"),
+        "language": row.get("language"),
+        "phone": row.get("phone"),
+        "group_id": row.get("group_id"),
+        "trial_day": row.get("trial_day"),
+        "start_time": row.get("start_time"),
+        "end_time": row.get("end_time"),
+        "state": row.get("state"),
+        "state_label": _STATES_RUSSIAN.get(row.get("state"), row.get("state")),
+        "notes": row.get("notes"),
+        "attended": row.get("attended"),
+        "attendance_state": row.get("attendance_state") or ("attended" if row.get("attended") else "pending"),
+        "subscribed": row.get("subscribed"),
+        "created_at": row.get("created_at"),
+        "shift": row.get("school_shift"),
+        "school_time": (
+            f"{str(row.get('preferred_time_start'))[:5]}-{str(row.get('preferred_time_end'))[:5]}"
+            if row.get("preferred_time_start") and row.get("preferred_time_end")
+            else None
+        ),
+        "user": _trial_user(row),
+    }
+
+
+def _academy_user(row: dict) -> dict:
+    assigned_group_id = row.get("assigned_group_id")
+    assigned_group_name = row.get("assigned_group_name")
+    return {
+        "id": row.get("id"),
+        "name": row.get("child_name"),
+        "birth_year": row.get("child_birth_year"),
+        "parent_phone": row.get("parent_phone"),
+        "total_trials": row.get("total_trials"),
+        "assigned_group_id": assigned_group_id,
+        "assigned_group_name": assigned_group_name,
+        "assigned_group": assigned_group_name,
+        "subscribed": row.get("subscribed"),
+        "experience": row.get("experience"),
+        "school_shift": row.get("school_shift"),
+    }
+
+
+def _required_bool(field: str) -> tuple[bool | None, tuple | None]:
+    body = request.get_json(silent=True) or {}
+    value = body.get(field)
+    if not isinstance(value, bool):
+        return None, _invalid(f"{field} must be a boolean.")
+    return value, None
+
+
+def _required_int_body(field: str) -> tuple[int | None, tuple | None]:
+    body = request.get_json(silent=True) or {}
+    value = body.get(field)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None, _invalid(f"{field} must be an integer.")
+    return value, None
+
+
+def _validate_assigned_group(patch: dict) -> tuple[dict | None, tuple | None]:
+    group_id = patch.get("assigned_group_id")
+    if group_id is None:
+        return None, None
+    group = academy_repo.get_group_by_id(group_id)
+    if not group:
+        return None, _not_found("Group not found.")
+    return group, None
+
+
+@manager_boxing_api.get("/api/manager/academy_groups")
+def list_academy_groups():
+    rows = academy_repo.get_all_groups_for_frontend()
+    groups_by_type: dict[str, list[dict]] = {}
+    for row in rows:
+        item = _sheet_group(row)
+        groups_by_type.setdefault(row.get("group_type") or "", []).append(item)
+
+    return _ok({
+            "headers": _HEADERS["groups"],
+            "groups": {key: [_serialize(item) for item in value] for key, value in groups_by_type.items()},
+    })
+
+
+@manager_boxing_api.get("/api/manager/academy_groups/<int:group_id>/trials")
+def get_group_trials(group_id: int):
+    group = academy_repo.get_group_by_id(group_id)
+    if not group:
+        return _not_found("Group not found.")
+
+    users = academy_repo.get_users_by_assigned_group(group_id)
+    trials = academy_repo.get_trials_with_users_by_group(group_id)
+
+    return _ok({
+            "group": _serialize(group),
+            "user_fields": [
+                "name",
+                "birth_year",
+                "parent_phone",
+                "total_trials",
+                "assigned_group_id",
+                "subscribed",
+                "experience",
+                "school_shift",
+            ],
+            "trial_headers": _HEADERS["trials"],
+            "users": [_serialize(_academy_user(user)) for user in users],
+            "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
+    })
+
+
+@manager_boxing_api.get("/api/manager/academy_trials")
+def list_academy_trials():
+    group_type, error = _group_type_arg()
+    if error:
+        return error
+
+    trials = academy_repo.get_trials_with_users_by_type(group_type)
+    return _ok({
+        "trial_headers": _HEADERS["trials"],
+        "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
+    })
+
+
+@manager_boxing_api.get("/api/manager/academy_trials/<int:trial_id>")
+def get_academy_trial(trial_id: int):
+    trial = academy_repo.get_trial_with_user_by_id(trial_id)
+    if not trial:
+        return _not_found("Trial not found.")
+
+    return _ok(_serialize(_sheet_trial(trial)))
+
+
+@manager_boxing_api.get("/api/manager/academy_users")
+def list_academy_users():
+    group_type, error = _group_type_arg()
+    if error:
+        return error
+
+    users = academy_repo.get_users_by_type(group_type)
+    return _ok({
+        "user_fields": [
+            "name",
+            "birth_year",
+            "parent_phone",
+            "total_trials",
+            "assigned_group_id",
+            "subscribed",
+            "experience",
+            "school_shift",
+        ],
+        "users": [_serialize(_academy_user(user)) for user in users],
+    })
+
+
+@manager_boxing_api.post("/api/manager/academy_users")
+def create_academy_user():
+    body = request.get_json(silent=True) or {}
+    patch, error = normalize_user_payload(body, creating=True)
+    if error:
+        return _invalid(error)
+    _, group_error = _validate_assigned_group(patch)
+    if group_error:
+        return group_error
+
+    try:
+        user = academy_repo.create_user(**patch)
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("User already exists for this phone, name, and group.")
+
+    refresh_all_trials()
+    return jsonify({"ok": True, "data": _serialize(_academy_user(user))}), 201
+
+
+@manager_boxing_api.get("/api/manager/academy_users/<int:user_id>")
+def get_academy_user(user_id: int):
+    user = academy_repo.get_user_by_id(user_id)
+    if not user:
+        return _not_found("User not found.")
+
+    trials = academy_repo.get_all_user_trials(user_id)
+    return _ok({
+        "user": _serialize(_academy_user(user)),
+        "trial_headers": _HEADERS["trials"],
+        "trials": [_serialize(_sheet_trial(trial)) for trial in trials],
+    })
+
+
+@manager_boxing_api.patch("/api/manager/academy_users/<int:user_id>")
+def patch_academy_user(user_id: int):
+    body = request.get_json(silent=True) or {}
+    patch, error = normalize_user_payload(body, creating=False)
+    if error:
+        return _invalid(error)
+    _, group_error = _validate_assigned_group(patch)
+    if group_error:
+        return group_error
+
+    try:
+        user = academy_repo.update_user(user_id, **patch)
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("User already exists for this phone, name, and group.")
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))
+
+
+@manager_boxing_api.patch("/api/manager/academy_users/<int:user_id>/assignment")
+def assign_academy_user(user_id: int):
+    group_id, error = _required_int_body("group_id")
+    if error:
+        return error
+
+    try:
+        user = academy_repo.assign_user_to_group(user_id, group_id)
+    except ValueError as exc:
+        if str(exc) == "GROUP_NOT_FOUND":
+            return _not_found("Group not found.")
+        raise
+    except psycopg2.errors.UniqueViolation:
+        return _conflict("User already exists for this phone, name, and group.")
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))
+
+
+@manager_boxing_api.delete("/api/manager/academy_users/<int:user_id>/assignment")
+def deassign_academy_user(user_id: int):
+    group_type = request.args.get("group_type")
+    if group_type not in (None, "football", "boxing"):
+        return _invalid("group_type must be football or boxing.")
+
+    user = academy_repo.deassign_user_from_group(user_id, group_type)
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))
+
+
+@manager_boxing_api.patch("/api/manager/academy_trials/<int:trial_id>/attended")
+def patch_trial_attended(trial_id: int):
+    body = request.get_json(silent=True) or {}
+    if "attendance_state" in body:
+        attendance_state = body.get("attendance_state")
+        if attendance_state not in {"pending", "attended", "missed"}:
+            return _invalid("attendance_state must be pending, attended, or missed.")
+        trial = academy_repo.update_trial_attendance_state(trial_id, attendance_state)
+    else:
+        attended, error = _required_bool("attended")
+        if error:
+            return error
+
+        trial = academy_repo.update_trial_attended(trial_id, attended)
+    if not trial:
+        return _not_found("Trial not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_sheet_trial(trial)))
+
+
+@manager_boxing_api.patch("/api/manager/academy_trials/<int:trial_id>/subscribed")
+def patch_trial_subscribed(trial_id: int):
+    subscribed, error = _required_bool("subscribed")
+    if error:
+        return error
+
+    trial = academy_repo.update_trial_subscribed(trial_id, subscribed)
+    if not trial:
+        return _not_found("Trial not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_sheet_trial(trial)))
+
+
+@manager_boxing_api.patch("/api/manager/academy_users/<int:user_id>/subscribed")
+def patch_user_subscribed(user_id: int):
+    subscribed, error = _required_bool("subscribed")
+    if error:
+        return error
+
+    user = academy_repo.update_user_subscribed(user_id, subscribed)
+    if not user:
+        return _not_found("User not found.")
+
+    refresh_all_trials()
+    return _ok(_serialize(_academy_user(user)))

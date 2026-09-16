@@ -36,6 +36,34 @@ def _applied(cur) -> set[str]:
     return {r[0] for r in cur.fetchall()}
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Remove /* ... */ blocks and -- line comments."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        if sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i + 2)
+            i = n if end == -1 else end + 1
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
+def _has_statement(sql: str) -> bool:
+    """False when a file holds nothing but comments and whitespace.
+
+    psycopg2 raises "can't execute an empty query" on such a file, which aborts
+    the whole run — and since app.py migrates at startup, that means a fresh
+    deployment cannot boot. It happens legitimately: when reference data is
+    moved out of a migration into seeds/, the migration is left as a
+    comment-only record of the change (see 014_add_keleshek_sport_bin.sql).
+    """
+    return bool(_strip_sql_comments(sql).strip())
+
+
 def _seed_fields(cur) -> None:
     for f in config.BOOKING_FIELDS:
         price = 45000 if f["format"] == "6x6" else 35000
@@ -67,15 +95,22 @@ def migrate() -> None:
                 continue
             path = os.path.join(_MIGRATIONS_DIR, filename)
             with open(path, encoding="utf-8") as fh:
-                 sql = fh.read()
+                sql = fh.read()
+            executable = _has_statement(sql)
             with conn.cursor() as cur:
-                cur.execute(sql)
+                if executable:
+                    cur.execute(sql)
                 cur.execute(
                     "INSERT INTO schema_migrations (filename) VALUES (%s)",
                     (filename,),
                 )
             conn.commit()
-            logger.info("Applied migration %s", filename)
+            if executable:
+                logger.info("Applied migration %s", filename)
+            else:
+                logger.info(
+                    "Migration %s has no statements — recorded as applied", filename
+                )
 
         with conn.cursor() as cur:
             _seed_fields(cur)

@@ -1,9 +1,99 @@
-
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
+from zoneinfo import ZoneInfo
 
 from integrations.repo.postgres import _conn
+
+
+ALMATY_TZ = ZoneInfo("Asia/Almaty")
+
+def get_all_bookings(page: int| None = None, search: str | None = None) -> list[dict]:
+    """Every booking for the manager API list view (BotBookingRaw shape).
+
+    One row per booking (no payments join — payment_current is summed by the
+    endpoint via _combine_bookings_payments, so a booking with multiple payment
+    rows is not duplicated here).
+
+    When `search` is given, rows are filtered to those whose id, customer_name
+    or phone match the search term (case-insensitive, partial match).
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            query = """
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
+                       EXISTS (
+                           SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
+                       ) AS has_contract
+                FROM bookings
+                WHERE field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_payment', 'unpaid')
+                  AND time_start IS NOT NULL AND time_end IS NOT NULL
+            """
+
+            parameters = []
+
+            search_clause, search_params = _build_search_clause(search)
+            query += search_clause
+            parameters.extend(search_params)
+
+            query += " ORDER BY date, time_start, field, id"
+
+            if page is not None:
+                offset = (page - 1) * PAGE_SIZE
+                query += """ LIMIT %s OFFSET %s"""
+
+                parameters.extend([PAGE_SIZE, offset])
+
+            cur.execute(query, parameters)
+
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_fields_info() -> list[dict]:
+    """Active fields for the manager UI (BotFieldRow shape)."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, description, format, capacity
+                FROM fields
+                WHERE active = TRUE
+                ORDER BY id
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_field_prices() -> list[dict]:
+    """Time-of-day pricing rows (BotPriceRow shape)."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT format_name, pricing_type, price_per_hour
+                FROM field_prices
+                ORDER BY format_name, id
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_booking_customers() -> list[dict]:
+    """Distinct customers seen in bookings, with their latest booking activity.
+
+    One row per phone (the DB keeps phones as bare digits); used to merge
+    booking customers into the unified contact list alongside WhatsApp texters.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    phone,
+                    MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
+                    MAX(GREATEST(created_at, COALESCE(updated_at, created_at))) AS last_at
+                FROM bookings
+                WHERE phone IS NOT NULL AND phone <> ''
+                GROUP BY phone
+            """)
+            return [dict(r) for r in cur.fetchall()]
 
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
@@ -78,29 +168,118 @@ def get_awaiting_payment_booking(phone: str) -> dict | None:
 
 
 def get_bookings_for_sheet() -> list[dict]:
-    """All slot-holding bookings (awaiting_payment + confirmed) for the flat Sheet view."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, reserved_until, source, updated_at
+                       phone, notes, state, price_total, reserved_until, source, updated_at,
+                       paid_kaspi_qr, paid_cash
                 FROM bookings
-                WHERE state IN ('awaiting_payment', 'confirmed')
+                WHERE state IN ('awaiting_payment', 'confirmed', 'unpaid')
+                  AND date >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY date, time_start, field
             """)
+            result = [dict(r) for r in cur.fetchall()]
+            for r in result:
+                if r["reserved_until"]:
+                    r["reserved_until"] = r["reserved_until"].astimezone(ALMATY_TZ)
+
+                if r["updated_at"]:
+                    r["updated_at"] = r["updated_at"].astimezone(ALMATY_TZ)
+            return result
+
+PAGE_SIZE = 20
+
+
+def _build_search_clause(search: str | None) -> tuple[str, list]:
+    """Build a WHERE fragment (and its params) that filters bookings by id,
+    customer_name or phone. Returns ("", []) when no search term is given.
+
+    The match is case-insensitive and partial: id is compared as text so a
+    substring of the numeric id also matches.
+    """
+    if not search:
+        return "", []
+
+    like = f"%{search.strip()}%"
+    clause = """
+                  AND (
+                      CAST(id AS TEXT) ILIKE %s
+                      OR customer_name ILIKE %s
+                      OR phone ILIKE %s
+                  )
+    """
+    return clause, [like, like, like]
+
+
+def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed"),
+                          field: int | None = None, page: int | None = None,
+                          search: str | None = None) -> list[dict]:
+    """Bookings between two dates (inclusive) for the manager API list view.
+
+    When `field` is given, only that field's bookings are returned; when None,
+    all fields are included. When `search` is given, rows are further filtered
+    to those whose id, customer_name or phone match the search term
+    (case-insensitive, partial match).
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            query = """
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
+                       EXISTS (
+                           SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
+                       ) AS has_contract
+                FROM bookings
+                WHERE date BETWEEN %s AND %s AND state = ANY(%s)
+                  AND (%s::int IS NULL OR field = %s)
+
+                  AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
+                  AND state in ('confirmed', 'awaiting_payment', 'unpaid')
+            """
+
+            parameters = [
+                start, end, list(states), field, field
+            ]
+
+            search_clause, search_params = _build_search_clause(search)
+            query += search_clause
+            parameters.extend(search_params)
+
+            query += " ORDER BY date, time_start, field, id"
+
+            if page is not None:
+                offset = (page - 1) * PAGE_SIZE
+                query += """ LIMIT %s OFFSET %s"""
+
+                parameters.extend([PAGE_SIZE, offset])
+
+            cur.execute(query, parameters)
+
             return [dict(r) for r in cur.fetchall()]
 
 
-def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payment", "confirmed")) -> list[dict]:
-    """Bookings between two dates (inclusive) for the manager API list view."""
+def get_report_bookings_in_range(start: str, end: str, states: tuple) -> list[dict]:
+    """Reportable bookings between two dates, inclusive.
+
+    This intentionally has no pagination or manager-list state filter: document
+    generation needs a complete historical extract for the requested period.
+    """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, source, reserved_until
+                       state, price_total, source,
+                       paid_kaspi_qr, paid_cash, paid_avans
                 FROM bookings
-                WHERE date BETWEEN %s AND %s AND state = ANY(%s)
-                ORDER BY date, time_start, field
+                WHERE date BETWEEN %s AND %s
+                  AND state = ANY(%s)
+                  AND field IS NOT NULL
+                  AND date IS NOT NULL
+                  AND time_start IS NOT NULL
+                  AND time_end IS NOT NULL
+                ORDER BY date, time_start, field, id
             """, (start, end, list(states)))
             return [dict(r) for r in cur.fetchall()]
 
@@ -111,11 +290,106 @@ def get_booking(booking_id: int) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, field, date, time_start, time_end, customer_name,
-                       phone, notes, state, price_total, source, created_at
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
+                       group_transition,
+                       EXISTS (
+                           SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
+                       ) AS has_contract
                 FROM bookings WHERE id = %s
             """, (booking_id,))
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def get_contract(contract_id: int) -> dict | None:
+    """Return a contract with its linked booking ids, or None."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT c.*,
+                       COALESCE(
+                           ARRAY_AGG(cb.booking_id ORDER BY cb.booking_id)
+                           FILTER (WHERE cb.booking_id IS NOT NULL),
+                           ARRAY[]::integer[]
+                       ) AS booking_ids
+                FROM contracts c
+                LEFT JOIN contract_bookings cb ON cb.contract_id = c.id
+                WHERE c.id = %s
+                GROUP BY c.id
+            """, (contract_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_contracts(page: int | None = None, search: str | None = None) -> list[dict]:
+    """Contracts for the manager API list view."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            query = """
+                SELECT c.*,
+                       COUNT(cb.booking_id)::int AS bookings_count
+                FROM contracts c
+                LEFT JOIN contract_bookings cb ON cb.contract_id = c.id
+                WHERE TRUE
+            """
+            params = []
+            if search:
+                like = f"%{search.strip()}%"
+                query += """
+                  AND (
+                      CAST(c.id AS TEXT) ILIKE %s
+                      OR c.customer_name ILIKE %s
+                      OR c.phone ILIKE %s
+                  )
+                """
+                params.extend([like, like, like])
+            query += """
+                GROUP BY c.id
+                ORDER BY c.start_date DESC, c.id DESC
+            """
+            if page is not None:
+                offset = (page - 1) * PAGE_SIZE
+                query += " LIMIT %s OFFSET %s"
+                params.extend([PAGE_SIZE, offset])
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def contract_owns_bookings(contract_id: int, booking_ids: list[int]) -> bool:
+    if not booking_ids:
+        return True
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM contract_bookings "
+                "WHERE contract_id = %s AND booking_id = ANY(%s)",
+                (contract_id, list(booking_ids)),
+            )
+            return cur.fetchone()[0] == len(set(booking_ids))
+
+
+def get_bookings(booking_ids: list[int]) -> list[dict]:
+    """`get_booking` for a set of ids, in one round trip.
+
+    Exists for the callers that describe a whole batch to the client — a
+    cancelled repeating series can run to hundreds of occurrences, and looping
+    `get_booking` over them is that many queries inside a request. Ordered by
+    slot so the message reads as a calendar; missing ids are simply absent.
+    """
+    if not booking_ids:
+        return []
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, field, date, time_start, time_end, customer_name,
+                       phone, notes, state, price_total, source, reserved_until,
+                       paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
+                       group_transition
+                FROM bookings WHERE id = ANY(%s)
+                ORDER BY date, time_start, field
+            """, (list(booking_ids),))
+            return [dict(r) for r in cur.fetchall()]
 
 
 
@@ -170,8 +444,8 @@ def cancel_draft_awaiting_payment(phone: str) -> bool:
             """, (phone,))
 
             cnt = cur.rowcount > 0
-            print("COUNT cancelled", cnt)
             return cnt
+
 
 def has_awaiting_payments(phone: str) -> bool:
     """Return upcoming (today or later) non-cancelled bookings for a phone number."""

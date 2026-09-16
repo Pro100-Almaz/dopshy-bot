@@ -21,6 +21,7 @@ from integrations.repo import booking_repo
 from integrations.repo.booking_repo import get_existing_draft
 from integrations.repo.postgres import update_draft
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
+from utils import display_end_time
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ def _format_success(result_data: dict) -> str:
     ts = str(new["time_start"])[:5]
     te = str(new["time_end"])[:5]
     total = calculate_full_booking_price(new["format"], str(new["date"]), ts, te)
+    te = display_end_time(te)  # show an end-of-day 23:59 as 00:00 to the client
     price_line = fmt_price(total)
     summary_ru = (
         f"✅ Бронь обновлена!\n\n"
