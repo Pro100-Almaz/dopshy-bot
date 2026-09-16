@@ -37,7 +37,7 @@ def test_send_text_message_is_captured_not_delivered(monkeypatch):
     with test_context.console_session() as (outbox, _trace):
         result = whatsapp_client.send_text_message(_channel(), "77000000001", "привет")
 
-    assert outbox == [outbox[0]]
+    assert len(outbox) == 1
     assert outbox[0]["to"] == "77000000001"
     assert outbox[0]["text"] == "привет"
     assert result["messages"][0]["id"].startswith("console-")
@@ -129,7 +129,9 @@ def test_console_phones_are_recognised_in_every_normalized_form(phone):
 
 
 @pytest.mark.parametrize("phone", [
-    "+77011234567", "87011234567", "77771234567", "", None,
+    # 77017000001 is the trap: it *contains* the console block "700000", so an
+    # unanchored substring match would purge this real subscriber's rows.
+    "+77011234567", "87011234567", "77771234567", "77017000001", "", None,
 ])
 def test_real_phones_are_not_mistaken_for_console_phones(phone):
     assert agent_test_repo.is_test_phone(phone) is False

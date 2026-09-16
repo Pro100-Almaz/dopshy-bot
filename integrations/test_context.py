@@ -23,13 +23,10 @@ instrumentation added to production paths costs a single ContextVar lookup.
 """
 
 import contextvars
-import logging
 import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
-
-logger = logging.getLogger(__name__)
 
 _test_mode: contextvars.ContextVar[bool] = contextvars.ContextVar("agent_test_mode", default=False)
 _outbox: contextvars.ContextVar[list | None] = contextvars.ContextVar("agent_test_outbox", default=None)

@@ -17,12 +17,11 @@ Contract notes that shape this file:
 """
 
 import logging
-import threading
 
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import apipay_service
+from integrations import apipay_service, test_context
 from integrations.apipay_client import STATUS_REFUNDED, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
@@ -89,10 +88,12 @@ def receive_apipay_webhook():
     if changed or status == STATUS_REFUNDED:
         # Off the 5-second budget. Shared with the reconciliation poller, so a
         # payment found by polling notifies and syncs identically.
-        threading.Thread(target=apipay_service.after_transition,
-                         args=(result["invoice"], changed, result["released"],
-                               result["paid"], result["status"]),
-                         daemon=True).start()
+        # spawn_thread, not threading.Thread: after_transition notifies the
+        # client, so it must stay inside the sandbox if it is ever reached from
+        # a console turn. A no-op outside console mode.
+        test_context.spawn_thread(apipay_service.after_transition,
+                                  result["invoice"], changed, result["released"],
+                                  result["paid"], result["status"])
 
     return jsonify({"status": "ok", "bookings": changed}), 200
 

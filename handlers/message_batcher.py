@@ -41,6 +41,7 @@ import redis
 
 import config
 from handlers.message_handler import handle_incoming_message
+from integrations import test_context
 from integrations.providers.payload import IncomingWhatsAppMessage
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,9 @@ def _handle_non_text(payload: IncomingWhatsAppMessage) -> None:
         except Exception:
             logger.exception("[BATCH] handler failed for non-text message %s", key)
 
-    threading.Thread(target=_run, daemon=True).start()
+    # spawn_thread, not threading.Thread: keeps the agent-test sandbox flag if the
+    # console is ever routed through the batcher. A no-op outside console mode.
+    test_context.spawn_thread(_run)
 
 
 def _flush_if_current(key: str, token: int) -> None:

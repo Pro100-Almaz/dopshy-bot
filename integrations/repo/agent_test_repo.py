@@ -19,7 +19,9 @@ from integrations.repo.utils import _conn
 
 logger = logging.getLogger(__name__)
 
-# Bot name → the env key holding its phone_number_id.
+# Every bot the console can drive. Deliberately not derived from
+# config.BOT_CONFIGS: a name stays valid (and gets its own "not configured on
+# this server" error from phone_number_id_for) even when its env vars are unset.
 BOT_NAMES = ("dopsy_bot", "dopsy_fs_school", "dopsy_boxing")
 
 
@@ -30,17 +32,29 @@ def phone_number_id_for(bot_name: str) -> str | None:
     return None
 
 
-def is_test_phone(phone: str | None) -> bool:
-    """True for a console phone, in any of the forms the normalizers produce.
+# What counts as a console phone. Keyed on the NATIONAL part because
+# apipay_client.normalize_phone rewrites a leading 7 to 8, so this matches
+# +77000000001, 77000000001, 87000000001, 7000000001 and any spacing noise.
+#
+# Shared verbatim with the SQL purge in purge_orphans so the two can never
+# drift. That sharing is only sound on DIGITS-ONLY input: Python's `$` also
+# matches before a trailing newline while Postgres' does not, so both call
+# sites must strip non-digits first (they do). `\Z` is not an option —
+# Postgres regexes do not support it.
+#
+# The serial width is derived rather than hard-coded: a national number is 10
+# digits, so widening CONSOLE_TEST_NATIONAL_PREFIX must narrow the serial, not
+# silently make this pattern reject every live console phone — which would
+# un-gate outbound sends to them.
+_CONSOLE_SERIAL_DIGITS = 10 - len(config.CONSOLE_TEST_NATIONAL_PREFIX)
+CONSOLE_PHONE_REGEX = (
+    rf"^[78]?{config.CONSOLE_TEST_NATIONAL_PREFIX}[0-9]{{{_CONSOLE_SERIAL_DIGITS}}}$"
+)
 
-    Keyed on the NATIONAL part, because apipay_client.normalize_phone rewrites a
-    leading 7 to 8. Matches +77000000001, 77000000001, 87000000001, 7000000001
-    and any spacing/bracket noise.
-    """
-    digits = re.sub(r"\D", "", phone or "")
-    if len(digits) == 11 and digits[0] in "78":
-        digits = digits[1:]
-    return len(digits) == 10 and digits.startswith(config.CONSOLE_TEST_NATIONAL_PREFIX)
+
+def is_test_phone(phone: str | None) -> bool:
+    """True for a console phone, in any of the forms the normalizers produce."""
+    return bool(re.match(CONSOLE_PHONE_REGEX, re.sub(r"\D", "", phone or "")))
 
 
 def _row_to_session(row: dict) -> dict:
@@ -114,6 +128,26 @@ def delete_session_row(session_id: int) -> None:
             cur.execute("DELETE FROM agent_test_sessions WHERE id = %s", (session_id,))
 
 
+# Child rows hanging off a sandbox booking / trial, in FK-safe delete order.
+# Both purges below run this same cascade and differ only in how they select the
+# parent rows, so the table list lives in exactly one place. Each statement
+# carries exactly one placeholder — the caller's scope parameter.
+_CHILD_CASCADE = (
+    ("payments", "DELETE FROM payments WHERE booking_id IN ({bookings})"),
+    ("booking_events", "DELETE FROM booking_events WHERE booking_id IN ({bookings})"),
+    ("booking_history", "DELETE FROM booking_history WHERE booking_id IN ({bookings})"),
+    ("booking_sessions", "DELETE FROM booking_sessions WHERE booking_id IN ({bookings})"),
+    ("trial_sessions", "DELETE FROM trial_sessions WHERE trial_id IN ({trials})"),
+)
+
+
+def _child_statements(bookings_sql: str, trials_sql: str, params: tuple) -> tuple:
+    return tuple(
+        (table, sql.format(bookings=bookings_sql, trials=trials_sql), params)
+        for table, sql in _CHILD_CASCADE
+    )
+
+
 def _execute_isolated(cur, table: str, sql: str, params: tuple, deleted: dict) -> None:
     """Run one cleanup statement inside a SAVEPOINT.
 
@@ -139,27 +173,28 @@ def purge_test_data(test_phone: str) -> dict:
     Test rows carry no audit value, and leaving cancelled ones behind would make
     `get_existing_draft` / `has_active_trial` behave differently after a reset
     than on a fresh session — exactly the kind of drift that makes a test console
-    untrustworthy. Every statement is scoped by BOTH `is_test` and the phone, so
-    a bug in one predicate can never reach production rows.
+    untrustworthy. Every statement over a table that HAS `is_test` is scoped by
+    both it and the phone, so a bug in one predicate cannot reach production
+    rows. `bot_paused_contacts` has no such column and is scoped by exact phone
+    match alone — keep it that way; a LIKE there would hit real subscribers.
     """
     deleted: dict[str, int] = {}
     booking_ids_sql = "SELECT id FROM bookings WHERE phone = %s AND is_test"
     trial_ids_sql = "SELECT id FROM academy_trials WHERE phone = %s AND is_test"
+    scope = (test_phone,)
+
+    statements = _child_statements(booking_ids_sql, trial_ids_sql, scope) + (
+        ("bookings", "DELETE FROM bookings WHERE phone = %s AND is_test", scope),
+        ("academy_trials_unlink",
+         "UPDATE academy_trials SET user_id = NULL WHERE phone = %s AND is_test", scope),
+        ("academy_trials", "DELETE FROM academy_trials WHERE phone = %s AND is_test", scope),
+        ("academy_users", "DELETE FROM academy_users WHERE parent_phone = %s AND is_test", scope),
+        ("bot_paused_contacts", "DELETE FROM bot_paused_contacts WHERE phone = %s", scope),
+    )
 
     with _conn() as conn:
         with conn.cursor() as cur:
-            for table, sql, params in (
-                ("payments", f"DELETE FROM payments WHERE booking_id IN ({booking_ids_sql})", (test_phone,)),
-                ("booking_events", f"DELETE FROM booking_events WHERE booking_id IN ({booking_ids_sql})", (test_phone,)),
-                ("booking_history", f"DELETE FROM booking_history WHERE booking_id IN ({booking_ids_sql})", (test_phone,)),
-                ("booking_sessions", f"DELETE FROM booking_sessions WHERE booking_id IN ({booking_ids_sql})", (test_phone,)),
-                ("trial_sessions", f"DELETE FROM trial_sessions WHERE trial_id IN ({trial_ids_sql})", (test_phone,)),
-                ("bookings", "DELETE FROM bookings WHERE phone = %s AND is_test", (test_phone,)),
-                ("academy_trials_unlink", "UPDATE academy_trials SET user_id = NULL WHERE phone = %s AND is_test", (test_phone,)),
-                ("academy_trials", "DELETE FROM academy_trials WHERE phone = %s AND is_test", (test_phone,)),
-                ("academy_users", "DELETE FROM academy_users WHERE parent_phone = %s AND is_test", (test_phone,)),
-                ("bot_paused_contacts", "DELETE FROM bot_paused_contacts WHERE phone = %s", (test_phone,)),
-            ):
+            for table, sql, params in statements:
                 # A table may be absent in some environment; cleaning the rest
                 # still matters more than that one failure.
                 _execute_isolated(cur, table, sql, params, deleted)
@@ -173,40 +208,31 @@ def purge_orphans(older_than_days: int = 7) -> dict:
     sweeper never reaches them — without this they would live forever.
     """
     deleted: dict[str, int] = {}
-    interval = f"{int(older_than_days)} days"
-    stale_bookings = (
-        "SELECT id FROM bookings WHERE is_test AND created_at < NOW() - %s::interval"
+    stale = "is_test AND created_at < NOW() - %s::interval"
+    scope = (f"{int(older_than_days)} days",)
+    stale_bookings = f"SELECT id FROM bookings WHERE {stale}"
+    stale_trials = f"SELECT id FROM academy_trials WHERE {stale}"
+
+    statements = _child_statements(stale_bookings, stale_trials, scope) + (
+        ("bookings", f"DELETE FROM bookings WHERE {stale}", scope),
+        ("academy_trials", f"DELETE FROM academy_trials WHERE {stale}", scope),
+        # academy_trials.user_id REFERENCES academy_users(id) with no ON DELETE,
+        # so a surviving test trial would block its user's delete.
+        ("academy_trials_unlink",
+         f"UPDATE academy_trials SET user_id = NULL "
+         f"WHERE user_id IN (SELECT id FROM academy_users WHERE {stale})", scope),
+        ("academy_users", f"DELETE FROM academy_users WHERE {stale}", scope),
+        # Pause flags are keyed by bare digits; clear any left on a console
+        # phone, or that contact stays silently muted forever. The pattern is
+        # anchored: a substring match on the block also hits real subscribers
+        # (77017000001 contains "700000") and would un-mute a paused customer.
+        ("bot_paused_contacts",
+         "DELETE FROM bot_paused_contacts "
+         "WHERE regexp_replace(phone, '\\D', '', 'g') ~ %s", (CONSOLE_PHONE_REGEX,)),
     )
-    stale_trials = (
-        "SELECT id FROM academy_trials WHERE is_test AND created_at < NOW() - %s::interval"
-    )
+
     with _conn() as conn:
         with conn.cursor() as cur:
-            for table, sql in (
-                ("payments", f"DELETE FROM payments WHERE booking_id IN ({stale_bookings})"),
-                ("booking_events", f"DELETE FROM booking_events WHERE booking_id IN ({stale_bookings})"),
-                ("booking_history", f"DELETE FROM booking_history WHERE booking_id IN ({stale_bookings})"),
-                ("booking_sessions", f"DELETE FROM booking_sessions WHERE booking_id IN ({stale_bookings})"),
-                ("trial_sessions", f"DELETE FROM trial_sessions WHERE trial_id IN ({stale_trials})"),
-                ("bookings", "DELETE FROM bookings WHERE is_test AND created_at < NOW() - %s::interval"),
-                ("academy_trials", "DELETE FROM academy_trials WHERE is_test AND created_at < NOW() - %s::interval"),
-                # academy_trials.user_id REFERENCES academy_users(id) with no ON
-                # DELETE, so a surviving test trial would block its user's delete.
-                ("academy_trials_unlink",
-                 "UPDATE academy_trials SET user_id = NULL WHERE user_id IN "
-                 "(SELECT id FROM academy_users WHERE is_test "
-                 " AND created_at < NOW() - %s::interval)"),
-                ("academy_users", "DELETE FROM academy_users WHERE is_test AND created_at < NOW() - %s::interval"),
-                # Pause flags are keyed by bare digits; clear any left on a
-                # console phone, or that contact stays silently muted forever.
-                ("bot_paused_contacts",
-                 "DELETE FROM bot_paused_contacts "
-                 "WHERE regexp_replace(phone, '\\D', '', 'g') LIKE %s"),
-            ):
-                params = (
-                    (f"%{config.CONSOLE_TEST_NATIONAL_PREFIX}%",)
-                    if table == "bot_paused_contacts"
-                    else (interval,)
-                )
+            for table, sql, params in statements:
                 _execute_isolated(cur, table, sql, params, deleted)
     return deleted

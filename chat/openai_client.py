@@ -11,7 +11,6 @@ Outside a console turn `test_context.record()` is a no-op, so the only cost on
 the production path is one ContextVar lookup and a `perf_counter` pair.
 """
 
-import logging
 import time
 from typing import Any
 
@@ -19,9 +18,6 @@ from openai import OpenAI
 
 import config
 from integrations import test_context
-
-logger = logging.getLogger(__name__)
-
 
 def _system_prompt_of(messages: Any) -> str | None:
     try:
