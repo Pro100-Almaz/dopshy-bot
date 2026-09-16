@@ -355,8 +355,15 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             user_text[:80],
         )
 
-        context = retrieve_context(user_text, bot_name=bot_config["name"])
-        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
+        try:
+            context = retrieve_context(user_text, bot_name=bot_config["name"])
+            logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
+        except Exception:
+            logger.exception(
+                "[RAG] Context retrieval failed for: %.80s — continuing without RAG context",
+                user_text,
+            )
+            context = ""
 
         history = get_history(chat_id)
         logger.info("[LLM] History length: %d messages", len(history))

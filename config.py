@@ -13,6 +13,13 @@ EXTRACTOR_MODEL: str = "gpt-4.1"
 INTENT_MODEL: str = "gpt-4.1"
 EMBEDDING_MODEL: str = "text-embedding-3-small"
 
+# A network blip on the embeddings call used to hang RAG retrieval
+# indefinitely (no timeout), silently blocking the whole reply pipeline.
+# Bound each attempt so a blip fails fast instead of hanging forever.
+RAG_EMBEDDING_TIMEOUT_SECONDS: float = float(
+    os.getenv("RAG_EMBEDDING_TIMEOUT_SECONDS", "10")
+)
+
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]
 WHATSAPP_SECOND_TOKEN: str = os.environ["WHATSAPP_SECOND_TOKEN"]
