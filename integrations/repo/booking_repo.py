@@ -3,6 +3,7 @@ import psycopg2.extras
 import psycopg2.pool
 from zoneinfo import ZoneInfo
 
+from integrations import test_context
 from integrations.repo.postgres import _conn
 
 
@@ -28,7 +29,8 @@ def get_all_bookings(page: int| None = None, search: str | None = None) -> list[
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
                 FROM bookings
-                WHERE field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_payment', 'unpaid')
+                WHERE NOT is_test
+                  AND field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_payment', 'unpaid')
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
             """
 
@@ -90,14 +92,24 @@ def get_booking_customers() -> list[dict]:
                     MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
                     MAX(GREATEST(created_at, COALESCE(updated_at, created_at))) AS last_at
                 FROM bookings
-                WHERE phone IS NOT NULL AND phone <> ''
+                WHERE NOT is_test AND phone IS NOT NULL AND phone <> ''
                 GROUP BY phone
             """)
             return [dict(r) for r in cur.fetchall()]
 
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
-    """Return slot-holding bookings (awaiting_payment + confirmed) in a date range."""
+    """Return slot-holding bookings (awaiting_payment + confirmed) in a date range.
+
+    Sandbox rows created by the agent-test console are invisible to real
+    traffic, so a test conversation can never make a slot look taken. Inside a
+    console turn they ARE included, otherwise the console would keep offering a
+    slot the tester just booked.
+    """
+    # Only THIS session's sandbox rows, never every tester's: otherwise two
+    # people testing at once see each other's slots as taken, and abandoned
+    # reservations linger for the 7 days until the orphan sweep.
+    own_test_phone = test_context.test_phone() if test_context.is_test_mode() else None
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
@@ -106,8 +118,9 @@ def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
                 FROM bookings
                 WHERE date BETWEEN %s AND %s
                   AND state IN ('awaiting_payment', 'confirmed')
+                  AND (NOT is_test OR phone = %s)
                 ORDER BY date, time_start, field
-            """, (week_start, week_end))
+            """, (week_start, week_end, own_test_phone))
             return [dict(r) for r in cur.fetchall()]
 
 
@@ -175,7 +188,8 @@ def get_bookings_for_sheet() -> list[dict]:
                        phone, notes, state, price_total, reserved_until, source, updated_at,
                        paid_kaspi_qr, paid_cash
                 FROM bookings
-                WHERE state IN ('awaiting_payment', 'confirmed', 'unpaid')
+                WHERE NOT is_test
+                  AND state IN ('awaiting_payment', 'confirmed', 'unpaid')
                   AND date >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY date, time_start, field
             """)
@@ -232,7 +246,8 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
                 FROM bookings
-                WHERE date BETWEEN %s AND %s AND state = ANY(%s)
+                WHERE NOT is_test
+                  AND date BETWEEN %s AND %s AND state = ANY(%s)
                   AND (%s::int IS NULL OR field = %s)
 
                   AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
@@ -273,7 +288,8 @@ def get_report_bookings_in_range(start: str, end: str, states: tuple) -> list[di
                        state, price_total, source,
                        paid_kaspi_qr, paid_cash, paid_avans
                 FROM bookings
-                WHERE date BETWEEN %s AND %s
+                WHERE NOT is_test
+                  AND date BETWEEN %s AND %s
                   AND state = ANY(%s)
                   AND field IS NOT NULL
                   AND date IS NOT NULL
@@ -406,8 +422,9 @@ def get_expired_bookings(session_ttl_seconds: int) -> list[dict]:
             cur.execute("""
                 SELECT id, state, date, field, format, time_start, time_end, phone, customer_name
                 FROM bookings
-                WHERE (state = 'awaiting_payment' AND reserved_until < NOW())
-                   OR (state = 'draft' AND created_at < NOW() - make_interval(secs => %s))
+                WHERE NOT is_test
+                  AND ((state = 'awaiting_payment' AND reserved_until < NOW())
+                       OR (state = 'draft' AND created_at < NOW() - make_interval(secs => %s)))
             """, (session_ttl_seconds,))
             return [dict(r) for r in cur.fetchall()]
 

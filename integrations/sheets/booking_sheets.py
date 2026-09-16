@@ -14,6 +14,7 @@ import threading
 from typing import Any
 
 import config
+from integrations import test_context
 from integrations.booking_service import get_payments
 from integrations.repo import booking_repo
 from integrations.status_labels import STATE_DISPLAY as _STATE_DISPLAY, \
@@ -120,7 +121,8 @@ def _last_col_letter() -> str:
 
 def upsert_booking_row(booking: dict) -> None:
     """Insert or update the row for a single booking (matched by booking_id in col A)."""
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     try:
         ws = _get_worksheet()
@@ -140,7 +142,8 @@ def upsert_booking_row(booking: dict) -> None:
 
 def update_booking_row(booking_id: int, fields: dict) -> None:
     """Patch specific cells of an existing booking row (used by manager edits)."""
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     col_for = {"field": 2, "date": 3, "time_start": 4, "time_end": 5,
                "customer_name": 6, "phone": 7, "notes": 8, "state": 9,
@@ -174,7 +177,8 @@ def update_booking_row(booking_id: int, fields: dict) -> None:
 
 def refresh_all_bookings() -> None:
     """Rewrite the whole sheet from PostgreSQL (header + all active bookings)."""
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     try:
         rows = booking_repo.get_bookings_for_sheet()
@@ -413,6 +417,11 @@ def _paint_weekly_bookings(worksheet, bookings):
 
 
 def refresh_week_sheet() -> None:
+    # Same two guards as every other writer here: this one lacked even the
+    # GOOGLE_SPREADSHEET_ID opt-out, so a console confirm rebuilt all three
+    # live weekly worksheets.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
+        return
     try:
         for i in range(3):
             ws = _get_week_worksheet(i + 1)

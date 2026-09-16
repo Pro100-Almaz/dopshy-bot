@@ -2,14 +2,12 @@ import json
 import logging
 from typing import Any
 
-from openai import OpenAI
-
 import config
 from chat.system_prompts.sp_2 import _DATA_EXTRACT_PROMPT_TEMPLATE
 from chat.tools.academy_tools import EXTRACT_TRIAL_DATA_LLM
 from utils import now_almaty, today_almaty
 
-client = OpenAI(api_key=config.OPENAI_API_KEY)
+from chat.openai_client import client
 
 
 EMPTY_TRIAL_DATA = {

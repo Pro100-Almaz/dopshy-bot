@@ -122,6 +122,20 @@ def clear_history(chat_id: str) -> None:
         _save_to_db(chat_id, [])
 
 
+def invalidate(chat_id: str) -> None:
+    """Drop the in-process cache for one chat so the next read hits SQLite.
+
+    The cache is per-process and loaded once per chat_id, but the app runs under
+    `gunicorn --workers 2`: a turn served by worker B is invisible to worker A's
+    cache, which would then serve a stale transcript AND feed the model a history
+    missing that turn. The agent-test console calls this before each turn, where
+    turns are deliberate and a re-read costs nothing.
+    """
+    with _lock:
+        _loaded.discard(chat_id)
+        _cache.pop(chat_id, None)
+
+
 def list_contacts(phone_number_id: str | None = None) -> list[dict]:
     """Return every conversation's raw chat_id and last-activity timestamp.
 

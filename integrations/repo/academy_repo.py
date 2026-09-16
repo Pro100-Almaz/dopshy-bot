@@ -564,7 +564,8 @@ def get_trials_by_type(group_type: str):
                        t.subscribed
                 FROM academy_trials t
                          JOIN academy_groups g ON t.group_id = g.id
-                WHERE g.group_type = %s
+                WHERE NOT t.is_test
+                  AND g.group_type = %s
                   AND t.state = 'confirmed'
 
                 """, (group_type,)
@@ -589,7 +590,7 @@ def get_users_by_assigned_group(group_id: int) -> list[dict]:
                        g.group_type AS assigned_group_type
                 FROM academy_users u
                 LEFT JOIN academy_groups g ON g.id = u.assigned_group_id
-                WHERE u.assigned_group_id = %s
+                WHERE NOT u.is_test AND u.assigned_group_id = %s
                 ORDER BY u.child_name, u.id
                 """,
                 (group_id,)
@@ -692,7 +693,8 @@ def get_trials_with_users_by_group(group_id: int) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 _TRIAL_WITH_USER_SELECT + """
-                WHERE t.group_id = %s
+                WHERE NOT t.is_test
+                  AND t.group_id = %s
                   AND t.state = 'confirmed'
                 ORDER BY t.trial_day, t.start_time, t.id
                 """,
@@ -702,7 +704,7 @@ def get_trials_with_users_by_group(group_id: int) -> list[dict]:
 
 
 def get_trials_with_users_by_type(group_type: str | None = None) -> list[dict]:
-    where = ["t.state = 'confirmed'"]
+    where = ["NOT t.is_test", "t.state = 'confirmed'"]
     params: list = []
     if group_type is not None:
         where.append("g.group_type = %s")
@@ -753,7 +755,7 @@ def trial_belongs_to_type(trial_id: int, group_type: str) -> bool:
 
 
 def get_users_by_type(group_type: str | None = None) -> list[dict]:
-    where = []
+    where = ["NOT u.is_test"]
     params: list = []
     if group_type is not None:
         where.append("g.group_type = %s")
@@ -832,7 +834,8 @@ def get_academy_customers(group_type: str) -> list[dict]:
                         GREATEST(t.created_at, COALESCE(t.updated_at, t.created_at)) AS last_at
                     FROM academy_trials t
                     JOIN academy_groups g ON g.id = t.group_id
-                    WHERE g.group_type = %s
+                    WHERE NOT t.is_test
+                      AND g.group_type = %s
                       AND t.phone IS NOT NULL
                       AND t.phone <> ''
 
@@ -844,7 +847,8 @@ def get_academy_customers(group_type: str) -> list[dict]:
                         GREATEST(u.created_at, COALESCE(u.updated_at, u.created_at)) AS last_at
                     FROM academy_users u
                     JOIN academy_groups g ON g.id = u.assigned_group_id
-                    WHERE g.group_type = %s
+                    WHERE NOT u.is_test
+                      AND g.group_type = %s
                       AND u.parent_phone IS NOT NULL
                       AND u.parent_phone <> ''
                 )
@@ -931,6 +935,10 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                     SELECT au.id
                     FROM academy_users au
                     WHERE au.assigned_group_id = %s
+                      -- Never match across the sandbox boundary: the child_name
+                      -- predicate below would otherwise let a console trial flip
+                      -- `subscribed` on a real student with the same name.
+                      AND au.is_test = %s
                       AND (
                           au.parent_phone = %s
                           OR lower(au.child_name) = lower(%s)
@@ -944,6 +952,7 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                 (
                     subscribed,
                     trial["group_id"],
+                    bool(trial.get("is_test")),
                     trial["phone"],
                     trial["child_name"],
                     trial["phone"],
@@ -960,9 +969,10 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                         parent_phone,
                         total_trials,
                         assigned_group_id,
-                        subscribed
+                        subscribed,
+                        is_test
                     )
-                    SELECT %s, %s, %s, COUNT(*), %s, TRUE
+                    SELECT %s, %s, %s, COUNT(*), %s, TRUE, %s
                     FROM academy_trials
                     WHERE group_id = %s
                       AND (
@@ -975,6 +985,9 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                         trial["child_birth_year"],
                         trial["phone"],
                         trial["group_id"],
+                        # Inherit the sandbox flag from the trial, so a test
+                        # conversation never creates a production academy user.
+                        bool(trial.get("is_test")),
                         trial["group_id"],
                         trial["phone"],
                         trial["child_name"],
@@ -1204,8 +1217,8 @@ def confirm_trial(trial_id: int) -> bool:
                 """
                 INSERT INTO academy_users
                     (child_name, child_birth_year, parent_phone, total_trials,
-                     assigned_group_id, experience, school_shift)
-                VALUES (%s, %s, %s, 1, %s, %s, %s)
+                     assigned_group_id, experience, school_shift, is_test)
+                VALUES (%s, %s, %s, 1, %s, %s, %s, %s)
                 ON CONFLICT (parent_phone, child_name, assigned_group_id)
                 DO UPDATE SET
                     child_birth_year = EXCLUDED.child_birth_year,
@@ -1216,7 +1229,8 @@ def confirm_trial(trial_id: int) -> bool:
                 RETURNING id
                 """,
                 (trial["child_name"], trial["child_birth_year"], trial["phone"],
-                 trial["group_id"], trial["experience"], trial["school_shift"]),
+                 trial["group_id"], trial["experience"], trial["school_shift"],
+                 bool(trial.get("is_test"))),
             )
             user_id = cur.fetchone()["id"]
             cur.execute(

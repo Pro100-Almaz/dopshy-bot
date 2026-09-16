@@ -1,12 +1,11 @@
 import json
 import logging
 from typing import List, Dict, Any
-from openai import OpenAI
 import config
 from chat.system_prompts.sp_1 import get_data_extract_prompt
 from chat.tools.arena_tools import EXTRACT_DATA_LLM
 
-client = OpenAI(api_key = config.OPENAI_API_KEY)
+from chat.openai_client import client
 
 
 def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Dict[str, Any]:

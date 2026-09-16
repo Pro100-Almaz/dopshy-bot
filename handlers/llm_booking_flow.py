@@ -40,6 +40,7 @@ from handlers.base_classes.base_helper import BaseHelper
 from integrations import apipay_client, apipay_service
 from integrations import booking as booking_logic
 from integrations import booking_service
+from integrations import test_context
 from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
@@ -428,7 +429,10 @@ class LlmBookingFlowHandler:
         client_token = str(draft.get("client_token", ""))
 
         invoice_hook = None
-        if config.APIPAY_ENABLED:
+        # Agent-test console: never raise a real Kaspi invoice. Leaving the hook
+        # as None makes request_payment take its ordinary non-ApiPay path, which
+        # is what we want to exercise.
+        if config.APIPAY_ENABLED and not test_context.is_test_mode():
             try:
                 apipay_client.normalize_phone(phone)
             except ApiPayError as exc:

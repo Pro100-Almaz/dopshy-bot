@@ -4,7 +4,6 @@ Core message processing pipeline:
 """
 import logging
 import re
-import threading
 from typing import Union
 
 import requests
@@ -44,6 +43,7 @@ from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
 from handlers.base_classes.base_checker import BaseChecker
 import config
+from integrations import test_context
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +373,13 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
 
             _session = _pg.get_active_session("dopsy_bot", chat_id)
+            test_context.record(
+                "branch",
+                bot=bot_config["name"],
+                pipeline="arena",
+                session_state=(_session or {}).get("state"),
+                session_params=(_session or {}).get("params"),
+            )
 
             if _session:
                 # (a) Active booking session → deterministic step handler
@@ -414,6 +421,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             intent, lang = route_incoming_message(history, user_text)
             logger.info("[BOOKING] Intent detection replied, Intent is %s, lang=%s", intent, lang)
+            test_context.record("route", router="route_incoming_message", intent=intent, lang=lang)
 
             free = booking.get_free_windows()
             availability_ctx = booking.format_availability_context(free, lang)
@@ -575,6 +583,8 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             trial_intent, trial_lang = route_trial_message(history, user_text)
             logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
                         trial_intent, trial_lang)
+            test_context.record("route", router="route_trial_message",
+                                intent=trial_intent, lang=trial_lang)
 
             # The router is tuned to over-trigger signup intent. The booking flow
             # cannot answer a price/schedule/location question, so veto the router
@@ -693,6 +703,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
+        test_context.record("error", error=f"{type(exc).__name__}: {exc}")
         logger.exception("Error handling message: %s", exc)
         # Best-effort fallback reply
         try:
@@ -735,7 +746,7 @@ def _refresh_booking_sheet(booking: dict, state: str) -> None:
         except Exception as exc:
             logger.error("[PAYMENT] Sheet update failed for booking id=%s: %s", booking["id"], exc)
 
-    threading.Thread(target=_run, daemon=True).start()
+    test_context.spawn_thread(_run)
 
 
 def _handle_payment_receipt(channel: OutboundChannel, sender_phone: str,

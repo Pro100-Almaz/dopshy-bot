@@ -4,6 +4,7 @@ from functools import lru_cache
 from langchain_chroma import Chroma
 
 import config
+from integrations import test_context
 from rag.vector_store import get_vector_store
 
 
@@ -41,6 +42,22 @@ def retrieve_context(
             results = store.similarity_search(query, k=k)
         else:
             raise
+
+    test_context.record(
+        "rag",
+        query=query,
+        k=k,
+        bot_name=bot_name,
+        filter=filter_,
+        chunks=[
+            {
+                "source": d.metadata.get("source"),
+                "scope": d.metadata.get("scope"),
+                "text": d.page_content,
+            }
+            for d in results
+        ],
+    )
 
     if not results:
         return ""

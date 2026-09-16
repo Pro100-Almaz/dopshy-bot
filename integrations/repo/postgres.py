@@ -10,6 +10,7 @@ import psycopg2.pool
 import config
 from integrations.booking_service import _record_event, _record_status_change, _history_source
 from integrations.repo.history_repo import _record_history
+from integrations import test_context
 from integrations.repo.utils import _conn, _ok, _err
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,10 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
     if type_string == "booking":
         cols.extend(["source"])
         vals.extend(["whatsapp"])
+    # Agent-test console: every row this conversation creates is sandboxed.
+    if test_context.is_test_mode():
+        cols.append("is_test")
+        vals.append(True)
     placeholders = ", ".join(["%s"] * len(vals))
 
     with _conn() as conn:

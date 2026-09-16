@@ -17,7 +17,6 @@ After confirming "да":
 """
 import logging
 import re
-import threading
 import uuid
 from datetime import date, timedelta
 
@@ -29,6 +28,7 @@ from integrations import booking_service
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
 from utils import display_end_time
+from integrations import test_context
 
 logger = logging.getLogger(__name__)
 
@@ -518,7 +518,7 @@ class BookingPromptBuilder(BasePromptBuilder):
             except Exception as e:
                 logger.error("Sheets write failed for booking %d: %s", booking_id, e)
 
-        threading.Thread(target=_write_to_sheets, daemon=True).start()
+        test_context.spawn_thread(_write_to_sheets)
         postgres.delete_session(self.bot_name, chat_id)
 
         total = calculate_full_booking_price(

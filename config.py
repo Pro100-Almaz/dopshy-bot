@@ -102,6 +102,16 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # Manager API (Google Apps Script → backend)
 # ---------------------------------------------------------------------------
 X_SERVICE_TOKEN: str = os.getenv("X_SERVICE_TOKEN", "")
+
+# ---------------------------------------------------------------------------
+# Agent-test console
+# ---------------------------------------------------------------------------
+# Synthetic senders live in the national block 700 000 XXXX, so a console phone
+# is a well-formed 11-digit KZ number (+7 700 000 XXXX) that survives every
+# normalizer in the codebase — including apipay_client.normalize_phone, which
+# RAISES on anything that is not 11 digits. 700-000-XXXX is not an allocated
+# subscriber range, so it cannot reach a real handset.
+CONSOLE_TEST_NATIONAL_PREFIX: str = "700000"
 MANAGER_RATE_LIMIT: int = int(os.getenv("MANAGER_RATE_LIMIT", "60"))  # requests/min per IP
 PAGE_SIZE: int = int(os.getenv("PAGE_SIZE", "20"))  # default rows per page for paginated endpoints
 

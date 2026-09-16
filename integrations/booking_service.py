@@ -146,9 +146,10 @@ def request_payment(booking_id: int, client_token: str,
                     cur.execute(
                         "INSERT INTO bookings "
                         "  (phone, customer_name, date, time_start, time_end, field, format, "
-                        "   players, notes, state, source, client_token, group_transition) "
+                        "   players, notes, state, source, client_token, group_transition, is_test) "
                         "SELECT phone, customer_name, %s, '00:00'::time, %s::time, "
-                        "  field, format, players, notes, 'draft', source, gen_random_uuid(), %s "
+                        "  field, format, players, notes, 'draft', source, gen_random_uuid(), %s, "
+                        "  is_test "
                         "FROM bookings WHERE id = %s",
                         (str(next_day), str(original_time_end)[:5], group_transition, booking_id),
                     )
@@ -420,7 +421,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                     "SELECT id, phone, date, time_start, time_end, field, format, "
                     "       players, customer_name, notes, state, price_total, "
                     "       reserved_until, source, predecessor_booking_id, start_at, "
-                    "       group_transition, "
+                    "       group_transition, is_test, "
                     "       start_at > NOW() + make_interval(hours => %s) AS in_window "
                     "FROM bookings WHERE id = %s FOR UPDATE",
                     (_CLIENT_EDIT_WINDOW_HOURS, booking_id),
@@ -537,14 +538,14 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "INSERT INTO bookings "
                         "  (phone, customer_name, date, time_start, time_end, field, format, "
                         "   players, notes, state, source, client_token, predecessor_booking_id, "
-                        "   reserved_until, start_at, end_at, price_total, group_transition) "
+                        "   reserved_until, start_at, end_at, price_total, group_transition, is_test) "
                         "VALUES "
                         "  (%s, %s, %s::date, %s::time, '23:59:59'::time, %s, %s, "
                         "   %s, %s, %s, %s, gen_random_uuid(), %s, "
                         "   %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (%s::date + '23:59:59'::time) AT TIME ZONE %s, "
-                        "   %s, %s) "
+                        "   %s, %s, %s) "
                         "RETURNING id",
                         (row["phone"], new_name, new_date, new_ts,
                          new_field, new_format,
@@ -552,7 +553,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                          row["reserved_until"],
                          new_date, new_ts, config.BOOKING_TIMEZONE,
                          new_date, config.BOOKING_TIMEZONE,
-                         price_first, new_group_transition),
+                         price_first, new_group_transition, row["is_test"]),
                     )
                     new_id = cur.fetchone()["id"]
 
@@ -561,20 +562,20 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "INSERT INTO bookings "
                         "  (phone, customer_name, date, time_start, time_end, field, format, "
                         "   players, notes, state, source, client_token, "
-                        "   start_at, end_at, price_total, group_transition) "
+                        "   start_at, end_at, price_total, group_transition, is_test) "
                         "VALUES "
                         "  (%s, %s, %s::date, '00:00'::time, %s::time, %s, %s, "
                         "   %s, %s, %s, %s, gen_random_uuid(), "
                         "   (%s::date + '00:00'::time) AT TIME ZONE %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
-                        "   %s, %s) "
+                        "   %s, %s, %s) "
                         "RETURNING id",
                         (row["phone"], new_name, next_day, new_te,
                          new_field, new_format,
                          new_players, row["notes"], row["state"], row["source"],
                          next_day, config.BOOKING_TIMEZONE,
                          next_day, new_te, config.BOOKING_TIMEZONE,
-                         price_second, new_group_transition),
+                         price_second, new_group_transition, row["is_test"]),
                     )
                 else:
                     # Non-transitive: single new booking
@@ -583,14 +584,14 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "INSERT INTO bookings "
                         "  (phone, customer_name, date, time_start, time_end, field, format, "
                         "   players, notes, state, source, client_token, predecessor_booking_id, "
-                        "   reserved_until, start_at, end_at, price_total) "
+                        "   reserved_until, start_at, end_at, price_total, is_test) "
                         "VALUES "
                         "  (%s, %s, %s::date, %s::time, %s::time, %s, %s, "
                         "   %s, %s, %s, %s, gen_random_uuid(), %s, "
                         "   %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
-                        "   %s) "
+                        "   %s, %s) "
                         "RETURNING id",
                         (row["phone"], new_name, new_date, new_ts, new_te,
                          new_field, new_format,
@@ -598,7 +599,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                          row["reserved_until"],
                          new_date, new_ts, config.BOOKING_TIMEZONE,
                          new_date, new_te, config.BOOKING_TIMEZONE,
-                         price_new),
+                         price_new, row["is_test"]),
                     )
                     new_id = cur.fetchone()["id"]
 
@@ -1034,7 +1035,8 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                          FROM bookings
                         WHERE field = ANY(%s) AND date BETWEEN %s AND %s
                           AND state <> 'cancelled' AND state = ANY(%s)
-                          AND time_start IS NOT NULL AND time_end IS NOT NULL""",
+                          AND time_start IS NOT NULL AND time_end IS NOT NULL
+                          AND NOT is_test""",
                     (sorted(fields), min_date.strftime("%Y-%m-%d"),
                      max_date.strftime("%Y-%m-%d"), list(_BLOCKING_STATES)),
                 )

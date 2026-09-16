@@ -1,9 +1,11 @@
 """Meta WhatsApp Cloud API client — send messages."""
 import json
 import logging
+import uuid
 
 import requests
 import config
+from integrations import test_context
 from integrations.providers.payload import OutboundChannel, WhatsAppMedia
 
 logger = logging.getLogger(__name__)
@@ -13,6 +15,9 @@ _GRAPH = "https://graph.facebook.com/v22.0"
 
 def download_media(channel: OutboundChannel, media:WhatsAppMedia) -> bytes | None:
     """Resolve a media_id to its temporary URL and download the bytes. None on failure."""
+    if test_context.is_test_mode():
+        # The console only sends text; there is no real media to fetch.
+        return None
     bot_config = config.get_bot_config(channel.phone_number_id)
     if not bot_config or not media.id:
         return None
@@ -55,6 +60,23 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
     Returns:
         API response JSON.
     """
+    if test_context.is_test_mode():
+        # Agent-test console: collect the reply instead of delivering it. This is
+        # the single seam every flow module's outbound send passes through.
+        test_context.capture_reply(to, text)
+        return {"messages": [{"id": f"console-{uuid.uuid4().hex}"}]}
+
+    # Context-free backstop. contextvars can be lost (a raw threading.Thread, a
+    # scheduler job acting on a sandbox row), and the ambient flag is then gone.
+    # A console phone is never a real subscriber, so refuse rather than dial it.
+    from integrations.repo.agent_test_repo import is_test_phone
+
+    if is_test_phone(to):
+        logger.error(
+            "Refusing outbound send to console test phone %s — sandbox context was lost.", to
+        )
+        return {"messages": [{"id": "refused-test-phone"}]}
+
     provider = channel.provider
     bot_config = config.get_bot_config(channel.phone_number_id)
     if not bot_config:
@@ -120,6 +142,9 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
 
 
 def mark_as_read(channel: OutboundChannel, message_id: str) -> None:
+    if test_context.is_test_mode():
+        return
+
     provider = channel.provider
 
     bot_config = config.get_bot_config(channel.phone_number_id)

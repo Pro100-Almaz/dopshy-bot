@@ -4,6 +4,7 @@ import threading
 from typing import Any
 
 import config
+from integrations import test_context
 from integrations.repo import booking_repo, academy_repo
 from integrations.repo.academy_repo import get_group_by_id
 from integrations.sheets.booking_sheets import _get_spreadsheet
@@ -124,7 +125,8 @@ def _last_col_letter(col_count: int) -> str:
 
 def upsert_group_row(group: dict) -> None:
     """Insert or update the row for a single grouping (matched by group_id in col A)."""
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     try:
         ws = _get_worksheet(group['group_type'], 'groups')
@@ -145,7 +147,8 @@ def upsert_group_row(group: dict) -> None:
 # refreshes the specific group worksheet
 # pastes the headers and puts all the data(all active bookings) in the worksheet
 def refresh_all_groups() -> None:
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     try:
         for group_type in ['boxing', 'football']:
@@ -164,7 +167,8 @@ def refresh_all_groups() -> None:
 
 def upsert_trial_row(trial: dict) -> None:
     """Insert or update the row for a single trial (matched by trial_id in col A)."""
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     try:
         group = get_group_by_id(trial['group_id'])
@@ -187,7 +191,8 @@ def upsert_trial_row(trial: dict) -> None:
 # refreshes the specific group worksheet
 # pastes the headers and puts all the data(all active bookings) in the worksheet
 def refresh_all_trials() -> None:
-    if not config.GOOGLE_SPREADSHEET_ID:
+    # Agent-test console rows must never reach the manager-facing sheet.
+    if not config.GOOGLE_SPREADSHEET_ID or test_context.is_test_mode():
         return
     try:
         for group_type in ['boxing', 'football']:

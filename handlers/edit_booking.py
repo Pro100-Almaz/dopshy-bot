@@ -9,7 +9,6 @@ this module is glue: target selection + message formatting + Sheets sync.
 """
 
 import logging
-import threading
 from datetime import datetime, timedelta, timezone
 
 import config
@@ -22,6 +21,7 @@ from integrations.repo.booking_repo import get_existing_draft
 from integrations.repo.postgres import update_draft
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
 from utils import display_end_time
+from integrations import test_context
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +212,7 @@ def _sync_sheets(old_booking_id: int, new_booking: dict, phone: str) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.error("[EDIT] Sheets sync failed for bookings: %s", exc)
 
-    threading.Thread(target=_run, daemon=True).start()
+    test_context.spawn_thread(_run)
 
 
 # ---------------------------------------------------------------------------

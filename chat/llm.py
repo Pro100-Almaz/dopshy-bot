@@ -3,8 +3,10 @@ import config
 import json
 import logging
 
-from openai import OpenAI
 
+# Shared instrumented client: the agent-test console traces model, system
+# prompt, tokens and latency for every call made through it.
+from chat.openai_client import client as _client
 from chat.conversation import Message
 from chat.system_prompts.sp_1 import INTENT_PROMPT
 from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL, SELECT_INTENT_LLM
@@ -16,8 +18,6 @@ from chat.tools.academy_tools import (
 )
 
 logger = logging.getLogger(__name__)
-
-_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
 
 def get_ai_response(

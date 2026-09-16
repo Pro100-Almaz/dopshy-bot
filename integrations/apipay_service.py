@@ -41,6 +41,7 @@ from integrations.repo import apipay_repo
 from integrations.repo.history_repo import _record_history
 from integrations.repo.utils import _conn
 from integrations.status_labels import STATES_RUSSIAN as _STATES_RUSSIAN
+from integrations import test_context
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +806,8 @@ def on_bookings_cancelled(booking_ids: list[int], reason: str) -> None:
 
     Never raises: a cancellation must succeed even when ApiPay is unreachable.
     """
+    if test_context.is_test_mode():
+        return
     if not config.APIPAY_ENABLED or not booking_ids:
         return
     try:
@@ -863,6 +866,8 @@ def cancel_invoices_for_bookings(booking_ids: list[int], reason: str) -> None:
     could pay in their Kaspi app for a booking that no longer exists. Failures
     are logged, never raised — the sweeper must finish its pass regardless.
     """
+    if test_context.is_test_mode():
+        return
     if not config.APIPAY_ENABLED or not booking_ids:
         return
     try:

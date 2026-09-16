@@ -24,9 +24,9 @@ so it currently changes nothing — re-adding a language means adding its key to
 
 import logging
 import re
-import threading
 
 import config
+from integrations import test_context
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +195,13 @@ def send(to: str | None, key: str, lang: str | None = None, *,
     if not recipient:
         logger.warning("[NOTIFY] %s не отправлено — нет номера получателя", key)
         return False
+
+    # Backstop independent of the ambient sandbox flag — see whatsapp_client.
+    from integrations.repo.agent_test_repo import is_test_phone
+
+    if is_test_phone(recipient):
+        logger.error("[NOTIFY] %s не отправлено — номер %s принадлежит тест-консоли", key, recipient)
+        return False
     try:
         from handlers.whatsapp_client import send_text_message
         from integrations.providers.payload import OutboundChannel
@@ -217,8 +224,10 @@ def send_async(to: str | None, key: str, lang: str | None = None, **kwargs) -> N
     Used by the manager API (its response must not wait on WhatsApp) and by the
     ApiPay webhook, which has ~5 seconds before ApiPay starts retrying.
     """
-    threading.Thread(target=send, args=(to, key, lang), kwargs=kwargs,
-                     daemon=True).start()
+    # spawn_thread (not threading.Thread) so the agent-test sandbox flag
+    # survives into the child — otherwise a console turn would send a real
+    # WhatsApp notification to a real customer.
+    test_context.spawn_thread(send, to, key, lang, **kwargs)
 
 
 # ---------------------------------------------------------------------------

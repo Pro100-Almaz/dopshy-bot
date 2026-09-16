@@ -48,6 +48,9 @@ from blueprints.academy_api import academy_api  # noqa: E402
 app.register_blueprint(academy_api)
 from blueprints.document_api import document_api  # noqa: E402
 app.register_blueprint(document_api)
+# Admin agent-test console (browser-facing, via the backend proxy).
+from blueprints.agent_test_api import agent_test_api  # noqa: E402
+app.register_blueprint(agent_test_api)
 
 # ApiPay.kz payment webhook (POST /webhooks/apipay) — self-disables when the
 # APIPAY_* env vars are absent.
@@ -63,6 +66,7 @@ CORS(
         r"/api/manager/*": {"origins": config.CORS_ALLOWED_ORIGINS},
         r"/api/football/*": {"origins": config.CORS_ALLOWED_ORIGINS},
         r"/api/boxing/*": {"origins": config.CORS_ALLOWED_ORIGINS},
+        r"/api/agent-test/*": {"origins": config.CORS_ALLOWED_ORIGINS},
     },
     allow_headers=["Content-Type", "X-API-Key", "Authorization"],
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -192,6 +196,21 @@ def _reconcile_apipay():
         logger.error("[APIPAY] Reconciliation failed: %s", exc)
 
 
+def _purge_agent_test_orphans() -> None:
+    """Delete sandbox rows from console sessions that were never cleaned up.
+
+    Test bookings are filtered out of `get_expired_bookings`, so the 5-minute
+    TTL sweeper never touches them — this is their only reaper.
+    """
+    try:
+        from integrations.repo import agent_test_repo
+        deleted = agent_test_repo.purge_orphans(older_than_days=7)
+        if any(v > 0 for v in deleted.values()):
+            logger.info("[AGENT-TEST] Purged stale sandbox rows: %s", deleted)
+    except Exception as exc:  # noqa: BLE001 — a housekeeping job must not crash
+        logger.error("[AGENT-TEST] Orphan purge failed: %s", exc)
+
+
 _scheduler = BackgroundScheduler(timezone=config.BOOKING_TIMEZONE)
 _scheduler.add_job(
     _scheduled_sheet_refresh,
@@ -219,6 +238,12 @@ _scheduler.add_job(
     _reconcile_apipay,
     trigger="interval",
     minutes=2,
+)
+_scheduler.add_job(
+    _purge_agent_test_orphans,
+    trigger="cron",
+    hour=4,
+    minute=30,
 )
 _scheduler.start()
 
