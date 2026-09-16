@@ -7,23 +7,25 @@ import threading
 
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message
-from handlers.extractor import extract_booking_details
+from chat.system_prompts.sp_academy import TRIAL_INTENT_PROMPT
+from chat.tools.academy_tools import SELECT_TRIAL_INTENT_LLM
+from handlers.extractor import extract_booking_details, extract_trial_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
-from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
+from handlers.sessions.trial_session import handle_trial_turn
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
-from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import handle_edit_request as handle_edit_trial_request, handle_cancel_trial_request
 from integrations import booking_service, payment_validation, booking, trial
-from integrations.repo import booking_repo
+from integrations.repo import booking_repo, academy_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
+from handlers.llm_trial_flow import LlmTrialFlowHandler
 import config
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,6 @@ _LOCATION_MESSAGE = (
     "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
 )
 
-builder = BasePromptBuilder({}, "", (), ())
 
 
 def _format_payment_reject_message(
@@ -338,22 +339,79 @@ def handle_incoming_message(payload: dict) -> None:
             logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
 
         else:
+            # Academy bots (chatbot_2, dopsy_boxing) — mirrors the arena branch:
+            #   (a) Active deterministic session → the old step handler finishes it
+            #   (b) Otherwise → LLM1 (intent + extraction) → LLM2 (trial flow)
+            #   (c) Questions and anything else → fall through to RAG/LLM
+            bot_name = bot_config["name"]
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
-            trial_reply = handle_trial_turn(
-                chat_id, phone_number_id, sender_id, user_text, bot_config["name"]
-            )
-            if trial_reply is not None:
-                logger.info(
-                    "[TRIAL] Trial branch handled message — skipping RAG/LLM. "
-                    "Reply preview: %.120s", trial_reply
-                )
-                append_message(chat_id, "user", user_text)
-                append_message(chat_id, "assistant", trial_reply)
-                send_text_message(phone_number_id, sender_id, trial_reply)
-                return
-            logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
-            free = trial.get_trial_daytime(bot_config["name"], None)
+            # (a) A step-flow conversation started before this deploy must be
+            # allowed to finish; both flows write the same draft row, so the
+            # session has to win while it exists.
+            if _pg.get_active_session(bot_name, chat_id):
+                trial_reply = handle_trial_turn(
+                    chat_id, phone_number_id, sender_id, user_text, bot_name
+                )
+                if trial_reply is not None:
+                    logger.info(
+                        "[TRIAL] Session handler replied: %.120s", trial_reply,
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", trial_reply)
+                    send_text_message(phone_number_id, sender_id, trial_reply)
+                    return
+
+            intent, lang = route_incoming_message(
+                history, user_text, TRIAL_INTENT_PROMPT, SELECT_TRIAL_INTENT_LLM,
+            )
+            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s", intent, lang)
+
+            if intent in ('trial_new', 'trial_continue'):
+                extracted = extract_trial_details(history, user_text)
+                logger.info("[TRIAL] Data Extracted: %s", extracted)
+                handler = LlmTrialFlowHandler(bot_name)
+                reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", reply)
+                logger.info("[LLM2] reply: %s", reply)
+                send_text_message(phone_number_id, sender_id, reply)
+                return
+
+            elif intent == 'trial_edit':
+                logger.info("[EDIT] Intent trial_edit detected for %s", sender_id)
+                # An unfinished draft is "edited" by continuing the flow itself.
+                # A confirmed trial goes to handle_edit_trial_request, which needs
+                # a diff — so that case falls through to the edit_trial tool call.
+                if academy_repo.get_existing_trial_draft(bot_name, sender_id):
+                    extracted = extract_trial_details(history, user_text)
+                    handler = LlmTrialFlowHandler(bot_name)
+                    reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", reply)
+                    send_text_message(phone_number_id, sender_id, reply)
+                    return
+
+            elif intent == 'trial_status':
+                logger.info("[TRIAL] Fetching user's own trials")
+                trials = academy_repo.get_all_active_trials(sender_id, bot_name)
+                send_text_message(phone_number_id, sender_id,
+                                  trial.format_user_trials(trials, lang))
+                return
+
+            elif intent == 'trial_cancel':
+                logger.info("[TRIAL] Cancelling the user's trials")
+                send_text_message(
+                    phone_number_id, sender_id,
+                    handle_cancel_trial_request(chat_id, sender_id, bot_name),
+                )
+                return
+
+            # (c) Questions (price / schedule / location) and everything else
+            # are answered from the persona + RAG, as before.
+            logger.info("[TRIAL] Trial flow did not handle — falling through to RAG/LLM")
+
+            free = trial.get_trial_daytime(bot_name, None)
             availability_ctx = trial.format_availability_context(free)
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
@@ -371,12 +429,9 @@ def handle_incoming_message(payload: dict) -> None:
         # 5. LLM may have asked us to launch a deterministic sub-flow.
         if tool_call:
             handle_reply = reply
-            if tool_call["name"] == "start_trial":
-                lang = builder.detect_lang(user_text)
-                logger.info("[TRIAL] LLM called start_trial tool — starting trial flow (lang=%s)", lang)
-                handle_reply = start_trial_flow(chat_id, sender_id, bot_config["name"], lang)
-
-            elif tool_call["name"] == "edit_trial":
+            # start_trial is no longer dispatched: trial_new / trial_continue are
+            # routed to LlmTrialFlowHandler above, before the RAG/LLM call.
+            if tool_call["name"] == "edit_trial":
                 logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])
                 handle_reply = handle_edit_trial_request(chat_id, sender_id, tool_call["args"], bot_config["name"])
 

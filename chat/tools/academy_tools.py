@@ -79,3 +79,132 @@ CANCEL_TRIAL_TOOL = {
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# LLM trial flow (llm_trial_flow.py)
+#
+# The arena counterparts live in arena_tools.py. Two differences drive the
+# shape here: a trial has no time_end (it comes from the class the parent
+# picks, never from the parent), and the person being registered is not the
+# person writing — hence child_name / child_age rather than name / players.
+# ---------------------------------------------------------------------------
+
+EXTRACT_TRIAL_DATA_LLM = {
+    "type": "function",
+    "function": {
+        "name": "extract_trial_data",
+        "description": "Extract the 4 required variables for a trial-lesson signup.",
+        # strict mode requires `additionalProperties: false` AND every property
+        # key present in `required` (even nullable ones).
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "date": {
+                    "type": ["string", "null"],
+                    "description": "Format YYYY-MM-DD. "
+                                   "Return null unless the user explicitly states a date."
+                },
+                "time_start": {
+                    "type": ["string", "null"],
+                    # --- Русский ---
+                    "description": "Время начала занятия, формат HH:MM (24h). "
+                                   "Число с временным маркером («на 10», «в 10», «сағат 10», «10ға») "
+                                   "без слова про возраст — это время; нормализуй по правилам "
+                                   "system-промпта (утро/вечер по текущему времени). "
+                                   "НЕ придумывай время окончания — его задаёт само занятие. "
+                                   "null, если время не упомянуто.\n\n"
+                                   # --- Қазақша ---
+                                   "Сабақтың басталу уақыты, HH:MM пішімі (24с). "
+                                   "Уақыт маркері бар сан («на 10», «в 10», «сағат 10», «10ға») "
+                                   "жас туралы сөзсіз — бұл уақыт; system-промпт ережелері бойынша "
+                                   "қалыпқа келтір (ағымдағы уақытқа қарай таң/кеш). "
+                                   "Аяқталу уақытын ойлап таппа — оны сабақтың өзі белгілейді. "
+                                   "Уақыт аталмаса — null."
+                },
+                "child_name": {
+                    "type": ["string", "null"],
+                    # --- Русский ---
+                    "description": "Имя РЕБЁНКА, которого записывают. "
+                                   "Пишет обычно родитель — если он называет СВОЁ имя "
+                                   "(«меня зовут Айгуль», «это Айгуль»), это НЕ имя ребёнка, верни null. "
+                                   "Заполняй только при явном указании на ребёнка "
+                                   "(«сына зовут Алихан», «дочь Амина», «записать Алихана»).\n\n"
+                                   # --- Қазақша ---
+                                   "Жазылатын БАЛАНЫҢ аты. "
+                                   "Әдетте ата-ана жазады — ол ӨЗ атын айтса "
+                                   "(«менің атым Айгүл»), бұл баланың аты ЕМЕС, null қайтар. "
+                                   "Тек балаға қатысты анық айтылғанда толтыр "
+                                   "(«ұлымның аты Әлихан», «қызым Әмина»)."
+                },
+                "child_age": {
+                    "type": ["number", "null"],
+                    # --- Русский ---
+                    "description": "Возраст ребёнка в годах. Заполняй ТОЛЬКО при маркере возраста "
+                                   "(«10 лет», «ему 10», «10-летний», «10 жаста», «10 жасар»). "
+                                   "Голое число с временным маркером («на 10», «в 10») — это НЕ "
+                                   "возраст, верни null.\n\n"
+                                   # --- Қазақша ---
+                                   "Баланың жасы. ТЕК жас маркері болғанда толтыр "
+                                   "(«10 жаста», «10 жасар», «оған 10»). "
+                                   "Уақыт маркері бар жалаң сан («на 10», «сағат 10») — бұл жас ЕМЕС, "
+                                   "null қайтар."
+                }
+            },
+            "required": ["date", "time_start", "child_name", "child_age"]
+        }
+    }
+}
+
+
+SELECT_TRIAL_INTENT_LLM = {
+    "type": "function",
+    "function": {
+        "name": "route_message",
+        "description": "Return the single categorized intent of the latest user message.",
+        # strict mode requires `additionalProperties: False` and every property
+        # listed in `required` — otherwise the API rejects the request.
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "question_price",
+                        "question_schedule",
+                        "question_location",
+                        "trial_new",
+                        "trial_continue",
+                        "trial_edit",
+                        "trial_status",
+                        "trial_cancel",
+                        "other"
+                    ],
+                    "description": (
+                        "Намерение последнего сообщения:\n"
+                        "question_price — вопрос о стоимости занятий или абонемента;\n"
+                        "question_schedule — вопрос о расписании, днях, времени, группах, возрасте;\n"
+                        "question_location — где находится зал, как доехать;\n"
+                        "trial_new — хочет записать ребёнка на пробное занятие;\n"
+                        "trial_continue — запись уже начата и он присылает недостающие данные "
+                        "(дату, время, имя или возраст ребёнка) либо подтверждает/отклоняет;\n"
+                        "trial_edit — хочет изменить уже созданную запись;\n"
+                        "trial_status — спрашивает о своей существующей записи;\n"
+                        "trial_cancel — хочет отменить запись;\n"
+                        "other — всё остальное."
+                    )
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["ru", "kk"],
+                    "description": "Language of the user's latest message: ru=Russian, kk=Kazakh."
+                }
+            },
+            "required": ["type", "lang"]
+        }
+    }
+}

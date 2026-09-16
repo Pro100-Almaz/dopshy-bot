@@ -8,6 +8,11 @@ from integrations.repo.postgres import _conn
 groups --> users --> trials
 '''
 
+
+def group_type_of(bot_name: str) -> str:
+    """Map a bot to the curriculum it serves."""
+    return "boxing" if bot_name == 'dopsy_boxing' else "football"
+
 # ----------------------------GROUPS
 
 def create_or_update_group(
@@ -104,14 +109,21 @@ def setting_training_time(group_id: int, training_day: int, time_start: str, tim
 
 
 def get_groups_info(bot_name: str):
-    group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    """Every active training slot for this bot's curriculum.
+
+    group_name/max_cap/curr_cap ride along so the LLM trial flow can name a
+    class and reject a full one without a second round-trip per candidate.
+    """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"""
-                SELECT group_id, training_day, time_start, time_end FROM academy_group_schedules 
-                WHERE group_id IN (SELECT id FROM academy_groups WHERE group_type = %s AND is_active = TRUE) 
-                """, (group_type,)
+                """
+                SELECT s.group_id, s.training_day, s.time_start, s.time_end,
+                       g.group_name, g.max_cap, g.curr_cap
+                FROM academy_group_schedules s
+                         JOIN academy_groups g ON g.id = s.group_id
+                WHERE g.group_type = %s AND g.is_active = TRUE
+                """, (group_type_of(bot_name),)
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -297,3 +309,27 @@ def has_active_trial(bot_name: str, phone: str) -> bool:
             has_confirmed_trial = cur.fetchone()
             return has_confirmed_trial['exists']
 
+
+def get_existing_trial_draft(bot_name: str, phone: str) -> dict | None:
+    """Find the most recent draft trial for this phone on this bot's curriculum.
+
+    Mirrors booking_repo.get_existing_draft: the LLM flow keeps no session row,
+    so a draft is identified by phone + state='draft' alone. Both academy bots
+    share academy_trials, hence the group_type predicate — it reads off the trial
+    itself rather than its group, because group_id is NULL until the parent has
+    picked a date and time (see migration 029).
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, trial_day, start_time, end_time, group_id,
+                       child_name, child_age, phone, state, language, client_token
+                FROM academy_trials
+                WHERE phone = %s AND state = 'draft' AND group_type = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, (phone, group_type_of(bot_name))
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
