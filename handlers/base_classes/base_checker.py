@@ -57,12 +57,13 @@ class BaseChecker:
             if not next_ask:
                 return self.check_and_confirm(data)
 
-            return (
+            text = (
                     self.asker.localize(lang, "field_free",
                        fid=field_id, fmt=fmt,
                        date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                     + "\n\n" + next_ask
             )
+            return self._offer_earlier_start(data, text, date_str, field_id, ts, te)
 
         free = booking_logic.get_free_windows()
         day_windows = [w for w in free if str(w["date"]) == date_str]
@@ -73,6 +74,40 @@ class BaseChecker:
                    fid=field_id, fmt=fmt,
                    date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
                 + "\n\n" + self.asker.localize(lang, "alternatives") + "\n" + alt_text
+        )
+
+    def _offer_earlier_start(self, data: dict, text: str, date_str: str,
+                             field_id: int, ts: str, te: str) -> str:
+        """Append an earlier-start offer to `text`, or return `text` untouched.
+
+        A booking that starts well after the field frees up leaves idle time to
+        its left, so offer to move it to window_start + buffer once.
+
+        Offered only while `players` is still missing, which is the first pass
+        through check_full_slot — that caps the nudge at one per booking without
+        storing any state. Accepting is self-suppressing: after the shift the
+        gap is below BOOKING_PULL_MIN_L, so it can never fire again.
+
+        NOTE: returns a button-payload JSON string when an offer is made and a
+        plain string otherwise — the same mixed shape check_and_confirm returns.
+        """
+        if data.get("players") is not None:
+            return text
+
+        try:
+            suggestion = booking_logic.suggest_earlier_start(
+                booking_logic.get_free_windows(), date_str, field_id, ts, te,
+            )
+        except Exception:  # a suggestion must never break the flow it decorates
+            return text
+        if not suggestion:
+            return text
+
+        lang = data.get("lang", "ru")
+        new_ts, new_te = suggestion
+        return self.buttons.get_buttons(
+            text + "\n\n" + self.asker.localize(lang, "earlier_hint", start=new_ts),
+            [self.asker.localize(lang, "earlier_btn", start=new_ts, end=new_te)],
         )
 
     def check_date_only(self, data: dict) -> str:

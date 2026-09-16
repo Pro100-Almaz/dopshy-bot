@@ -364,7 +364,13 @@ def receive_ycloud_message():
             data.business.phone,
         )
         bot_type = _bot_type_for_ycloud_business_phone(data.business.phone)
-        if not postgres.is_ycloud_enabled(bot_type):
+        ycloud_enabled = postgres.is_ycloud_enabled(bot_type)
+        logger.info(
+            "[YCLOUD] bot_type=%s is %s",
+            bot_type,
+            "enabled" if ycloud_enabled else "disabled",
+        )
+        if not ycloud_enabled:
             return jsonify({"status": "ignored"}), 200
         # if data.customer.phone not in ['+77476740954', '+77072479672', '+77076599990']:
         # if data.customer.phone not in ['+77072479672']:

@@ -11,6 +11,9 @@ import requests
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message, route_trial_message
 from handlers.extractor import extract_booking_details
+from handlers.academy_extractor import extract_trial_details
+from chat.system_prompts.sp_academy import TRIAL_INTENT_PROMPT
+from chat.tools.academy_tools import SELECT_TRIAL_INTENT_LLM
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
@@ -169,7 +172,7 @@ _LOCATION_MESSAGE = (
     "📍 Сығанақ 6Ф, Mechta және Tumar СО қарсы.\n"
     "Кіру және кіреберіс Тәттімбет көшесі жағынан.\n"
     "Көлік тұрағы да сол жерде\n"
-    "2GIS сілтемесі: https://2gis.kz/astana/geo/700000010748\n"
+    "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
 )
 
 _ACADEMY_ADMIN_PHONE = "+7 700 555 6000"
@@ -356,8 +359,15 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             user_text[:80],
         )
 
-        context = retrieve_context(user_text, bot_name=bot_config["name"])
-        logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
+        try:
+            context = retrieve_context(user_text, bot_name=bot_config["name"])
+            logger.info("[RAG] Retrieved %d chars of context for: %.80s", len(context), user_text)
+        except Exception:
+            logger.exception(
+                "[RAG] Context retrieval failed for: %.80s — continuing without RAG context",
+                user_text,
+            )
+            context = ""
 
         history = get_history(chat_id)
         logger.info("[LLM] History length: %d messages", len(history))
@@ -528,20 +538,43 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("[BOOKING] Two-LLM flow did not handle — falling through to RAG/LLM")
 
         else:
+            # Academy bots (chatbot_2, dopsy_boxing) — mirrors the arena branch:
+            #   (a) Active deterministic session → the old step handler finishes it
+            #   (b) Otherwise → LLM1 (intent + extraction) → LLM2 (trial flow)
+            #   (c) Questions and anything else → fall through to RAG/LLM
+            bot_name = bot_config["name"]
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
-            trial_reply = handle_trial_turn(
-                chat_id, phone_number_id, sender_id, user_text, bot_config["name"]
-            )
-            if trial_reply is not None:
-                logger.info(
-                    "[TRIAL] Trial branch handled message — skipping RAG/LLM. "
-                    "Reply preview: %.120s", trial_reply
+
+            # (a) A step-flow conversation started before this deploy must be
+            # allowed to finish; both flows write the same draft row, so the
+            # session has to win while it exists.
+            if _pg.get_active_session(bot_name, chat_id):
+                trial_reply = handle_trial_turn(
+                    chat_id, phone_number_id, sender_id, user_text, bot_name
                 )
+                if trial_reply is not None:
+                    logger.info(
+                        "[TRIAL] Session handler replied: %.120s", trial_reply,
+                    )
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", trial_reply)
+                    send_text_message(phone_number_id, sender_id, trial_reply)
+                    return
+
+            intent, lang = route_incoming_message(
+                history, user_text, TRIAL_INTENT_PROMPT, SELECT_TRIAL_INTENT_LLM,
+            )
+            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s", intent, lang)
+
+            if intent in ('trial_new', 'trial_continue'):
+                extracted = extract_trial_details(history, user_text)
+                logger.info("[TRIAL] Data Extracted: %s", extracted)
+                handler = LlmTrialFlowHandler(bot_name)
+                reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", trial_reply)
                 send_text_message(channel, sender_id, trial_reply)
                 return
-            logger.info("[TRIAL] Trial branch returned None — falling through to RAG/LLM")
 
             if is_trial_greeting(user_text):
                 handle_reply = (

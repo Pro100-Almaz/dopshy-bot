@@ -1096,7 +1096,12 @@ def assign_academy_student_to_group(group_id: int):
     except (TypeError, ValueError):
         return jsonify({"ok": False, "code": "INVALID", "message": "student_id must be an integer."}), 400
 
-    student = academy_repo.assign_user_to_group(student_id, group_id)
+    try:
+        student = academy_repo.assign_user_to_group(student_id, group_id)
+    except ValueError as exc:
+        if str(exc) == "GROUP_NOT_FOUND":
+            return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Group not found."}), 404
+        raise
     if not student:
         return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Student or group not found."}), 404
     refresh_all_trials()
