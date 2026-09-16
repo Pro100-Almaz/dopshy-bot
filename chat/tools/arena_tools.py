@@ -99,7 +99,7 @@ EXTRACT_DATA_LLM = {
             "properties": {
                 "date": {
                     "type": ["string", "null"],
-                    "description": "Format YYYY-MM-DD"
+                    "description": "Format YYYY-MM-DD. "
                                    "Return null unless the user explicitly states a date."
                 },
                 "time_start": {
@@ -124,7 +124,21 @@ EXTRACT_DATA_LLM = {
                 },
                 "field": {
                     "type": ["string", "null"],
-                    "enum": ["5x5", "6x6", None]
+                    "enum": ["5x5", "6x6", None],
+                    # --- Русский ---
+                    "description": "Размер площадки. ВОЗВРАЩАЙ строго \"5x5\" или \"6x6\" латинской x "
+                                   "(другие значения схема отвергает). Во ВВОДЕ пользователя x может быть "
+                                   "латинской или кириллической — понимай оба: «5x5», «5х5», «5 на 5», «пятёрка» → \"5x5\"; "
+                                   "«6x6», «6х6», «6 на 6», «шестёрка» → \"6x6\". "
+                                   "НОМЕР поля («поле 2», «алаң 2») — это НЕ размер, в field не пиши, верни null. "
+                                   "Размер не назван — null.\n\n"
+                                   # --- Қазақша ---
+                                   "Алаң өлшемі. ҚАТАҢ латын x-пен \"5x5\" немесе \"6x6\" қайтар "
+                                   "(басқа мәндерді схема қабылдамайды). Пайдаланушының КІРІСінде x латын да, "
+                                   "кириллица да болуы мүмкін — екеуін де таны: «5x5», «5х5», «5ке 5», «бестік» → \"5x5\"; "
+                                   "«6x6», «6х6», «6ға 6», «алтылық» → \"6x6\". "
+                                   "Алаң НӨМІРІ («поле 2», «алаң 2») — өлшем ЕМЕС, field-ке жазба, null қайтар. "
+                                   "Өлшем аталмаса — null."
                 },
                 "players": {
                     "type": ["number", "null"],
@@ -139,7 +153,7 @@ EXTRACT_DATA_LLM = {
                 },
                 "name": {
                     "type": ["string", "null"],
-                    "description": "The name of the booker"
+                    "description": "The name of the booker. "
                                    "Return null unless the user explicitly states a name."
                 }
             },

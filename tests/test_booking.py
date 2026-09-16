@@ -26,6 +26,7 @@ from integrations.booking import (
     get_all_booked,
     get_free_windows,
     is_range_free,
+    suggest_earlier_start,
 )
 from utils import today_almaty
 
@@ -620,3 +621,166 @@ class TestFreeWindowsIsRangeFreeConsistency:
         booked = get_all_booked(today, today + timedelta(days=6))
 
         assert is_range_free(booked, target_date, "10:00", "11:00", field_id=field_id) is False
+
+
+# ---------------------------------------------------------------------------
+# suggest_earlier_start — offer to move a request left when time sits idle
+# ---------------------------------------------------------------------------
+
+class TestSuggestEarlierStart:
+    """Hand-built windows only — no DB needed.
+
+    L is the gap between the window start and the requested start. The offer
+    fires for BOOKING_PULL_MIN_L < L <= BOOKING_PULL_MAX_L and moves the range
+    to window_start + BOOKING_PULL_BUFFER, keeping its duration.
+    """
+
+    D = "2026-07-06"
+
+    def _win(self, start: str, end: str, field: int = 1, day: date | None = None) -> dict:
+        from datetime import time as dtime
+        h1, m1 = map(int, start.split(":"))
+        h2, m2 = map(int, end.split(":"))
+        return {
+            "date": day or date(2026, 7, 6),
+            "time_start": dtime(h1, m1),
+            "time_end": dtime(h2, m2),
+            "field": field,
+            "format": "5x5",
+        }
+
+    def test_moves_request_to_window_start_plus_buffer(self):
+        """Window opens 17:00, request 19:00-21:00 (L=120) -> 17:30-19:30."""
+        windows = [self._win("17:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("17:30", "19:30")
+
+    def test_already_at_window_start_returns_none(self):
+        """L=0 — nothing sits to the left of the request."""
+        windows = [self._win("19:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_gap_of_30_returns_none(self):
+        """L=30 — below MIN_L, and the shift would be a no-op anyway."""
+        windows = [self._win("18:30", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_min_boundary_is_exclusive(self):
+        """L=60 exactly — MIN_L is exclusive, so no offer. Guards the operator."""
+        windows = [self._win("18:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_max_boundary_is_inclusive(self):
+        """L=180 exactly — MAX_L is inclusive, so it still fires. Guards the operator."""
+        windows = [self._win("16:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("16:30", "18:30")
+
+    def test_beyond_max_boundary_returns_none(self):
+        """L=240 — too far to drag a client from what they asked for."""
+        windows = [self._win("15:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_day_crossing_request_returns_none(self):
+        """TRANSITIVE BOOKING: start > end makes every gap calculation meaningless."""
+        windows = [self._win("20:00", "23:59")]
+        assert suggest_earlier_start(windows, self.D, 1, "23:00", "01:00") is None
+
+    def test_request_not_inside_any_window_returns_none(self):
+        """Request runs past the window end — it is not actually free."""
+        windows = [self._win("17:00", "20:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_other_field_is_ignored(self):
+        windows = [self._win("17:00", "23:00", field=2)]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_other_date_is_ignored(self):
+        windows = [self._win("17:00", "23:00", day=date(2026, 7, 7))]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") is None
+
+    def test_empty_window_list_returns_none(self):
+        assert suggest_earlier_start([], self.D, 1, "19:00", "21:00") is None
+
+    def test_duration_is_preserved(self):
+        """A 90-minute request stays 90 minutes after the shift."""
+        windows = [self._win("17:00", "23:00")]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "20:30") == ("17:30", "19:00")
+
+    def test_accepts_date_object_and_string_field_id(self):
+        """Callers hold these as strings or objects interchangeably."""
+        windows = [self._win("17:00", "23:00")]
+        assert suggest_earlier_start(windows, date(2026, 7, 6), "1", "19:00", "21:00") == ("17:30", "19:30")
+
+    def test_accepts_hh_mm_ss_window_times(self):
+        """Rows straight from Postgres carry seconds — the parser must absorb them."""
+        windows = [{"date": self.D, "time_start": "17:00:00", "time_end": "23:00:00",
+                    "field": 1, "format": "5x5"}]
+        assert suggest_earlier_start(windows, self.D, 1, "19:00", "21:00") == ("17:30", "19:30")
+
+    def test_result_stays_inside_the_window(self):
+        """BUFFER < MIN_L guarantees a leftward shift, so the range cannot overflow."""
+        windows = [self._win("17:00", "23:00")]
+        new_ts, new_te = suggest_earlier_start(windows, self.D, 1, "19:00", "21:00")
+        assert "17:00" <= new_ts < "19:00"
+        assert new_te < "21:00"
+
+
+# ---------------------------------------------------------------------------
+# Earlier-start button — the contract between the offer and the reply parser
+# ---------------------------------------------------------------------------
+
+class TestEarlierStartButton:
+    """The offer renders a button title; the reply handler parses it back.
+
+    These must agree, so the round-trip is the test that matters — editing
+    either side alone breaks the feature silently, with no error anywhere.
+    """
+
+    WHATSAPP_TITLE_LIMIT = 20
+
+    @staticmethod
+    def _parse(message: str):
+        from handlers.llm_booking_flow import _EARLIER_BTN_RE
+        match = _EARLIER_BTN_RE.search(message)
+        if not match:
+            return None
+        groups = [g for g in match.groups() if g]
+        return groups[0], groups[1]
+
+    @pytest.mark.parametrize("lang", ["ru", "kk"])
+    @pytest.mark.parametrize("start,end", [("17:30", "19:30"), ("16:30", "18:30"), ("9:30", "11:30")])
+    def test_rendered_title_parses_back(self, lang, start, end):
+        from handlers.llm_booking_flow import T
+        title = T["earlier_btn"][lang].format(start=start, end=end)
+        assert self._parse(title) == (start, end)
+
+    @pytest.mark.parametrize("lang", ["ru", "kk"])
+    def test_title_fits_whatsapp_limit(self, lang):
+        from handlers.llm_booking_flow import T
+        title = T["earlier_btn"][lang].format(start="17:30", end="19:30")
+        assert len(title) <= self.WHATSAPP_TITLE_LIMIT
+
+    @pytest.mark.parametrize("dash", ["–", "—", "-"])
+    def test_accepts_dash_variants(self, dash):
+        """The title uses an en dash; a copy-edit must not silently kill matching."""
+        assert self._parse(f"Начать 17:30{dash}19:30") == ("17:30", "19:30")
+
+    def test_matching_is_case_insensitive(self):
+        assert self._parse("начать 17:30–19:30") == ("17:30", "19:30")
+
+    @pytest.mark.parametrize("message", [
+        "да",
+        "10 человек",
+        "5x5",
+        "Поле 1 (5x5)",
+        "17:30",
+    ])
+    def test_ordinary_replies_do_not_match(self, message):
+        """A bare time is left to the normal extractor — this parser needs both."""
+        assert self._parse(message) is None
+
+    def test_other_button_regexes_ignore_our_title(self):
+        """Handler ordering in handle() stays irrelevant only while this holds."""
+        from handlers.llm_booking_flow import _FIELD_BTN_RE, _FORMAT_BTN_RE
+        title = "Начать 17:30–19:30"
+        assert _FORMAT_BTN_RE.search(title) is None
+        assert _FIELD_BTN_RE.search(title) is None

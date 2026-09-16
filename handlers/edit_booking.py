@@ -13,9 +13,13 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 import config
+from handlers.llm_booking_flow import LlmBookingFlowHandler
+from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from integrations import booking_service
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo
+from integrations.repo.booking_repo import get_existing_draft
+from integrations.repo.postgres import update_draft
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
 
 logger = logging.getLogger(__name__)
@@ -95,7 +99,7 @@ def _format_success(result_data: dict) -> str:
         "date":          "Дата",
         "time_start":    "Время начала",
         "time_end":      "Время окончания",
-        "field":         "Поле",
+        "format":        "Размер поля",
         "players":       "Игроков",
         "customer_name": "Имя",
     }
@@ -103,7 +107,7 @@ def _format_success(result_data: dict) -> str:
         "date":          "Күні",
         "time_start":    "Басталу уақыты",
         "time_end":      "Аяқталу уақыты",
-        "field":         "Алаң",
+        "format":        "Алаң өлшемі",
         "players":       "Ойыншылар",
         "customer_name": "Аты",
     }
@@ -117,22 +121,26 @@ def _format_success(result_data: dict) -> str:
     # Current booking card (resulting state)
     ts = str(new["time_start"])[:5]
     te = str(new["time_end"])[:5]
+    total = calculate_full_booking_price(new["format"], str(new["date"]), ts, te)
+    price_line = fmt_price(total)
     summary_ru = (
         f"✅ Бронь обновлена!\n\n"
         f"📅 {new['date']}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Поле {new['field']} ({new['format']})\n"
+        f"⚽ {new['format']}\n"
         f"👥 Игроков: {new.get('players', '?')}\n"
-        f"👤 Имя: {new.get('customer_name', '')}\n\n"
+        f"👤 Имя: {new.get('customer_name', '')}\n"
+        f"💰 {price_line}\n\n"
         f"Что изменилось:\n" + "\n".join(diff_lines_ru)
     )
     summary_kk = (
         f"✅ Брон жаңартылды!\n\n"
         f"📅 {new['date']}\n"
         f"⏰ {ts}–{te}\n"
-        f"⚽ Алаң {new['field']} ({new['format']})\n"
+        f"⚽ {new['format']}\n"
         f"👥 Ойыншылар: {new.get('players', '?')}\n"
-        f"👤 Аты: {new.get('customer_name', '')}\n\n"
+        f"👤 Аты: {new.get('customer_name', '')}\n"
+        f"💰 {price_line}\n\n"
         f"Не өзгерді:\n" + "\n".join(diff_lines_kk)
     )
     return _bilingual(summary_ru, summary_kk)
@@ -221,6 +229,7 @@ def handle_edit_request(chat_id: str, sender_phone: str, diff: dict) -> str:
 
     bookings = booking_repo.get_user_editable_bookings(sender_phone)
     target = _pick_target(bookings)
+
     if target is None:
         logger.info("[EDIT] No editable booking for %s — rejecting", sender_phone)
         return _format_reject("NO_BOOKING")

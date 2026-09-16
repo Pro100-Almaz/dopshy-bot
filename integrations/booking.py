@@ -60,6 +60,7 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
     """Generate every possible booking slot for the given date range."""
     open_time = _parse_time(config.BOOKING_OPEN_TIME)
     close_time = _parse_time(config.BOOKING_CLOSE_TIME)
+    print("open_time", open_time)
     duration = timedelta(minutes=config.BOOKING_SLOT_DURATION)
 
     slots = []
@@ -79,6 +80,20 @@ def generate_all_slots(week_start: date, week_end: date) -> list[dict]:
             current_dt += duration
         current_date += timedelta(days=1)
     return slots
+
+
+def merge_time_intervals(intervals: list[tuple]) -> list[tuple]:
+    """Merge overlapping or adjacent time intervals. Each interval is (start, end)."""
+    if not intervals:
+        return []
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [list(sorted_intervals[0])]
+    for start, end in sorted_intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
 
 
 def floor_time_to_30_minutes(t: time) -> str:
@@ -211,22 +226,50 @@ def format_availability_context(free_windows: list[dict], lang: str = "ru") -> s
     by_date: dict[date, dict] = {}
     for w in free_windows:
         by_date.setdefault(w["date"], {}) \
-               .setdefault((w["field"], w["format"]), []) \
+               .setdefault(w["format"], []) \
                .append(w)
 
     lines = [_T["available_days"][lang]]
     for d in sorted(by_date):
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         field_lines = []
-        for (field, fmt) in sorted(by_date[d]):
-            windows = sorted(by_date[d][(field, fmt)], key=lambda w: w["time_start"])
+        for fmt in sorted(by_date[d]):
+            intervals = [(w["time_start"], w["time_end"]) for w in by_date[d][fmt]]
+            merged = merge_time_intervals(intervals)
             range_str = ", ".join(
-                f"{w['time_start'].strftime('%H:%M')}–{w['time_end'].strftime('%H:%M')}"
-                for w in windows
+                f"{s.strftime('%H:%M')}–{e.strftime('%H:%M')}" for s, e in merged
             )
-            field_lines.append(f"    {_T["field"][lang]} {field} ({fmt}): {range_str}")
+            field_lines.append(f"    {fmt}: {range_str}")
         lines.append(f"  {day_label}:\n" + "\n".join(field_lines))
     return "\n".join(lines)
+
+
+def _merge_transitive(bookings: list[dict]) -> list[dict]:
+    """Merge transitive (midnight-crossing) booking pairs into single entries."""
+    seen = set()
+    merged = []
+    by_gt = {}
+    for b in bookings:
+        gt = b.get("group_transition")
+        if gt:
+            by_gt.setdefault(gt, []).append(b)
+
+    for b in bookings:
+        gt = b.get("group_transition")
+        if gt:
+            if gt in seen:
+                continue
+            seen.add(gt)
+            pair = by_gt[gt]
+            if len(pair) == 2:
+                first, second = sorted(pair, key=lambda x: (x["date"], x["time_start"]))
+                m = dict(first)
+                m["time_end"] = second["time_end"]
+                m["price_total"] = float(first.get("price_total") or 0) + float(second.get("price_total") or 0)
+                merged.append(m)
+                continue
+        merged.append(b)
+    return merged
 
 
 def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
@@ -235,19 +278,85 @@ def format_user_booking_context(bookings: list[dict], lang: str = "ru") -> str:
 
     WEEKDAYS = _WEEKDAY_RU if lang == 'ru' else _WEEKDAY_KZ
 
+    display = _merge_transitive(bookings)
     lines = [_T["my_bookings"][lang]]
-    for b in bookings:
+    for b in display:
         d = b["date"] if isinstance(b["date"], date) else \
             datetime.strptime(str(b["date"]), "%Y-%m-%d").date()
         ts = str(b["time_start"])[:5]
         te = str(b["time_end"])[:5]
         day_label = f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
         status_str = _T.get(b.get("state", ""))[lang] if _T.get(b.get("state", "")) else b.get("state", "")
+        price = f" | {int(b['price_total']):,} тг".replace(",", " ") if b.get("price_total") else ""
         lines.append(
-            f"  {day_label} {ts}–{te} | {_T['field'][lang]} {b['field']} ({b['format']}) | "
-            f"{b.get('players', '?')} {_T['players'][lang]}. | {status_str}"
+            f"  {day_label} {ts}–{te} | {b['format']} | "
+            f"{b.get('players', '?')} {_T['players'][lang]}.{price} | {status_str}"
         )
     return "\n".join(lines)
+
+
+def _to_time(value) -> time:
+    """Accept a time object or an 'HH:MM[:SS]' string, return a time.
+
+    Wider than _parse_time on purpose: free windows carry time objects, the LLM
+    extractor hands over 'HH:MM' strings, and Postgres rows come back as
+    'HH:MM:SS'. The [:5] slice is what absorbs the seconds.
+    """
+    if isinstance(value, time):
+        return value
+    return datetime.strptime(str(value)[:5], "%H:%M").time()
+
+
+def _minutes(t: time) -> int:
+    """Minutes since midnight — time objects don't support subtraction."""
+    return t.hour * 60 + t.minute
+
+
+def suggest_earlier_start(free_windows: list[dict], date_str: str, field_id: int,
+                          time_start: str, time_end: str) -> tuple[str, str] | None:
+    """Offer to move a request earlier when free time sits idle to its left.
+
+    L is the gap between the start of the containing free window and the
+    requested start. When L is worth acting on, the request is moved to
+    window_start + BOOKING_PULL_BUFFER, keeping its duration:
+
+        window 17:00-23:00, request 19:00-21:00 (L=120) -> ("17:30", "19:30")
+
+    Returns None when there is nothing to offer: the range crosses midnight, it
+    does not sit inside a single free window for this date/field, or L falls
+    outside (BOOKING_PULL_MIN_L, BOOKING_PULL_MAX_L].
+
+    Pure: no DB, no logging, no localization — callers pass free_windows in.
+    """
+    if time_start > time_end:  # TRANSITIVE BOOKING: day-crossing, leave alone
+        return None
+
+    req_start = _to_time(time_start)
+    req_end = _to_time(time_end)
+
+    for w in free_windows:
+        # Windows carry a date object and an int field; callers may hold either
+        # as a string, so normalise both sides before comparing.
+        if str(w["date"]) != str(date_str) or int(w["field"]) != int(field_id):
+            continue
+        w_start, w_end = _to_time(w["time_start"]), _to_time(w["time_end"])
+        if not (w_start <= req_start and req_end <= w_end):
+            continue  # not this window — a request inside none of them isn't free
+
+        pull = _minutes(req_start) - _minutes(w_start)
+        if not (config.BOOKING_PULL_MIN_L < pull <= config.BOOKING_PULL_MAX_L):
+            return None
+
+        # Safe without bounds checks: BUFFER < MIN_L < pull, so the range only
+        # ever moves left, keeping new_end below req_end and inside the window.
+        new_start_total = _minutes(w_start) + config.BOOKING_PULL_BUFFER
+        duration = _minutes(req_end) - _minutes(req_start)
+        new_end_total = new_start_total + duration
+        new_start = time(new_start_total // 60, new_start_total % 60)
+        new_end = time(new_end_total // 60, new_end_total % 60)
+        return new_start.strftime("%H:%M"), new_end.strftime("%H:%M")
+
+    return None
 
 
 def find_free_field(booked: list[dict], date_str: str, time_start: str, time_end: str, format_: str) -> int | None:

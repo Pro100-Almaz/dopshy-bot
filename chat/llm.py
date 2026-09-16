@@ -37,11 +37,9 @@ def get_ai_response(
 
     # Inject factual field list for Bot 1 so the LLM never hallucinates field formats
     if is_dopsy and config.BOOKING_FIELDS:
-        fields_lines = "\n".join(
-            f"  - Поле {f['id']}: формат {f['format']}"
-            for f in config.BOOKING_FIELDS
-        )
-        system_content += f"\n\n--- Наши поля ---\n{fields_lines}\n---"
+        formats = sorted({f["format"] for f in config.BOOKING_FIELDS})
+        fields_lines = "\n".join(f"  - {fmt}" for fmt in formats)
+        system_content += f"\n\n--- Доступные размеры полей ---\n{fields_lines}\n---"
 
     if context:
         system_content += f"\n\n--- База знаний / Білім базасы ---\n{context}\n---"
@@ -54,12 +52,9 @@ def get_ai_response(
         model=config.MODEL_NAME,
         messages=messages,
         temperature=0.2 if is_dopsy else 0.6,
-        max_tokens=512,
+        max_completion_tokens=512,
     )
-    if is_dopsy:
-        kwargs["tools"] = [START_BOOKING_TOOL, EDIT_BOOKING_TOOL]
-        kwargs["tool_choice"] = "auto"
-    else:
+    if not is_dopsy:
         kwargs["tools"] = [START_TRIAL_TOOL, EDIT_TRIAL_TOOL, CANCEL_TRIAL_TOOL]
         kwargs["tool_choice"] = "auto"
 
@@ -70,9 +65,9 @@ def get_ai_response(
     if msg.tool_calls:
         for tc in msg.tool_calls:
             name = tc.function.name
-            if name in ("start_booking", "edit_booking", "start_trial", "edit_trial", "cancel_trial"):
+            if name in ("start_trial", "edit_trial", "cancel_trial"):
                 args: dict = {}
-                if name in ("edit_booking", "edit_trial"):
+                if name in ("edit_trial"):
                     try:
                         args = json.loads(tc.function.arguments or "{}")
                     except json.JSONDecodeError:
@@ -116,7 +111,7 @@ def get_booking_reply(
             {"role": "user", "content": user_text},
         ],
         temperature=0.5,
-        max_tokens=400,
+        max_completion_tokens=400,
     )
     return response.choices[0].message.content.strip()
 

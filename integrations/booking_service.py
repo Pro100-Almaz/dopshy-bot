@@ -28,6 +28,7 @@ import psycopg2.errors
 import psycopg2.extras
 
 import config
+from handlers.payment.pricing import calculate_booking_price
 from integrations.repo.utils import _conn, _err, _ok
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def request_payment(booking_id: int, client_token: str) -> dict:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT id, state, date, time_start, time_end, field "
+                    "SELECT id, state, date, time_start, time_end, field, format "
                     "FROM bookings WHERE id = %s AND client_token = %s FOR UPDATE",
                     (booking_id, client_token),
                 )
@@ -111,8 +112,20 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                         (str(next_day), str(original_time_end)[:5], group_transition, booking_id),
                     )
 
+                # Compute time-of-day prices in Python
+                fmt = row["format"]
+                if is_transitive:
+                    price_first = calculate_booking_price(
+                        fmt, row["date"], row["time_start"], "23:59:59")
+                    price_second = calculate_booking_price(
+                        fmt, row["date"] + timedelta(days=1), "00:00",
+                        str(original_time_end)[:5])
+                else:
+                    price_first = calculate_booking_price(
+                        fmt, row["date"], row["time_start"], row["time_end"])
+                    price_second = price_first  # unused, only 1 row matched
+
                 # Transition to awaiting_payment — handles both normal and transitive
-                # TRANSITIVE BOOKING: CASE skips reserved_until for the latter booking
                 cur.execute(
                     "UPDATE bookings SET "
                     "  state = 'awaiting_payment', "
@@ -122,12 +135,12 @@ def request_payment(booking_id: int, client_token: str) -> dict:
                     "  END, "
                     "  start_at = (date + time_start) AT TIME ZONE %s, "
                     "  end_at   = (date + time_end)   AT TIME ZONE %s, "
-                    "  price_total = (SELECT price_per_hour FROM fields WHERE id = bookings.field) "
-                    "                * (ROUND(EXTRACT(EPOCH FROM ((date + time_end) - (date + time_start))) / 3600.0, 1)), "
+                    "  price_total = CASE WHEN id = %s THEN %s ELSE %s END, "
                     "  updated_at = NOW() "
                     "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
                     (booking_id, config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
-                     config.BOOKING_TIMEZONE, booking_id, booking_id),
+                     config.BOOKING_TIMEZONE, booking_id, price_first, price_second,
+                     booking_id, booking_id),
                 )
                 _record_event(cur, booking_id, "payment_requested", "whatsapp")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
@@ -401,6 +414,8 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                 if new_is_transitive:
                     new_group_transition = str(uuid.uuid4())
                     next_day = str(datetime.strptime(new_date, "%Y-%m-%d").date() + timedelta(days=1))
+                    price_first = calculate_booking_price(new_format, new_date, new_ts, "23:59:59")
+                    price_second = calculate_booking_price(new_format, next_day, "00:00", new_te)
 
                     # First booking: date, time_start → 23:59:59 (with reserved_until)
                     cur.execute(
@@ -414,9 +429,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "   %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (%s::date + '23:59:59'::time) AT TIME ZONE %s, "
-                        "   (SELECT price_per_hour FROM fields WHERE id = %s) "
-                        "   * (EXTRACT(EPOCH FROM ('23:59:59'::time - %s::time + INTERVAL '1 second')) / 3600.0), "
-                        "   %s) "
+                        "   %s, %s) "
                         "RETURNING id",
                         (row["phone"], new_name, new_date, new_ts,
                          new_field, new_format,
@@ -424,8 +437,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                          row["reserved_until"],
                          new_date, new_ts, config.BOOKING_TIMEZONE,
                          new_date, config.BOOKING_TIMEZONE,
-                         new_field, new_ts,
-                         new_group_transition),
+                         price_first, new_group_transition),
                     )
                     new_id = cur.fetchone()["id"]
 
@@ -440,20 +452,18 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "   %s, %s, %s, %s, gen_random_uuid(), "
                         "   (%s::date + '00:00'::time) AT TIME ZONE %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
-                        "   (SELECT price_per_hour FROM fields WHERE id = %s) "
-                        "   * (EXTRACT(EPOCH FROM (%s::time - '00:00'::time)) / 3600.0), "
-                        "   %s) "
+                        "   %s, %s) "
                         "RETURNING id",
                         (row["phone"], new_name, next_day, new_te,
                          new_field, new_format,
                          new_players, row["notes"], row["state"], row["source"],
                          next_day, config.BOOKING_TIMEZONE,
                          next_day, new_te, config.BOOKING_TIMEZONE,
-                         new_field, new_te,
-                         new_group_transition),
+                         price_second, new_group_transition),
                     )
                 else:
-                    # Non-transitive: single new booking (original logic)
+                    # Non-transitive: single new booking
+                    price_new = calculate_booking_price(new_format, new_date, new_ts, new_te)
                     cur.execute(
                         "INSERT INTO bookings "
                         "  (phone, customer_name, date, time_start, time_end, field, format, "
@@ -463,10 +473,9 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                         "  (%s, %s, %s::date, %s::time, %s::time, %s, %s, "
                         "   %s, %s, %s, %s, gen_random_uuid(), %s, "
                         "   %s, "
-                     "   (%s::date + %s::time) AT TIME ZONE %s, "
                         "   (%s::date + %s::time) AT TIME ZONE %s, "
-                        "   (SELECT price_per_hour FROM fields WHERE id = %s) "
-                        "   * (EXTRACT(EPOCH FROM (%s::time - %s::time)) / 3600.0)) "
+                        "   (%s::date + %s::time) AT TIME ZONE %s, "
+                        "   %s) "
                         "RETURNING id",
                         (row["phone"], new_name, new_date, new_ts, new_te,
                          new_field, new_format,
@@ -474,7 +483,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
                          row["reserved_until"],
                          new_date, new_ts, config.BOOKING_TIMEZONE,
                          new_date, new_te, config.BOOKING_TIMEZONE,
-                         new_field, new_te, new_ts),
+                         price_new),
                     )
                     new_id = cur.fetchone()["id"]
 
@@ -579,12 +588,14 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 for d, st, et, group_transition, is_latter in dates:
                     d_str = datetime.strftime(d, format="%Y-%m-%d")
-                    # TRANSITIVE BOOKING: skip reserved_until for the latter booking
+                    row_price = price_total
+                    if row_price is None:
+                        row_price = calculate_booking_price(format_, d_str, st, et)
                     skip_reserved = is_repetitive or is_latter
                     cur.execute(
                         exec_string,
                         (phone, customer, d_str, st, et, int(field), format_,
-                         notes, price_total, updated_by, client_token,
+                         notes, row_price, updated_by, client_token,
                          d_str, st, config.BOOKING_TIMEZONE,
                          d_str, et, config.BOOKING_TIMEZONE,
                          group_repetition, group_transition,

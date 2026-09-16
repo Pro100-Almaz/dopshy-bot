@@ -1,5 +1,6 @@
 import json as _json
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 from chat.system_prompts import sp_1, sp_3, sp_2
 
@@ -7,10 +8,10 @@ load_dotenv()
 
 # OpenAI
 OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
-MODEL_NAME: str = "gpt-4.1"
-EXTRACTOR_MODEL: str = "gpt-4.1-mini"
+MODEL_NAME: str = "gpt-5.2"
+EXTRACTOR_MODEL: str = "gpt-4.1"
 INTENT_MODEL: str = "gpt-4.1"
-EMBEDDING_MODEL: str = "text-embedding-3-small"
+EMBEDDING_MODEL: str = "text-embedding-3-large"
 
 # WhatsApp Cloud API
 WHATSAPP_TOKEN: str = os.environ["WHATSAPP_TOKEN"]
@@ -69,6 +70,13 @@ GOOGLE_WORKSHEET_NAME: str = os.getenv("GOOGLE_WORKSHEET_NAME", "Bookings")
 BOOKING_OPEN_TIME: str = os.getenv("BOOKING_OPEN_TIME", "00:00")
 BOOKING_CLOSE_TIME: str = os.getenv("BOOKING_CLOSE_TIME", "23:59")
 BOOKING_SLOT_DURATION: int = int(os.getenv("BOOKING_SLOT_DURATION", "60"))  # minutes
+# Earlier-start suggestion (see booking.suggest_earlier_start). When a request
+# leaves L minutes free to its left, offer to move it to window_start + BUFFER.
+# BUFFER must stay below MIN_L: the shift is only ever leftward because of it,
+# which is what makes the suggestion safe to build without bounds checks.
+BOOKING_PULL_MIN_L: int = int(os.getenv("BOOKING_PULL_MIN_L", "60"))      # exclusive
+BOOKING_PULL_MAX_L: int = int(os.getenv("BOOKING_PULL_MAX_L", "180"))     # inclusive
+BOOKING_PULL_BUFFER: int = int(os.getenv("BOOKING_PULL_BUFFER", "30"))    # minutes
 BOOKING_FIELDS: list = _json.loads(
     os.getenv("BOOKING_FIELDS", '[{"id":1,"format":"6x6"},'
                                 '{"id":2,"format":"5x5"},'
@@ -104,4 +112,20 @@ CHUNK_OVERLAP: int = 50
 MAX_HISTORY_MESSAGES: int = 20  # total messages kept per chat (user+assistant)
 CONVERSATION_DB_PATH: str = os.getenv("CONVERSATION_DB_PATH", "./data/conversations.db")
 
-MAX_PLAYERS: int = 200
+MAX_PLAYERS: int = 100
+
+# ---------------------------------------------------------------------------
+# Holidays (dates that use weekend_holiday pricing)
+# ---------------------------------------------------------------------------
+_raw_holidays = os.getenv("HOLIDAYS", "")
+HOLIDAYS: set = {
+    datetime.date(datetime.strptime(d.strip(), "%Y-%m-%d"))
+    for d in _raw_holidays.split(",") if d.strip()
+}
+
+# ---------------------------------------------------------------------------
+# Time ranges for earlier_booking_time_suggestion
+# ---------------------------------------------------------------------------
+BOOKING_PULL_MIN_L=60
+BOOKING_PULL_MAX_L=180
+BOOKING_PULL_BUFFER=30
