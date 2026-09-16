@@ -137,7 +137,7 @@ def test_delete_group_soft_deletes(monkeypatch, client):
 def test_assign_student_to_group_returns_group_fields(monkeypatch, client):
     monkeypatch.setattr("blueprints.academy_api.refresh_all_trials", lambda: None)
     monkeypatch.setattr(
-        "blueprints.academy_api.academy_repo.assign_user_to_group",
+        "blueprints.academy_api.academy_repo.assign_user_to_group_for_sport",
         lambda student_id, group_id, group_type: {
             "id": student_id,
             "child_name": "Ali",

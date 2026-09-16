@@ -578,19 +578,18 @@ def get_users_by_assigned_group(group_id: int) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT u.id,
-                       u.child_name,
-                       u.child_birth_year,
-                       u.parent_phone,
-                       u.total_trials,
-                       u.assigned_group_id,
-                       u.subscribed,
-                       g.group_name AS assigned_group_name,
-                       g.group_type AS assigned_group_type
-                FROM academy_users u
-                LEFT JOIN academy_groups g ON g.id = u.assigned_group_id
-                WHERE u.assigned_group_id = %s
-                ORDER BY u.child_name, u.id
+                SELECT id,
+                       child_name,
+                       child_birth_year,
+                       parent_phone,
+                       total_trials,
+                       assigned_group_id,
+                       subscribed,
+                       experience,
+                       school_shift
+                FROM academy_users
+                WHERE assigned_group_id = %s
+                ORDER BY child_name, id
                 """,
                 (group_id,)
             )
@@ -602,23 +601,289 @@ def get_user_by_id(user_id: int) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT u.id,
-                       u.child_name,
-                       u.child_birth_year,
-                       u.parent_phone,
-                       u.total_trials,
-                       u.assigned_group_id,
-                       u.subscribed,
-                       g.group_name AS assigned_group_name,
-                       g.group_type AS assigned_group_type
-                FROM academy_users u
-                LEFT JOIN academy_groups g ON g.id = u.assigned_group_id
-                WHERE u.id = %s
+                SELECT id,
+                       child_name,
+                       child_birth_year,
+                       parent_phone,
+                       total_trials,
+                       assigned_group_id,
+                       subscribed,
+                       experience,
+                       school_shift
+                FROM academy_users
+                WHERE id = %s
                 """,
                 (user_id,)
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def create_user(
+    *,
+    child_name: str,
+    assigned_group_id: int | None = None,
+    child_birth_year: int | None = None,
+    parent_phone: str | None = None,
+    total_trials: int = 0,
+    subscribed: bool = False,
+    experience: str | None = None,
+    school_shift: str | None = None,
+) -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO academy_users (
+                    child_name,
+                    child_birth_year,
+                    parent_phone,
+                    total_trials,
+                    assigned_group_id,
+                    subscribed,
+                    experience,
+                    school_shift
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    child_name,
+                    child_birth_year,
+                    parent_phone,
+                    total_trials,
+                    assigned_group_id,
+                    subscribed,
+                    experience,
+                    school_shift,
+                ),
+            )
+            user_id = cur.fetchone()["id"]
+
+    return get_user_by_id(user_id)
+
+
+def update_user(user_id: int, **patch) -> dict | None:
+    allowed = {
+        "child_name",
+        "child_birth_year",
+        "parent_phone",
+        "total_trials",
+        "assigned_group_id",
+        "subscribed",
+        "experience",
+        "school_shift",
+    }
+    fields = []
+    values = []
+    for key, value in patch.items():
+        if key not in allowed:
+            continue
+        fields.append(f"{key} = %s")
+        values.append(value)
+
+    if not fields:
+        return get_user_by_id(user_id)
+
+    values.append(user_id)
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                UPDATE academy_users
+                SET {", ".join(fields)},
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id,
+                          child_name,
+                          child_birth_year,
+                          parent_phone,
+                          total_trials,
+                          assigned_group_id,
+                          subscribed,
+                          experience,
+                          school_shift
+                """,
+                values,
+            )
+            user = cur.fetchone()
+            if not user:
+                return None
+
+            if "subscribed" in patch:
+                cur.execute(
+                    """
+                    UPDATE academy_trials
+                    SET subscribed = %s,
+                        updated_at = NOW()
+                    WHERE group_id = %s
+                      AND (
+                          phone = %s
+                          OR lower(child_name) = lower(%s)
+                      )
+                    """,
+                    (
+                        user["subscribed"],
+                        user["assigned_group_id"],
+                        user["parent_phone"],
+                        user["child_name"],
+                    ),
+                )
+            return dict(user)
+
+
+def _identity_clause(alias: str = "u") -> str:
+    return f"""
+        (
+            ({alias}.parent_phone IS NOT NULL AND {alias}.parent_phone <> '' AND {alias}.parent_phone = %s)
+            OR lower({alias}.child_name) = lower(%s)
+        )
+    """
+
+
+def _current_group_type(cur, group_id: int | None) -> str | None:
+    if group_id is None:
+        return None
+    cur.execute("SELECT group_type FROM academy_groups WHERE id = %s", (group_id,))
+    row = cur.fetchone()
+    return row["group_type"] if row else None
+
+
+def assign_user_to_group(user_id: int, group_id: int) -> dict | None:
+    """Assign a child identity to a group, allowing one assignment per sport.
+
+    If the selected row is already assigned to another sport, a sibling
+    academy_users row is created for the new sport so the same child can belong
+    to both football and boxing without losing the existing assignment.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM academy_users WHERE id = %s FOR UPDATE", (user_id,))
+            user = cur.fetchone()
+            if not user:
+                return None
+
+            cur.execute("SELECT id, group_type FROM academy_groups WHERE id = %s", (group_id,))
+            group = cur.fetchone()
+            if not group:
+                raise ValueError("GROUP_NOT_FOUND")
+            target_type = group["group_type"]
+            current_type = _current_group_type(cur, user["assigned_group_id"])
+
+            cur.execute(
+                f"""
+                SELECT u.id
+                FROM academy_users u
+                JOIN academy_groups g ON g.id = u.assigned_group_id
+                WHERE u.id <> %s
+                  AND g.group_type = %s
+                  AND {_identity_clause("u")}
+                ORDER BY u.id
+                LIMIT 1
+                """,
+                (user_id, target_type, user["parent_phone"], user["child_name"]),
+            )
+            sibling = cur.fetchone()
+            if sibling:
+                cur.execute(
+                    """
+                    UPDATE academy_users
+                    SET assigned_group_id = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (group_id, sibling["id"]),
+                )
+                target_user_id = cur.fetchone()["id"]
+            elif current_type is None or current_type == target_type:
+                cur.execute(
+                    """
+                    UPDATE academy_users
+                    SET assigned_group_id = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (group_id, user_id),
+                )
+                target_user_id = cur.fetchone()["id"]
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO academy_users (
+                        child_name,
+                        child_birth_year,
+                        parent_phone,
+                        total_trials,
+                        assigned_group_id,
+                        subscribed,
+                        experience,
+                        school_shift
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        user["child_name"],
+                        user["child_birth_year"],
+                        user["parent_phone"],
+                        user["total_trials"],
+                        group_id,
+                        user["subscribed"],
+                        user["experience"],
+                        user["school_shift"],
+                    ),
+                )
+                target_user_id = cur.fetchone()["id"]
+
+    return get_user_by_id(target_user_id)
+
+
+def deassign_user_from_group(user_id: int, group_type: str | None = None) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM academy_users WHERE id = %s FOR UPDATE", (user_id,))
+            user = cur.fetchone()
+            if not user:
+                return None
+
+            target_user_id = user_id
+            if group_type is not None:
+                current_type = _current_group_type(cur, user["assigned_group_id"])
+                if current_type != group_type:
+                    cur.execute(
+                        f"""
+                        SELECT u.id
+                        FROM academy_users u
+                        JOIN academy_groups g ON g.id = u.assigned_group_id
+                        WHERE g.group_type = %s
+                          AND {_identity_clause("u")}
+                        ORDER BY u.id
+                        LIMIT 1
+                        """,
+                        (group_type, user["parent_phone"], user["child_name"]),
+                    )
+                    sibling = cur.fetchone()
+                    if not sibling:
+                        return dict(user)
+                    target_user_id = sibling["id"]
+
+            cur.execute(
+                """
+                UPDATE academy_users
+                SET assigned_group_id = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (target_user_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+    return get_user_by_id(target_user_id)
 
 
 def user_belongs_to_type(user_id: int, group_type: str) -> bool:
@@ -664,9 +929,9 @@ _TRIAL_WITH_USER_SELECT = """
            u.parent_phone AS user_parent_phone,
            u.total_trials AS user_total_trials,
            u.assigned_group_id AS user_assigned_group_id,
-           u.assigned_group_name AS user_assigned_group_name,
-           u.assigned_group_type AS user_assigned_group_type,
-           u.subscribed AS user_subscribed
+           u.subscribed AS user_subscribed,
+           u.experience AS user_experience,
+           u.school_shift AS user_school_shift
     FROM academy_trials t
     LEFT JOIN LATERAL (
         SELECT au.*,
@@ -771,8 +1036,8 @@ def get_users_by_type(group_type: str | None = None) -> list[dict]:
                        u.total_trials,
                        u.assigned_group_id,
                        u.subscribed,
-                       g.group_name AS assigned_group_name,
-                       g.group_type AS assigned_group_type
+                       u.experience,
+                       u.school_shift
                 FROM academy_users u
                 LEFT JOIN academy_groups g ON g.id = u.assigned_group_id
                 {where_sql}
@@ -783,7 +1048,13 @@ def get_users_by_type(group_type: str | None = None) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
-def assign_user_to_group(user_id: int, group_id: int, group_type: str | None = None) -> dict | None:
+def assign_user_to_group_for_sport(user_id: int, group_id: int, group_type: str | None = None) -> dict | None:
+    """Assign a user to a group, optionally validating the group's sport.
+
+    Unlike assign_user_to_group(), this does a plain overwrite of
+    assigned_group_id with no sibling-per-sport awareness — only use this
+    where the caller already scopes the operation to a single sport itself.
+    """
     group_filter = "AND group_type = %s" if group_type is not None else ""
     group_params = [group_id]
     if group_type is not None:
