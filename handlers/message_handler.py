@@ -4,6 +4,7 @@ Core message processing pipeline:
 """
 import logging
 import re
+import threading
 from typing import Union
 
 import requests
@@ -11,11 +12,9 @@ import requests
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message, route_trial_message
 from handlers.extractor import extract_booking_details
-from handlers.academy_extractor import extract_trial_details
-from chat.system_prompts.sp_academy import TRIAL_INTENT_PROMPT
-from chat.tools.academy_tools import SELECT_TRIAL_INTENT_LLM
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
+from handlers.sessions.base_session import BasePromptBuilder
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from handlers.llm_trial_flow import LlmTrialFlowHandler
 from handlers.llm_trial_flow import is_greeting as is_trial_greeting
@@ -32,7 +31,6 @@ from integrations.sheets.trial_sheets import refresh_all_trials
 from rag.retriever import retrieve_context
 from handlers.whatsapp_client import send_text_message as _send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
-from handlers.sessions.base_session import BasePromptBuilder
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import (
     handle_edit_request as handle_edit_trial_request,
@@ -46,7 +44,6 @@ from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
 from handlers.base_classes.base_checker import BaseChecker
 import config
-from integrations import test_context
 
 logger = logging.getLogger(__name__)
 
@@ -383,13 +380,6 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("[BOOKING] Checking booking branch for chat_id=%s", chat_id)
 
             _session = _pg.get_active_session("dopsy_bot", chat_id)
-            test_context.record(
-                "branch",
-                bot=bot_config["name"],
-                pipeline="arena",
-                session_state=(_session or {}).get("state"),
-                session_params=(_session or {}).get("params"),
-            )
 
             if _session:
                 # (a) Active booking session → deterministic step handler
@@ -431,7 +421,6 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             intent, lang = route_incoming_message(history, user_text)
             logger.info("[BOOKING] Intent detection replied, Intent is %s, lang=%s", intent, lang)
-            test_context.record("route", router="route_incoming_message", intent=intent, lang=lang)
 
             free = booking.get_free_windows()
             availability_ctx = booking.format_availability_context(free, lang)
@@ -616,8 +605,6 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             trial_intent, trial_lang = route_trial_message(history, user_text)
             logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
                         trial_intent, trial_lang)
-            test_context.record("route", router="route_trial_message",
-                                intent=trial_intent, lang=trial_lang)
 
             # The router is tuned to over-trigger signup intent. The booking flow
             # cannot answer a price/schedule/location question, so veto the router
@@ -736,7 +723,6 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("Replied to %s via bot %s", sender_id, bot_config["name"])
 
     except Exception as exc:
-        test_context.record("error", error=f"{type(exc).__name__}: {exc}")
         logger.exception("Error handling message: %s", exc)
         # Best-effort fallback reply
         try:
@@ -779,7 +765,7 @@ def _refresh_booking_sheet(booking: dict, state: str) -> None:
         except Exception as exc:
             logger.error("[PAYMENT] Sheet update failed for booking id=%s: %s", booking["id"], exc)
 
-    test_context.spawn_thread(_run)
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _handle_payment_receipt(channel: OutboundChannel, sender_phone: str,

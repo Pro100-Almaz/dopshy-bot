@@ -99,6 +99,29 @@ def parse_player_count(value) -> int | None:
     return n if n > 0 else None
 
 
+def round_time_to_half_hour(value) -> str:
+    """Round a HH:MM time string to the nearest half hour (:00 or :30).
+
+    Manager-entered times like "13:07" become "13:00", "13:20" becomes
+    "13:30" (exactly 15 minutes past rounds up). The 24:00 end-of-day
+    marker, and any value that isn't a real HH:MM time, are returned
+    unchanged rather than raising.
+    """
+    s = str(value)[:5]
+    if s == "24:00":
+        return s
+    try:
+        t = datetime.strptime(s, "%H:%M")
+    except (ValueError, TypeError):
+        return s
+    total_minutes = t.hour * 60 + t.minute
+    remainder = total_minutes % 30
+    rounded = total_minutes - remainder if remainder < 15 else total_minutes - remainder + 30
+    if rounded >= 1440:
+        return "24:00"
+    return f"{rounded // 60:02d}:{rounded % 60:02d}"
+
+
 def is_past_booking_time(date_str: str, time_start_str: str | None = None) -> bool:
     """True if the booking date (+ optional start time) has already passed in BOOKING_TIMEZONE."""
     now = now_almaty()
