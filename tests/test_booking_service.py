@@ -2,6 +2,7 @@
 
 import uuid
 
+import psycopg2.extras
 import pytest
 
 from integrations import booking_service
@@ -167,6 +168,61 @@ def test_manager_create_booking_slot_taken():
                                      time_start="12:30", time_end="13:30")
     assert not res["ok"]
     assert res["code"] == "SLOT_TAKEN"
+
+
+def _booking(booking_id: int) -> dict:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT time_start, time_end, field, price_total FROM bookings WHERE id = %s",
+                (booking_id,),
+            )
+            return dict(cur.fetchone())
+
+
+def test_manager_update_booking_rounds_times_to_half_hour():
+    bid = booking_service.manager_create_booking(
+        field=2, date="2026-07-05", end_date="2026-07-05",
+        time_start="12:00", time_end="13:00",
+    )["data"]["booking_id"]
+
+    res = booking_service.manager_update_booking(
+        bid, time_start="14:07", time_end="15:20",
+    )
+    assert res["ok"]
+    row = _booking(bid)
+    assert str(row["time_start"])[:5] == "14:00"
+    assert str(row["time_end"])[:5] == "15:30"
+
+
+def test_manager_update_booking_recomputes_price_on_reschedule():
+    bid = booking_service.manager_create_booking(
+        field=2, date="2026-07-05", end_date="2026-07-05",
+        time_start="12:00", time_end="13:00",
+    )["data"]["booking_id"]
+    original_price = _booking(bid)["price_total"]
+
+    res = booking_service.manager_update_booking(
+        bid, time_start="12:00", time_end="14:00",  # double the duration
+    )
+    assert res["ok"]
+    row = _booking(bid)
+    assert float(row["price_total"]) == float(original_price) * 2
+    assert float(res["data"]["price_total"]) == float(row["price_total"])
+
+
+def test_manager_update_booking_explicit_price_total_wins():
+    bid = booking_service.manager_create_booking(
+        field=2, date="2026-07-05", end_date="2026-07-05",
+        time_start="12:00", time_end="13:00",
+    )["data"]["booking_id"]
+
+    res = booking_service.manager_update_booking(
+        bid, time_start="12:00", time_end="14:00", price_total=1,
+    )
+    assert res["ok"]
+    row = _booking(bid)
+    assert float(row["price_total"]) == 1.0
 
 
 def _count_bookings() -> int:
