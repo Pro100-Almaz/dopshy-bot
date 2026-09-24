@@ -606,8 +606,8 @@ def test_batch_is_refused_when_the_check_itself_fails(client, apipay_on, monkeyp
 
 def test_repeating_only_batch_is_not_checked(client, apipay_on):
     """No avans → no invoice → no reason to ask Kaspi anything."""
-    body = {"slots": [_slot(1, "2027-06-13", repeat_mode="weekly",
-                            repeat_until="2027-06-27")]}
+    body = {"phone": _PHONE, "slots": [_slot(1, "2027-06-13", repeat_mode="weekly",
+                                             repeat_until="2027-06-27")]}
     r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
 
     assert r.status_code == 200

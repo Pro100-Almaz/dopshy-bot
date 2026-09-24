@@ -4,6 +4,7 @@ import time
 import uuid
 
 import pytest
+import psycopg2
 from flask import Flask
 
 import config
@@ -39,10 +40,39 @@ def test_rejects_wrong_key(client):
     assert r.status_code == 401
 
 
+@pytest.mark.no_db
+def test_unhandled_manager_error_is_json(client, monkeypatch):
+    def fail():
+        raise RuntimeError("database exploded")
+
+    monkeypatch.setattr("blueprints.manager_api.repo.get_field_prices", fail)
+
+    response = client.get("/api/manager/fields", headers=_HDR)
+
+    assert response.status_code == 500
+    assert response.is_json
+    assert response.get_json()["code"] == "INTERNAL_ERROR"
+    assert response.get_json()["error_id"]
+
+
+@pytest.mark.no_db
+def test_schema_error_is_actionable_json(client, monkeypatch):
+    def fail():
+        raise psycopg2.errors.UndefinedTable("customers does not exist")
+
+    monkeypatch.setattr("blueprints.manager_api.repo.get_field_prices", fail)
+
+    response = client.get("/api/manager/fields", headers=_HDR)
+
+    assert response.status_code == 503
+    assert response.is_json
+    assert response.get_json()["code"] == "DATABASE_SCHEMA_OUTDATED"
+
+
 def test_create_and_get(client):
     body = {"field": 1, "date": "2026-09-01", "time_start": "10:00",
             "time_end": "11:00", "repeat": "none",
-            "customer": "Манагер", "client_token": str(uuid.uuid4())}
+            "customer": "Манагер", "phone": "7701", "client_token": str(uuid.uuid4())}
     r = client.post("/api/manager/bookings", json=body, headers=_HDR)
     assert r.status_code == 200
     data = r.get_json()
@@ -56,10 +86,10 @@ def test_create_and_get(client):
 
 def test_create_slot_taken_returns_409(client):
     base = {"field": 1, "date": "2026-09-02", "time_start": "10:00",
-            "time_end": "11:00", "repeat": "none"}
+            "time_end": "11:00", "repeat": "none", "phone": "7701"}
     assert client.post("/api/manager/bookings", json=base, headers=_HDR).status_code == 200
     overlap = {"field": 1, "date": "2026-09-02", "time_start": "10:30",
-               "time_end": "11:30", "repeat": "none"}
+               "time_end": "11:30", "repeat": "none", "phone": "7702"}
     r = client.post("/api/manager/bookings", json=overlap, headers=_HDR)
     assert r.status_code == 409
     assert r.get_json()["code"] == "SLOT_TAKEN"
@@ -67,7 +97,7 @@ def test_create_slot_taken_returns_409(client):
 
 def test_patch_updates_and_records_event(client):
     body = {"field": 2, "date": "2026-09-03", "time_start": "12:00",
-            "time_end": "13:00", "repeat": "none"}
+            "time_end": "13:00", "repeat": "none", "phone": "7701"}
     bid = client.post("/api/manager/bookings", json=body, headers=_HDR).get_json()["data"]["booking_id"]
 
     r = client.patch(f"/api/manager/bookings/{bid}", json={"notes": "VIP"}, headers=_HDR)
@@ -130,6 +160,7 @@ def test_contract_delete_cancels_linked_bookings(client, monkeypatch):
     monkeypatch.setattr("integrations.apipay_service.on_bookings_cancelled", lambda *args, **kwargs: None)
     body = {
         "customer_name": "Big Co",
+        "phone": "7701",
         "start_date": "2027-01-01",
         "end_date": "2027-01-31",
         "price": 900000,
@@ -262,15 +293,15 @@ def test_edits_that_are_not_status_changes_say_nothing(quiet_client, sent):
     assert sent == []
 
 
-def test_a_booking_without_a_phone_is_not_a_failure(quiet_client, sent):
-    """Walk-ins are entered with no number at all; there is simply nobody to
-    tell, and that must not break the cancellation."""
-    bid = _book(quiet_client, "2026-10-06", phone=None)
+def test_a_booking_without_a_phone_is_rejected(quiet_client, sent):
+    """Every booking belongs to a registered customer, so a booking with
+    neither customer_id nor phone is refused and nobody is messaged."""
+    body = {"field": 1, "date": "2026-10-06", "time_start": "10:00",
+            "time_end": "11:00", "repeat": "none", "customer": "Асхат"}
+    r = quiet_client.post("/api/manager/bookings", json=body, headers=_HDR)
 
-    r = quiet_client.delete(f"/api/manager/bookings/{bid}", headers=_HDR)
-
-    assert r.status_code == 200 and r.get_json()["ok"]
-    _wait_for(sent)
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "CUSTOMER_REQUIRED"
     assert sent == []
 
 
@@ -511,6 +542,49 @@ def test_contacts_filter_by_arena_bot_type(client, monkeypatch):
     assert r.status_code == 200
     assert calls["phone_number_id"] == config.WHATSAPP_PHONE_NUMBER_ID_BOT_1
     assert [row["phone"] for row in r.get_json()] == ["77000000001", "77000000002"]
+
+
+@pytest.mark.no_db
+def test_contacts_derive_registration_from_sqlite_postgres_presence(client, monkeypatch):
+    monkeypatch.setattr(
+        "blueprints.manager_api._list_conversation_contacts",
+        lambda phone_number_id=None: [
+            {"chat_id": f"{phone_number_id}:77000000001", "updated_at": "2026-09-20 10:00:00"},
+            {"chat_id": f"{phone_number_id}:77000000003", "updated_at": "2026-09-20 11:00:00"},
+            {"chat_id": f"{phone_number_id}:77000000004", "updated_at": "2026-09-20 12:00:00"},
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.repo.get_booking_customers",
+        lambda: [
+            # PostgreSQL customers-only row.
+            {"phone": "77000000002", "customer_id": 2,
+             "is_regular_customer": True, "has_booking": False},
+            # Present in both SQLite and PostgreSQL.
+            {"phone": "77000000003", "customer_id": 3,
+             "is_regular_customer": True, "has_booking": True},
+            # Legacy booking row with no matching PostgreSQL customer.
+            {"phone": "77000000004", "customer_id": None,
+             "is_regular_customer": True, "has_booking": True},
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {phone: {"paused": False, "paused_reason": None} for phone in phones},
+    )
+
+    response = client.get("/api/manager/contacts?bot_type=arena", headers=_HDR)
+
+    assert response.status_code == 200
+    by_phone = {row["phone"]: row for row in response.get_json()}
+    assert by_phone["77000000001"]["is_registered"] is False  # SQLite only
+    assert by_phone["77000000001"]["is_regular_customer"] is False
+    assert by_phone["77000000002"]["is_registered"] is True   # Postgres only
+    assert by_phone["77000000002"]["is_regular_customer"] is True
+    assert by_phone["77000000003"]["is_registered"] is True   # both
+    assert by_phone["77000000003"]["is_regular_customer"] is True
+    assert by_phone["77000000004"]["is_registered"] is False  # no customer row
+    assert by_phone["77000000004"]["is_regular_customer"] is False
 
 
 @pytest.mark.no_db

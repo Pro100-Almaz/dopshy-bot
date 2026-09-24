@@ -1,6 +1,7 @@
 """Unit tests for the booking service layer."""
 
 import uuid
+from decimal import Decimal
 
 import psycopg2.extras
 import pytest
@@ -8,6 +9,34 @@ import pytest
 from integrations import booking_service
 from integrations.repo import postgres as svc
 from integrations.repo.postgres import _conn
+
+
+@pytest.mark.no_db
+def test_discount_edit_uses_recomputed_slot_price_for_first_discount():
+    gross = booking_service._discount_edit_gross(
+        {"discount_id": 1},
+        Decimal("13500"),
+        {
+            "discount_id": None,
+            "discount_amount": 0,
+            "price_before_discount": None,
+            "price_total": Decimal("9000"),
+        },
+    )
+
+    assert gross == Decimal("13500")
+
+
+@pytest.mark.no_db
+def test_discount_edit_rejects_invalid_explicit_price_without_crashing():
+    with pytest.raises(booking_service.DiscountError) as error:
+        booking_service._discount_edit_gross(
+            {"price_total": "not-a-number", "discount_id": 1},
+            None,
+            {},
+        )
+
+    assert error.value.code == "INVALID_PRICE"
 
 
 def _token() -> str:
@@ -33,7 +62,7 @@ def _events(booking_id: int) -> list[str]:
 
 def _ready_draft(token, date="2026-07-01", ts="18:00", te="19:00", field=1):
     """Create a fully-populated DRAFT ready for request_payment."""
-    res = svc.create_draft("dopsy_bot", chat_id="chat_test",
+    res = svc.create_draft("dopsy_bot", chat_id="chat_test", phone="7700",
                            date=date, time_start=ts, time_end=te,
                            field=field, format="5x5", players=8,
                            customer_name="Test")
@@ -163,9 +192,9 @@ def test_manager_create_booking_confirmed():
 
 def test_manager_create_booking_slot_taken():
     booking_service.manager_create_booking(field=2, date="2026-07-05", end_date="2026-07-05",
-                               time_start="12:00", time_end="13:00")
+                               time_start="12:00", time_end="13:00", phone="7701")
     res = booking_service.manager_create_booking(field=2, date="2026-07-05", end_date="2026-07-05",
-                                     time_start="12:30", time_end="13:30")
+                                     time_start="12:30", time_end="13:30", phone="7702")
     assert not res["ok"]
     assert res["code"] == "SLOT_TAKEN"
 
@@ -183,7 +212,7 @@ def _booking(booking_id: int) -> dict:
 def test_manager_update_booking_rounds_times_to_half_hour():
     bid = booking_service.manager_create_booking(
         field=2, date="2026-07-05", end_date="2026-07-05",
-        time_start="12:00", time_end="13:00",
+        time_start="12:00", time_end="13:00", phone="7701",
     )["data"]["booking_id"]
 
     res = booking_service.manager_update_booking(
@@ -198,7 +227,7 @@ def test_manager_update_booking_rounds_times_to_half_hour():
 def test_manager_update_booking_recomputes_price_on_reschedule():
     bid = booking_service.manager_create_booking(
         field=2, date="2026-07-05", end_date="2026-07-05",
-        time_start="12:00", time_end="13:00",
+        time_start="12:00", time_end="13:00", phone="7701",
     )["data"]["booking_id"]
     original_price = _booking(bid)["price_total"]
 
@@ -214,7 +243,7 @@ def test_manager_update_booking_recomputes_price_on_reschedule():
 def test_manager_update_booking_explicit_price_total_wins():
     bid = booking_service.manager_create_booking(
         field=2, date="2026-07-05", end_date="2026-07-05",
-        time_start="12:00", time_end="13:00",
+        time_start="12:00", time_end="13:00", phone="7701",
     )["data"]["booking_id"]
 
     res = booking_service.manager_update_booking(
@@ -252,7 +281,7 @@ def test_batch_is_atomic_on_conflict():
     # Pre-existing booking that the second batch slot will collide with.
     pre = booking_service.manager_create_booking(
         field=2, date="2026-08-02", end_date="2026-08-02",
-        time_start="12:00", time_end="13:00",
+        time_start="12:00", time_end="13:00", phone="7701",
     )
     assert pre["ok"]
     assert _count_bookings() == 1

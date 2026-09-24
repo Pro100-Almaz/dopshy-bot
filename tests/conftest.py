@@ -21,6 +21,7 @@ os.environ.setdefault(
 )
 
 import pytest
+from psycopg2.extensions import parse_dsn
 
 import config
 
@@ -33,6 +34,16 @@ def pytest_configure(config):
 def _migrated_schema():
     if not config.POSTGRES_DSN:
         pytest.skip("POSTGRES_DSN not set — skipping DB tests")
+    dsn = parse_dsn(config.POSTGRES_DSN)
+    database_name = dsn.get("dbname", "")
+    explicitly_allowed = os.getenv("DOPSHY_ALLOW_DESTRUCTIVE_DB_TESTS") == "1"
+    if "test" not in database_name.lower() and not explicitly_allowed:
+        pytest.fail(
+            "Refusing destructive DB tests against non-test database "
+            f"{database_name!r}. Point POSTGRES_DSN to a database whose name "
+            "contains 'test'. DOPSHY_ALLOW_DESTRUCTIVE_DB_TESTS=1 is the "
+            "explicit destructive override."
+        )
     from scripts.migrate import migrate
     try:
         migrate()
@@ -65,7 +76,7 @@ def clean_db(request):
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "TRUNCATE contracts, contract_bookings, bookings, booking_events, payments, booking_sessions, "
+                "TRUNCATE customers, discounts, contracts, contract_bookings, bookings, booking_events, payments, booking_sessions, "
                 "apipay_invoices RESTART IDENTITY CASCADE"
             )
     yield

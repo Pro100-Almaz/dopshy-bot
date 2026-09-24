@@ -18,7 +18,7 @@ Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
 import json
 import logging
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, time, timedelta
 
 from utils import is_past_booking_time, normalize_end_time, round_time_to_half_hour
@@ -32,9 +32,104 @@ import config
 from handlers.payment.pricing import calculate_booking_price
 from integrations.repo.utils import _conn, _err, _ok
 from integrations.repo.history_repo import _record_history
+from integrations.repo.utils import normalize_phone
 from integrations.status_labels import STATES_RUSSIAN as _STATES_RUSSIAN
 
 logger = logging.getLogger(__name__)
+
+
+class DiscountError(Exception):
+    """Expected discount validation failure that should roll back the booking."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _resolve_customer_id(cur, customer_id, phone: str | None,
+                         customer_name: str | None = None) -> int:
+    """Resolve or create the mandatory registered customer for a booking."""
+    key = normalize_phone(phone)
+    if customer_id == "":
+        customer_id = None
+    if customer_id is None:
+        if not key:
+            raise DiscountError("CUSTOMER_REQUIRED",
+                                "Для брони обязателен customer_id или phone.")
+        cur.execute(
+            """INSERT INTO customers (name, phone, is_regular_customer)
+               VALUES (%s, %s, FALSE)
+               ON CONFLICT (phone) DO UPDATE SET
+                   name = COALESCE(customers.name, EXCLUDED.name),
+                   updated_at = NOW()
+               RETURNING id""",
+            ((customer_name or "").strip() or None, key),
+        )
+        return cur.fetchone()["id"]
+    try:
+        customer_id = int(customer_id)
+    except (TypeError, ValueError):
+        raise DiscountError("INVALID_CUSTOMER", "customer_id должен быть числом.")
+    cur.execute("SELECT id, phone FROM customers WHERE id = %s", (customer_id,))
+    row = cur.fetchone()
+    if not row:
+        raise DiscountError("CUSTOMER_NOT_FOUND", "Клиент не найден.")
+    if key and row["phone"] != key:
+        raise DiscountError("CUSTOMER_PHONE_MISMATCH",
+                            "Номер брони не совпадает с номером клиента.")
+    return row["id"]
+
+
+def _take_discount(cur, discount_id: int, phone: str | None,
+                   customer_id: int | None = None) -> Decimal:
+    """Lock and consume one use, returning the fixed discount amount."""
+    key = normalize_phone(phone)
+    if not key:
+        raise DiscountError("DISCOUNT_CUSTOMER_MISMATCH",
+                            "Для применения скидки нужен номер клиента.")
+    cur.execute(
+        """SELECT d.discount_amount, d.status, d.is_active, d.usages_left,
+                  d.customer_id,
+                  c.phone AS customer_phone
+             FROM discounts d
+             JOIN customers c ON c.id = d.customer_id
+            WHERE d.id = %s
+            FOR UPDATE OF d""",
+        (discount_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise DiscountError("DISCOUNT_NOT_FOUND", "Скидка не найдена.")
+    if row["customer_phone"] != key:
+        raise DiscountError("DISCOUNT_CUSTOMER_MISMATCH",
+                            "Скидка принадлежит другому клиенту.")
+    if customer_id is not None and row["customer_id"] != customer_id:
+        raise DiscountError("DISCOUNT_CUSTOMER_MISMATCH",
+                            "Скидка принадлежит другому клиенту.")
+    if row["status"] != "approved" or not row["is_active"] or row["usages_left"] <= 0:
+        raise DiscountError("DISCOUNT_UNAVAILABLE", "Скидка недоступна или закончилась.")
+    cur.execute(
+        """UPDATE discounts
+              SET usages_left = usages_left - 1,
+                  is_active = (usages_left - 1) > 0,
+                  updated_at = NOW()
+            WHERE id = %s""",
+        (discount_id,),
+    )
+    return Decimal(row["discount_amount"])
+
+
+def _return_discount_use(cur, discount_id: int) -> None:
+    """Return a use when a manager removes/replaces a discount on a booking."""
+    cur.execute(
+        """UPDATE discounts
+              SET usages_left = LEAST(usage_limit, usages_left + 1),
+                  is_active = CASE WHEN status = 'approved' THEN TRUE ELSE FALSE END,
+                  updated_at = NOW()
+            WHERE id = %s""",
+        (discount_id,),
+    )
 
 
 
@@ -646,7 +741,7 @@ def client_edit_booking(booking_id: int, actor_id: str | None = None, **patch) -
     })
 
 
-_MANAGER_PATCH_FIELDS = {"customer_name", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash", "paid_avans"}
+_MANAGER_PATCH_FIELDS = {"customer_name", "phone", "notes", "price_total", "state", "source", "paid_kaspi_qr", "paid_cash", "paid_avans"}
 _MANAGER_SLOT_FIELDS = ("field", "date", "time_start", "time_end")
 
 # Manager-editable payment-amount columns → their history template key.
@@ -667,6 +762,38 @@ def _fmt_amount(v) -> str:
     d = _to_decimal(v)
     d = d.to_integral_value() if d == d.to_integral_value() else d.normalize()
     return f"{d:f}"
+
+
+def _discount_edit_gross(fields: dict, recomputed_gross: Decimal | None,
+                         old: dict) -> Decimal:
+    """Return the undiscounted price to use while changing a discount.
+
+    A slot edit and a first-time discount assignment can happen in the same
+    request. In that case ``price_before_discount`` is still null on the old
+    row, so the newly calculated slot price is the authoritative gross value.
+    """
+    if "price_total" in fields:
+        candidate = fields["price_total"]
+    elif recomputed_gross is not None:
+        candidate = recomputed_gross
+    elif old.get("price_before_discount") is not None:
+        candidate = old["price_before_discount"]
+    else:
+        try:
+            candidate = (
+                Decimal(str(old.get("price_total") or 0))
+                + Decimal(str(old.get("discount_amount") or 0))
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            raise DiscountError("INVALID_PRICE", "Некорректная стоимость брони.")
+
+    try:
+        gross = Decimal(str(candidate))
+    except (InvalidOperation, TypeError, ValueError):
+        raise DiscountError("INVALID_PRICE", "Некорректная стоимость брони.")
+    if not gross.is_finite() or gross < 0:
+        raise DiscountError("INVALID_PRICE", "Стоимость брони не может быть отрицательной.")
+    return gross
 
 
 def manager_update_booking(booking_id: int, actor_id: str | None = None, **fields) -> dict:
@@ -691,8 +818,12 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
         fields["time_end"] = round_time_to_half_hour(fields["time_end"])
 
     patch = {k: v for k, v in fields.items() if k in _MANAGER_PATCH_FIELDS}
+    if "phone" in patch:
+        patch["phone"] = normalize_phone(patch["phone"]) or None
+    discount_requested = "discount_id" in fields
+    customer_requested = "customer_id" in fields
     slot = {k: fields[k] for k in _MANAGER_SLOT_FIELDS if k in fields}
-    if not patch and not slot:
+    if not patch and not slot and not discount_requested and not customer_requested:
         return _ok({"booking_id": booking_id})
 
     # Reject unknown field numbers up front: an invalid field would otherwise
@@ -706,11 +837,15 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
     # when the slot changes without an explicit price override — the
     # unchanged slot fields, to price the effective (new-or-existing) range.
     recompute_price = bool(slot) and "price_total" not in patch
+    recomputed_gross: Decimal | None = None
     history_cols = (["state"] if "state" in patch else []) + \
                    [f for f in _PAYMENT_HISTORY_KEYS if f in patch]
     select_cols = set(history_cols)
     if recompute_price:
         select_cols |= {"date", "time_start", "time_end", "field"}
+    if discount_requested or customer_requested or recompute_price or "phone" in patch:
+        select_cols |= {"discount_id", "discount_amount", "price_before_discount",
+                        "price_total", "phone", "customer_id", "customer_name"}
 
     try:
         with _conn() as conn:
@@ -723,6 +858,8 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                     )
                     _prev = cur.fetchone()
                     old = dict(_prev) if _prev else {}
+                    if not old:
+                        return _err("NOT_FOUND", "Бронь не найдена.")
 
                 if recompute_price and old:
                     eff_field = int(slot.get("field", old["field"]))
@@ -731,9 +868,77 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                         eff_date = str(slot.get("date", old["date"]))
                         eff_ts = str(slot.get("time_start", str(old["time_start"])[:5]))[:5]
                         eff_te = str(slot.get("time_end", str(old["time_end"])[:5]))[:5]
-                        patch["price_total"] = calculate_booking_price(
+                        recomputed_gross = Decimal(str(calculate_booking_price(
                             conf["format"], eff_date, eff_ts, eff_te
+                        )))
+                        patch["price_before_discount"] = (
+                            recomputed_gross if old.get("discount_id") else None
                         )
+                        patch["price_total"] = max(
+                            Decimal(0), recomputed_gross - Decimal(old.get("discount_amount") or 0)
+                        )
+
+                if customer_requested or "phone" in patch:
+                    patch["customer_id"] = _resolve_customer_id(
+                        cur,
+                        fields.get("customer_id") if customer_requested else None,
+                        patch.get("phone", old.get("phone")),
+                        patch.get("customer_name", old.get("customer_name")),
+                    )
+
+                if discount_requested and old:
+                    old_discount_id = old.get("discount_id")
+                    new_discount_id = fields.get("discount_id")
+                    if new_discount_id == "":
+                        new_discount_id = None
+                    if new_discount_id is not None:
+                        try:
+                            new_discount_id = int(new_discount_id)
+                        except (TypeError, ValueError):
+                            raise DiscountError("INVALID_DISCOUNT", "discount_id должен быть числом.")
+                    if new_discount_id != old_discount_id:
+                        gross = _discount_edit_gross(fields, recomputed_gross, old)
+                        if old_discount_id:
+                            _return_discount_use(cur, old_discount_id)
+                        if new_discount_id:
+                            discount_amount = _take_discount(
+                                cur, new_discount_id,
+                                patch.get("phone", old.get("phone")),
+                                patch.get("customer_id", old.get("customer_id")),
+                            )
+                            patch.update({
+                                "discount_id": new_discount_id,
+                                "discount_amount": discount_amount,
+                                "price_before_discount": gross,
+                                "price_total": max(Decimal(0), gross - discount_amount),
+                            })
+                        else:
+                            patch.update({
+                                "discount_id": None,
+                                "discount_amount": Decimal(0),
+                                "price_before_discount": None,
+                                "price_total": gross,
+                            })
+
+                effective_discount_id = patch.get("discount_id", old.get("discount_id"))
+                if ("phone" in patch or customer_requested) and effective_discount_id:
+                    cur.execute(
+                        """SELECT d.customer_id, c.phone
+                             FROM discounts d JOIN customers c ON c.id = d.customer_id
+                            WHERE d.id = %s""",
+                        (effective_discount_id,),
+                    )
+                    owner = cur.fetchone()
+                    effective_phone = patch.get("phone", old.get("phone"))
+                    effective_customer = patch.get("customer_id", old.get("customer_id"))
+                    if (not owner or owner["phone"] != effective_phone or
+                            (effective_customer is not None and
+                             owner["customer_id"] != effective_customer)):
+                        raise DiscountError("DISCOUNT_CUSTOMER_MISMATCH",
+                                            "Скидка принадлежит другому клиенту.")
+
+                if not patch and not slot:
+                    return _ok({"booking_id": booking_id})
 
                 set_parts = [f"{k} = %s" for k in patch]
                 vals = list(patch.values())
@@ -758,6 +963,12 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                 if cur.fetchone():
                     src = fields.get("source", "manager:Unknown")
                     _record_event(cur, booking_id, "manager_updated", fields.get("source", "manager"), actor_id)
+                    if discount_requested and old.get("discount_id") != patch.get("discount_id", old.get("discount_id")):
+                        label = patch.get("discount_id") or "без скидки"
+                        _record_history(
+                            cur, booking_id, src,
+                            description=f"Изменена скидка брони: {label}.",
+                        )
                     if "state" in patch:
                         _record_status_change(cur, booking_id, old.get("state"),
                                               patch["state"], src)
@@ -777,13 +988,16 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
+    except DiscountError as exc:
+        return _err(exc.code, exc.message)
     return _err("NOT_FOUND", "Бронь не найдена.")
 
 
 _INSERT_BOOKING_SQL = """INSERT INTO bookings
                          (phone, customer_name, date, time_start, time_end, field, format,
                           notes, price_total, paid_avans, state, source, client_token, start_at, end_at,
-                          group_repetition, group_transition, repeat, reserved_until)
+                          group_repetition, group_transition, repeat, reserved_until,
+                          discount_id, discount_amount, price_before_discount, customer_id)
                          VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                                  COALESCE(%s, gen_random_uuid()),
                                  (%s::date + %s::time) AT TIME ZONE %s,
@@ -792,7 +1006,8 @@ _INSERT_BOOKING_SQL = """INSERT INTO bookings
                                  CASE
                                      WHEN %s THEN NULL
                                      ELSE NOW() + make_interval(mins => %s)
-                                     END)
+                                     END,
+                                 %s, %s, %s, %s)
                          RETURNING id"""
 
 
@@ -803,8 +1018,22 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
                          actor_id: str | None = None, client_token: str | None = None,
                          format_: str | None = None, reserved_until: int = 30,
                          updated_by: str = 'manager',
-                         state: str = "awaiting_payment") -> list[int]:
+                         state: str = "awaiting_payment",
+                         discount_id: int | None = None,
+                         customer_id: int | None = None) -> list[int]:
     """Insert one or more booking rows on the caller's cursor and return their ids."""
+    if discount_id == "":
+        discount_id = None
+    if discount_id is not None:
+        try:
+            discount_id = int(discount_id)
+        except (TypeError, ValueError):
+            raise DiscountError("INVALID_DISCOUNT", "discount_id должен быть числом.")
+    normalized_phone = normalize_phone(phone) or None
+    customer_id = _resolve_customer_id(cur, customer_id, normalized_phone, customer)
+    if normalized_phone is None:
+        cur.execute("SELECT phone FROM customers WHERE id = %s", (customer_id,))
+        normalized_phone = cur.fetchone()["phone"]
     if format_ is None:
         conf = next((f for f in config.BOOKING_FIELDS if f["id"] == int(field)), None)
         format_ = conf["format"] if conf else ""
@@ -815,9 +1044,16 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
     ids: list[int] = []
     for i, (d, st, et, group_transition, is_latter) in enumerate(dates):
         d_str = datetime.strftime(d, format="%Y-%m-%d")
-        row_price = price_total
-        if row_price is None:
-            row_price = calculate_booking_price(format_, d_str, st, et)
+        gross_price = price_total
+        if gross_price is None:
+            gross_price = calculate_booking_price(format_, d_str, st, et)
+        gross_price = Decimal(str(gross_price))
+        row_discount_id = discount_id if not is_latter else None
+        discount_amount = (_take_discount(
+            cur, row_discount_id, normalized_phone, customer_id
+        )
+                           if row_discount_id is not None else Decimal(0))
+        row_price = max(Decimal(0), gross_price - discount_amount)
         skip_reserved = is_repetitive or is_latter
         # The prepayment/avans belongs to the MAIN booking only.
         # Coalesce: paid_avans is NOT NULL, and callers routinely omit prepayment.
@@ -826,12 +1062,15 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
 
         cur.execute(
             _INSERT_BOOKING_SQL,
-            (phone, customer, d_str, st, et, int(field), format_,
+            (normalized_phone, customer, d_str, st, et, int(field), format_,
              row_notes, row_price, row_avans, state, updated_by, client_token,
              d_str, st, config.BOOKING_TIMEZONE,
              d_str, et, config.BOOKING_TIMEZONE,
              group_repetition, group_transition,
-             is_repetitive, skip_reserved, reserved_until),
+             is_repetitive, skip_reserved, reserved_until,
+             row_discount_id, discount_amount,
+             gross_price if row_discount_id is not None else None,
+             customer_id),
         )
         client_token = str(uuid.uuid4())
         booking_id = cur.fetchone()["id"]
@@ -849,7 +1088,10 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                            client_token: str | None = None,
                            format_: str | None = None, reserved_until: int = 30,
                            updated_by: str = 'manager',
-                           state: str = "confirmed") -> dict:
+                           state: str = "confirmed",
+                           discount_id: int | None = None,
+                           customer_id: int | None = None,
+                           prepayment=None) -> dict:
     """Manager-created booking: DRAFT is skipped, inserted directly as confirmed."""
     try:
         with _conn() as conn:
@@ -861,7 +1103,8 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                     price_total=price_total, actor_id=actor_id,
                     client_token=client_token, format_=format_,
                     reserved_until=reserved_until, updated_by=updated_by,
-                    state=state,
+                    state=state, discount_id=discount_id,
+                    customer_id=customer_id, prepayment=prepayment,
                 )
     except psycopg2.errors.ExclusionViolation:
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
@@ -874,6 +1117,8 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         if row:
             return _ok({"booking_id": row["id"], "status": "ОЖИДАНИЕ"})
         raise
+    except DiscountError as exc:
+        return _err(exc.code, exc.message)
     return _ok({"booking_id": ids[-1], "status": "ОЖИДАНИЕ"})
 
 
@@ -1003,7 +1248,9 @@ def _conflict(conflicts: list[dict]) -> dict:
 def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
                                   notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
                                   reserved_until: int = 30, updated_by: str = 'manager',
-                                  on_created=None, avans_per_booking=None
+                                  on_created=None, avans_per_booking=None,
+                                  discount_id: int | None = None,
+                                  customer_id: int | None = None
                                   ) -> dict:
     """Create bookings for a batch of (possibly repeating) merged intervals.
 
@@ -1052,7 +1299,7 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
             max_date = top if max_date is None else max(max_date, top)
         expanded.append({"field": field, "ts": ts, "te": te, "te_raw": te_raw,
                          "repeat_mode": repeat_mode, "repeat_until": repeat_until,
-                         "bases": bases})
+                         "bases": bases, "discount_id": s.get("discount_id", discount_id)})
 
     created: list[dict] = []
     booking_ids: list[int] = []
@@ -1094,10 +1341,12 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                         end_date=e["repeat_until"], repeat=e["repeat_mode"],
                         customer=customer, phone=phone, notes=notes,
                         price_total=price_total,
-                        # prepayment=avans_per_booking if is_chargeable else prepayment,
+                        prepayment=avans_per_booking if is_chargeable else prepayment,
                         actor_id=actor_id,
                         reserved_until=reserved_until, updated_by=updated_by,
                         state="awaiting_payment",
+                        discount_id=e["discount_id"],
+                        customer_id=customer_id,
                     )
                     booking_ids.extend(ids)
                     created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
@@ -1119,6 +1368,8 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
     except psycopg2.errors.ExclusionViolation:
         # Lost the race with a concurrent booking after the pre-check passed.
         return _conflict([])
+    except DiscountError as exc:
+        return _err(exc.code, exc.message)
 
     return _ok({"created": created, "booking_ids": booking_ids,
                 "created_count": len(booking_ids), **hook_data})
@@ -1174,6 +1425,7 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
                     slots: list[dict] | None = None,
                     actor_id: str | None = None) -> dict:
     status = status or "confirmed"
+    phone = normalize_phone(phone) or None
     if status not in _CONTRACT_STATES:
         return _err("INVALID_STATUS", "Недопустимый статус договора.")
     normalized_slots = []
@@ -1226,6 +1478,8 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
         return _conflict([])
     except psycopg2.errors.CheckViolation:
         return _err("INVALID", "end_date must be >= start_date.")
+    except DiscountError as exc:
+        return _err(exc.code, exc.message)
 
     return _ok({
         "contract_id": contract_id,
@@ -1284,6 +1538,8 @@ def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | N
                 )
     except psycopg2.errors.ExclusionViolation:
         return _conflict([])
+    except DiscountError as exc:
+        return _err(exc.code, exc.message)
 
     return _ok({"contract_id": contract_id, "booking_ids": booking_ids,
                 "created": created, "created_count": len(booking_ids)})
@@ -1292,6 +1548,8 @@ def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | N
 def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> dict:
     allowed = {"customer_name", "phone", "start_date", "end_date", "price", "status", "notes", "source"}
     patch = {k: v for k, v in fields.items() if k in allowed}
+    if "phone" in patch:
+        patch["phone"] = normalize_phone(patch["phone"]) or None
     if not patch:
         return _ok({"contract_id": contract_id})
     if "status" in patch and patch["status"] not in _CONTRACT_STATES:

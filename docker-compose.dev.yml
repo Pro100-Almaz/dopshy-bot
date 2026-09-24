@@ -21,8 +21,9 @@ services:
       POSTGRES_DB: dopshy
       POSTGRES_USER: dopshy
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "5432:5432"
+    # Host 5432 is taken by another stack; expose on 5433 instead.
+    ports: !override
+      - "5433:5432"
 
   redis:
     # Ephemeral message-batch buffer only — no persistence needed.

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from integrations import test_context
 from integrations.repo.postgres import _conn
+from integrations.repo.utils import phone_variants
 
 
 ALMATY_TZ = ZoneInfo("Asia/Almaty")
@@ -25,6 +26,7 @@ def get_all_bookings(page: int| None = None, search: str | None = None) -> list[
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
+                       customer_id, discount_id, discount_amount, price_before_discount,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
@@ -79,21 +81,32 @@ def get_field_prices() -> list[dict]:
 
 
 def get_booking_customers() -> list[dict]:
-    """Distinct customers seen in bookings, with their latest booking activity.
+    """Arena customers from bookings and the registered-customer table.
 
-    One row per phone (the DB keeps phones as bare digits); used to merge
-    booking customers into the unified contact list alongside WhatsApp texters.
+    One row per normalized phone, including registered customers who have not
+    booked yet. Used by the unified contact list alongside WhatsApp texters.
     """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
+                WITH booked AS (
+                    SELECT
+                        phone,
+                        MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
+                        MAX(GREATEST(created_at, COALESCE(updated_at, created_at))) AS last_at
+                    FROM bookings
+                    WHERE NOT is_test AND phone IS NOT NULL AND phone <> ''
+                    GROUP BY phone
+                )
                 SELECT
-                    phone,
-                    MAX(customer_name) FILTER (WHERE customer_name <> '') AS customer_name,
-                    MAX(GREATEST(created_at, COALESCE(updated_at, created_at))) AS last_at
-                FROM bookings
-                WHERE NOT is_test AND phone IS NOT NULL AND phone <> ''
-                GROUP BY phone
+                    COALESCE(c.phone, b.phone) AS phone,
+                    COALESCE(c.name, b.customer_name) AS customer_name,
+                    GREATEST(b.last_at, c.updated_at) AS last_at,
+                    (b.phone IS NOT NULL) AS has_booking,
+                    c.id AS customer_id,
+                    COALESCE(c.is_regular_customer, FALSE) AS is_regular_customer
+                FROM booked b
+                FULL OUTER JOIN customers c ON c.phone = b.phone
             """)
             return [dict(r) for r in cur.fetchall()]
 
@@ -118,9 +131,9 @@ def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
                 FROM bookings
                 WHERE date BETWEEN %s AND %s
                   AND state IN ('awaiting_payment', 'confirmed')
-                  AND (NOT is_test OR phone = %s)
+                  AND (NOT is_test OR phone = ANY(%s))
                 ORDER BY date, time_start, field
-            """, (week_start, week_end, own_test_phone))
+            """, (week_start, week_end, phone_variants(own_test_phone)))
             return [dict(r) for r in cur.fetchall()]
 
 
@@ -133,11 +146,11 @@ def get_user_upcoming_bookings(phone: str) -> list[dict]:
                 SELECT id, date, time_start, time_end, field, format, players,
                        customer_name, state, notes, price_total, group_transition
                 FROM bookings
-                WHERE phone = %s
+                WHERE phone = ANY(%s)
                   AND date >= CURRENT_DATE
                   AND state IN ('awaiting_payment', 'confirmed')
                 ORDER BY date, time_start
-            """, (phone,))
+            """, (phone_variants(phone),))
             return [dict(r) for r in cur.fetchall()]
 
 
@@ -156,11 +169,11 @@ def get_user_editable_bookings(phone: str) -> list[dict]:
                        customer_name, state, start_at, client_edited_at,
                        predecessor_booking_id
                 FROM bookings
-                WHERE phone = %s
+                WHERE phone = ANY(%s)
                   AND state IN ('awaiting_payment', 'confirmed')
                   AND start_at > NOW()
                 ORDER BY date, start_at
-            """, (phone,))
+            """, (phone_variants(phone),))
             return [dict(r) for r in cur.fetchall()]
 
 
@@ -172,10 +185,10 @@ def get_awaiting_payment_booking(phone: str) -> dict | None:
                 SELECT id, date, time_start, time_end, field, format, players,
                        customer_name, state, sheet_row, client_token, price_total
                 FROM bookings
-                WHERE phone = %s AND state = 'awaiting_payment'
+                WHERE phone = ANY(%s) AND state = 'awaiting_payment'
                 ORDER BY created_at DESC
                 LIMIT 1
-            """, (phone,))
+            """, (phone_variants(phone),))
             row = cur.fetchone()
             return dict(row) if row else None
 
@@ -242,6 +255,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
+                       customer_id, discount_id, discount_amount, price_before_discount,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
@@ -308,7 +322,7 @@ def get_booking(booking_id: int) -> dict | None:
                 SELECT id, field, date, time_start, time_end, customer_name,
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
-                       group_transition,
+                       group_transition, customer_id, discount_id, discount_amount, price_before_discount,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
@@ -441,9 +455,9 @@ def get_existing_draft(phone: str) -> dict | None:
                 "SELECT id, date, time_start, time_end, field, format, "
                 "       players, customer_name, phone, state, client_token "
                 "FROM bookings "
-                "WHERE phone = %s AND state = 'draft' "
+                "WHERE phone = ANY(%s) AND state = 'draft' "
                 "ORDER BY created_at DESC LIMIT 1",
-                (phone,),
+                (phone_variants(phone),),
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -455,10 +469,10 @@ def cancel_draft_awaiting_payment(phone: str) -> bool:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 UPDATE bookings SET state = 'cancelled', updated_at = NOW()
-                WHERE id = (SELECT id FROM bookings WHERE phone = %s AND state IN ('draft', 'awaiting_payment')
+                WHERE id = (SELECT id FROM bookings WHERE phone = ANY(%s) AND state IN ('draft', 'awaiting_payment')
                 ORDER BY created_at DESC 
                 LIMIT 1)
-            """, (phone,))
+            """, (phone_variants(phone),))
 
             cnt = cur.rowcount > 0
             return cnt
@@ -471,10 +485,10 @@ def has_awaiting_payments(phone: str) -> bool:
             cur.execute("""
                 SELECT 1
                 FROM bookings
-                WHERE phone = %s
+                WHERE phone = ANY(%s)
                   AND state  = 'awaiting_payment'
                 LIMIT 1
-            """, (phone,))
+            """, (phone_variants(phone),))
 
             return cur.rowcount > 0
 

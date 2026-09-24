@@ -11,7 +11,7 @@ import config
 from integrations.booking_service import _record_event, _record_status_change, _history_source
 from integrations.repo.history_repo import _record_history
 from integrations import test_context
-from integrations.repo.utils import _conn, _ok, _err
+from integrations.repo.utils import _conn, _ok, _err, normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,8 @@ _DRAFTS_BY_BOTS = {
 def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
     """Create (or return existing) DRAFT booking/trial. Idempotent on client_token."""
     patch = {k: v for k, v in fields.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
+    if "phone" in patch:
+        patch["phone"] = normalize_phone(patch["phone"]) or None
     cols, vals = list(patch.keys()) + ["state"], list(patch.values()) + ["draft"]
     type_string = "booking" if bot_name == "dopsy_bot" else "trial"
     if type_string == "booking":
@@ -81,6 +83,8 @@ def create_draft(bot_name: str, chat_id: str, **fields) -> dict:
 def update_draft(bot_name: str, object_id: int, state: str = 'draft', **patch) -> dict:
     """Patch a DRAFT booking's collected fields. Rejects if not in DRAFT."""
     fields = {k: v for k, v in patch.items() if k in draft_types[_DRAFTS_BY_BOTS[bot_name]]}
+    if "phone" in fields:
+        fields["phone"] = normalize_phone(fields["phone"]) or None
     if not fields:
         return _ok({"object_id": object_id})
 

@@ -547,23 +547,8 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     )
                     append_message(chat_id, "user", user_text)
                     append_message(chat_id, "assistant", trial_reply)
-                    send_text_message(phone_number_id, sender_id, trial_reply)
+                    send_text_message(channel, sender_id, trial_reply)
                     return
-
-            intent, lang = route_incoming_message(
-                history, user_text, TRIAL_INTENT_PROMPT, SELECT_TRIAL_INTENT_LLM,
-            )
-            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s", intent, lang)
-
-            if intent in ('trial_new', 'trial_continue'):
-                extracted = extract_trial_details(history, user_text)
-                logger.info("[TRIAL] Data Extracted: %s", extracted)
-                handler = LlmTrialFlowHandler(bot_name)
-                reply = handler.handle(extracted, chat_id, user_text, sender_id, lang)
-                append_message(chat_id, "user", user_text)
-                append_message(chat_id, "assistant", trial_reply)
-                send_text_message(channel, sender_id, trial_reply)
-                return
 
             if is_trial_greeting(user_text):
                 handle_reply = (
@@ -631,6 +616,20 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)
                 return
+
+            if trial_intent == "question_schedule":
+                # A factual "what's on Wednesday and Thursday" lookup, answered
+                # with the real schedule regardless of whether a signup is in
+                # progress. Only handled here when a weekday was actually named
+                # — otherwise this falls through to RAG/LLM exactly as before.
+                weekdays = trial.parse_weekdays(user_text)
+                if weekdays:
+                    classes = trial.list_classes_by_weekday(bot_config["name"], weekdays)
+                    handle_reply = trial.format_weekday_schedule(classes, trial_lang)
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", handle_reply)
+                    send_text_message(channel, sender_id, handle_reply)
+                    return
 
             if trial_intent in ("trial_new", "trial_continue"):
                 handle_reply = LlmTrialFlowHandler().handle(
