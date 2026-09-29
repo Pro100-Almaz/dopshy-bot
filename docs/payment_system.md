@@ -96,8 +96,10 @@ transfers uniformly.
 avans) — used for display and as the receipt-validation floor context:
 
 - `calculate_booking_price()` — time-of-day tiered pricing
-  (`morning_day`/`evening`/`late_night`/`after_midnight`) or a flat
-  weekend/holiday rate, per format (`5x5`/`6x6`), sourced from `pricing_repo`.
+  (`morning_day`/`evening`/`late_night`/`after_midnight`), per format
+  (`5x5`/`6x6`), sourced from `pricing_repo`. On Mon–Fri, 12:00–16:00 and
+  18:30–20:00 are charged at `weekday_special` instead; weekends use the
+  ordinary periods (there is no weekend/holiday rate).
 - `calculate_full_booking_price()` — handles midnight-crossing bookings by
   summing two segments.
 - The avans (`PAYMENT_MIN` / `APIPAY_AVANS_PER_BOOKING`, both 10 000 ₸ by
