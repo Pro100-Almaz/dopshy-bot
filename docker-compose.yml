@@ -59,7 +59,7 @@ services:
       - shared
 
   # Single edge proxy for the whole server: terminates TLS and routes by
-  # domain — ${SERVER_NAME} → bot:5000, ${API_SERVER_NAME} → backend_app:8002.
+  # domain — ${SERVER_NAME} → bot:5000, ${API_SERVER_NAME} → backend_app:8000.
   # The backend runs in a separate compose project reachable over `shared`.
   nginx:
     build: ./nginx

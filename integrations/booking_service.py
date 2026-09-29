@@ -125,7 +125,8 @@ def _return_discount_use(cur, discount_id: int) -> None:
     cur.execute(
         """UPDATE discounts
               SET usages_left = LEAST(usage_limit, usages_left + 1),
-                  is_active = CASE WHEN status = 'approved' THEN TRUE ELSE FALSE END,
+                  -- Reactivate only if it ran out of uses; keep a manager's deactivation.
+                  is_active = (status = 'approved' AND (is_active OR usages_left = 0)),
                   updated_at = NOW()
             WHERE id = %s""",
         (discount_id,),

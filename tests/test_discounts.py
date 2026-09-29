@@ -86,6 +86,39 @@ def test_approved_discount_applies_price_and_deactivates_at_zero():
     assert used["is_active"] is False
 
 
+def test_removing_discount_keeps_manager_deactivation():
+    customer = _customer()
+    discount = _discount(customer["id"])
+    created = booking_service.manager_create_booking(
+        field=1, date="2027-06-04", end_date="2027-06-04",
+        time_start="10:00", time_end="11:00", phone="77071112233",
+        discount_id=discount["id"],
+    )
+    customer_discount_repo.update_discount(discount["id"], is_active=False)
+
+    booking_service.manager_update_booking(created["data"]["booking_id"], discount_id=None)
+
+    returned = customer_discount_repo.get_discount(discount["id"])
+    assert returned["usages_left"] == 5
+    assert returned["is_active"] is False
+
+
+def test_removing_discount_reactivates_exhausted_one():
+    customer = _customer()
+    discount = _discount(customer["id"], usage_limit=1)
+    created = booking_service.manager_create_booking(
+        field=1, date="2027-06-05", end_date="2027-06-05",
+        time_start="10:00", time_end="11:00", phone="77071112233",
+        discount_id=discount["id"],
+    )
+
+    booking_service.manager_update_booking(created["data"]["booking_id"], discount_id=None)
+
+    returned = customer_discount_repo.get_discount(discount["id"])
+    assert returned["usages_left"] == 1
+    assert returned["is_active"] is True
+
+
 def test_discount_must_match_booking_customer():
     customer = _customer()
     discount = _discount(customer["id"])

@@ -30,13 +30,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Apply database migrations on startup (idempotent; no-op if already up to date)
+# Apply database migrations on startup (idempotent; no-op if already up to date).
+# A failure must stop the boot: serving on a stale schema breaks every query that
+# touches the new columns. Docker's restart policy retries until it is fixed.
 if config.POSTGRES_DSN:
-    try:
-        from scripts.migrate import migrate as _pg_migrate
-        _pg_migrate()
-    except Exception as _e:
-        logger.warning("PostgreSQL migrations skipped: %s", _e)
+    from scripts.migrate import migrate as _pg_migrate
+    _pg_migrate()
 
 app = Flask(__name__)
 

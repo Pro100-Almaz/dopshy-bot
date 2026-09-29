@@ -20,6 +20,8 @@ import config  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+_LOCK_ID = 5_342_001  # arbitrary app-wide key for pg_advisory_lock
+
 _MIGRATIONS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations"
 )
@@ -87,6 +89,9 @@ def migrate() -> None:
     conn = psycopg2.connect(config.POSTGRES_DSN)
     try:
         with conn.cursor() as cur:
+            # Every gunicorn worker imports app.py and migrates; serialize them so
+            # two workers never apply the same file at once. Released on close.
+            cur.execute("SELECT pg_advisory_lock(%s)", (_LOCK_ID,))
             done = _applied(cur)
         conn.commit()
 

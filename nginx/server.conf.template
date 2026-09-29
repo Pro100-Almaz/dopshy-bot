@@ -1,6 +1,6 @@
 # Single edge proxy for the whole server. Terminates TLS and routes by domain:
 #   ${SERVER_NAME}      → bot:5000          (WhatsApp bot, same compose project)
-#   ${API_SERVER_NAME}  → backend_app:8002  (backend, separate compose project)
+#   ${API_SERVER_NAME}  → backend_app:8000  (backend, separate compose project)
 # Rendered from this template by entrypoint.sh (envsubst) once both certs exist.
 
 # ── Bot (WhatsApp) — ${SERVER_NAME} ─────────────────────────────────────────
