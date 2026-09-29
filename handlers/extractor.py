@@ -5,9 +5,10 @@ import config
 from chat.system_prompts.sp_1 import get_data_extract_prompt
 from chat.system_prompts.sp_academy import get_trial_data_extract_prompt
 from chat.tools.arena_tools import EXTRACT_DATA_LLM
-from chat.tools.academy_tools import EXTRACT_TRIAL_DATA_LLM
+from chat.tools.academy_tools import EXTRACT_TRIAL_DATA_LEGACY_LLM
 
 from chat.openai_client import client
+from utils import closest_named_weekday_date
 
 
 def _extract(prompt: str, tool: dict, empty: Dict[str, Any],
@@ -52,7 +53,7 @@ def _extract(prompt: str, tool: dict, empty: Dict[str, Any],
 
 def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Dict[str, Any]:
     """Extract the 6 booking parameters from the conversation (arena, Bot 1)."""
-    return _extract(
+    result = _extract(
         get_data_extract_prompt(),
         EXTRACT_DATA_LLM,
         {
@@ -65,6 +66,10 @@ def extract_booking_details(history: List[Dict[str, str]], user_text: str) -> Di
         },
         history, user_text, "extract_booking_details",
     )
+    weekday_date = closest_named_weekday_date(user_text)
+    if weekday_date and not result.get("date"):
+        result["date"] = weekday_date.isoformat()
+    return result
 
 
 def extract_trial_details(history: List[Dict[str, str]], user_text: str) -> Dict[str, Any]:
@@ -73,9 +78,9 @@ def extract_trial_details(history: List[Dict[str, str]], user_text: str) -> Dict
     No time_end and no group: the class the parent picks supplies both, so the
     flow derives them from (date, time_start) rather than extracting them.
     """
-    return _extract(
+    result = _extract(
         get_trial_data_extract_prompt(),
-        EXTRACT_TRIAL_DATA_LLM,
+        EXTRACT_TRIAL_DATA_LEGACY_LLM,
         {
             "date": None,
             "time_start": None,
@@ -84,3 +89,7 @@ def extract_trial_details(history: List[Dict[str, str]], user_text: str) -> Dict
         },
         history, user_text, "extract_trial_details",
     )
+    weekday_date = closest_named_weekday_date(user_text)
+    if weekday_date and not result.get("date"):
+        result["date"] = weekday_date.isoformat()
+    return result

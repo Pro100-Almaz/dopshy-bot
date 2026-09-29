@@ -1,6 +1,7 @@
 """Shared utility helpers for the Dopshy bot."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import re
 from zoneinfo import ZoneInfo
 
 
@@ -15,6 +16,56 @@ def now_almaty() -> datetime:
 def today_almaty() -> date:
     """Return the current date in config.BOOKING_TIMEZONE."""
     return now_almaty().date()
+
+
+# A weekday written by a customer is business data, not something the LLM
+# needs to guess.  Keep the patterns here so arena bookings, academy trials,
+# and step-by-step sessions all use the same RU/KK vocabulary.
+_WEEKDAY_PATTERNS = {
+    0: re.compile(r"\b(?:пн|понедельник\w*|дс|д[үу]йсенб[іи]\w*)\b", re.IGNORECASE),
+    1: re.compile(r"\b(?:вт|вторник\w*|сс|сейсенб[іи]\w*)\b", re.IGNORECASE),
+    2: re.compile(r"\b(?:ср|сред[аеоуы]\w*|с[әа]рсенб[іи]\w*)\b", re.IGNORECASE),
+    3: re.compile(r"\b(?:чт|четверг\w*|бс|бейсенб[іи]\w*)\b", re.IGNORECASE),
+    4: re.compile(r"\b(?:пт|пят|пятниц\w*|жм|ж[ұу]ма\w*)\b", re.IGNORECASE),
+    5: re.compile(r"\b(?:сб|суб|суббот\w*|сенб[іи]\w*)\b", re.IGNORECASE),
+    6: re.compile(r"\b(?:вс|воскр|воскресень\w*|жс|жексенб[іи]\w*)\b", re.IGNORECASE),
+}
+
+
+def parse_weekdays(text: str) -> list[int]:
+    """Return unique weekdays named in Russian or Kazakh text (Monday=0).
+
+    Both full names and common short forms are supported, including Kazakh
+    written without its specific letters. Word boundaries keep aliases such
+    as ``ср`` and ``жм`` from matching inside unrelated words.
+    """
+    value = text or ""
+    return [day for day, pattern in _WEEKDAY_PATTERNS.items() if pattern.search(value)]
+
+
+def closest_weekday_date(weekday: int, today: date | None = None) -> date:
+    """Return the closest occurrence of ``weekday``, including today.
+
+    ``weekday`` follows :meth:`datetime.date.weekday` (Monday=0, Sunday=6).
+    There is no need to build and scan a seven-day list: modulo arithmetic
+    gives the required offset directly.
+    """
+    if not 0 <= weekday <= 6:
+        raise ValueError("weekday must be between 0 (Monday) and 6 (Sunday)")
+    base = today or today_almaty()
+    return base + timedelta(days=(weekday - base.weekday()) % 7)
+
+
+def closest_named_weekday_date(text: str, today: date | None = None) -> date | None:
+    """Resolve a single named weekday in ``text`` to its closest date.
+
+    Multiple different weekdays are intentionally left unresolved because a
+    single booking/trial date cannot represent all of them.
+    """
+    weekdays = parse_weekdays(text)
+    if len(weekdays) != 1:
+        return None
+    return closest_weekday_date(weekdays[0], today=today)
 
 
 _END_OF_DAY = ("23:59", "24:00")

@@ -23,6 +23,9 @@ Registration data is identical to the deterministic flow (trial_session.py):
 date, start/end time, group, child name, child age.
 """
 
+import contextvars
+import functools
+import inspect
 import logging
 import uuid
 
@@ -69,7 +72,7 @@ T = {
     },
     "ask_experience": {
         "ru": "Выберите уровень подготовки:\n1. Начинающий\n2. Средний\n3. Продвинутый",
-        "kk": "Дайындық деңгейін таңдаңыз:\n1. Бастауыш\n2. Орта\n3. Жетілген",
+        "kk": "Дайындық деңгейін таңдаңыз:\n1. Бастапқы\n2. Орта\n3. Жоғары",
     },
     "ask_school_shift": {
         "ru": "Какая школьная смена у ребенка?\n1. Утренняя\n2. Дневная",
@@ -147,11 +150,160 @@ T = {
         "ru": "Данные обновил. Проверьте детали и подтвердите запись.",
         "kk": "Деректер жаңартылды. Мәліметтерді тексеріп, жазылымды растаңыз.",
     },
+    "details_updated": {
+        "ru": "Данные обновил.",
+        "kk": "Деректер жаңартылды.",
+    },
     "slot_no_longer_eligible": {
         "ru": "После изменения данных выбранная группа уже не подходит. Я убрал выбранные дату и время — выберите подходящий вариант заново.",
         "kk": "Деректер өзгергеннен кейін таңдалған топ сәйкес келмейді. Таңдалған күн мен уақытты алып тастадым — қолайлы нұсқаны қайта таңдаңыз.",
     },
 }
+
+# Warmer wording for the boxing bot. Keys missing here fall back to T, and the
+# football bot keeps T as is. Numbered options, placeholders and the
+# «моя запись» / «перенести запись» keywords must stay in sync with T — the
+# parsers depend on them.
+BOXING_T = {
+    "ask_name": {
+        "ru": "Подскажите, пожалуйста, как зовут ребёнка?",
+        "kk": "Балаңыздың есімі кім, айтып жіберсеңіз?",
+    },
+    "ask_name_self": {
+        "ru": "Подскажите, пожалуйста, как вас зовут?",
+        "kk": "Есіміңіз кім, айтып жіберсеңіз?",
+    },
+    "birth_year_invalid": {
+        "ru": "К сожалению, {year} год рождения нам не подходит. Мы принимаем детей от {min_age} до {max_age} лет. "
+              "Подскажите, пожалуйста, год рождения ребёнка — например, *2016*.",
+        "kk": "Өкінішке қарай, {year} туған жыл сәйкес келмейді. Біз {min_age} мен {max_age} жас аралығындағы балаларды қабылдаймыз. "
+              "Балаңыздың туған жылын жазып жіберіңізші, мысалы: *2016*.",
+    },
+    "name_too_long": {
+        "ru": "Имя получилось немного длинным. Пожалуйста, напишите его покороче — до {max_len} символов.",
+        "kk": "Есім сәл ұзын болып кетті. {max_len} таңбаға дейін қысқартып жазыңызшы.",
+    },
+    "ask_birth_year": {
+        "ru": "Подскажите, пожалуйста, год рождения ребёнка. Например: *2016*.",
+        "kk": "Балаңыздың туған жылын жазып жіберіңізші. Мысалы: *2016*.",
+    },
+    "ask_experience": {
+        "ru": "Какой у ребёнка уровень подготовки? Выберите, пожалуйста:\n1. Начинающий\n2. Средний\n3. Продвинутый\n\n"
+              "Если ребёнок раньше не занимался боксом — смело выбирайте «Начинающий» 🥊",
+        "kk": "Балаңыздың дайындық деңгейі қандай? Таңдаңызшы:\n1. Бастапқы\n2. Орта\n3. Жоғары\n\n"
+              "Егер бала бұрын бокспен айналыспаса — «Бастапқы» деңгейін таңдаңыз 🥊",
+    },
+    "ask_school_shift": {
+        "ru": "В какую смену ребёнок учится в школе? Так мы подберём удобное время.\n1. Утренняя\n2. Дневная",
+        "kk": "Балаңыз мектепте қай ауысымда оқиды? Ыңғайлы уақытты таңдау үшін керек.\n1. Таңғы\n2. Түскі",
+    },
+    "no_groups": {
+        "ru": "К сожалению, сейчас подходящей группы не нашлось. Но не переживайте — администратор с радостью поможет подобрать вариант.",
+        "kk": "Өкінішке қарай, қазір сәйкес топ табылмады. Бірақ уайымдамаңыз — әкімші қолайлы нұсқаны таңдауға көмектеседі.",
+    },
+    "no_groups_call_admin": {
+        "ru": "К сожалению, сейчас подходящей группы не нашлось. Пожалуйста, позвоните нашему администратору по номеру +7 700 555 6000 — там с радостью помогут!",
+        "kk": "Өкінішке қарай, қазір сәйкес топ табылмады. Әкімшімізге +7 700 555 6000 нөміріне қоңырау шалыңызшы — міндетті түрде көмектеседі!",
+    },
+    "preferred_unavailable": {
+        "ru": "К сожалению, в это время подходящей группы нет. Вот что можем предложить — выберите, пожалуйста, удобный вариант:",
+        "kk": "Өкінішке қарай, бұл уақытта сәйкес топ жоқ. Мына нұсқалардың бірін таңдаңызшы:",
+    },
+    "fallback_offer": {
+        "ru": "Группы уровня {requested} сейчас, к сожалению, нет.\nЗато есть группа уровнем ниже — {offered}, по возрасту и времени подходит.\nЗаписать ребёнка на пробное туда?",
+        "kk": "Өкінішке қарай, қазір {requested} деңгейіндегі топ жоқ.\nБірақ бір деңгей төмен {offered} тобы бар, жасы мен уақыты сәйкес келеді.\nСынақ сабағына сол топқа жазайын ба?",
+    },
+    "fallback_declined": {
+        "ru": "Хорошо, понимаю. Администратор поможет подобрать подходящую группу.",
+        "kk": "Жақсы, түсіндім. Әкімші сәйкес топты таңдауға көмектеседі.",
+    },
+    "choose_slot": {
+        "ru": "Вот группы на {date}. Выберите, пожалуйста, удобную:",
+        "kk": "{date} күнгі топтар. Ыңғайлысын таңдаңызшы:",
+    },
+    "slot_invalid": {
+        "ru": "Пожалуйста, отправьте номер варианта из списка.",
+        "kk": "Тізімдегі нұсқаның нөмірін жіберіңізші.",
+    },
+    "choose_day": {
+        "ru": "На какой день вам удобно записаться на пробное занятие?",
+        "kk": "Сынақ сабағына қай күн сізге ыңғайлы?",
+    },
+    "day_invalid": {
+        "ru": "Пожалуйста, отправьте номер даты из списка или просто напишите день недели.",
+        "kk": "Тізімдегі күн нөмірін немесе апта күнін жазып жіберіңізші.",
+    },
+    "confirm": {
+        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
+        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
+    },
+    "confirmed": {
+        "ru": "Готово, вы записаны на пробное занятие! 🎉 Будем очень рады вас видеть!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n\n"
+              "Если появятся вопросы — пишите, мы всегда на связи.",
+        "kk": "Дайын, сынақ сабағына жазылдыңыз! 🎉 Сізді асыға күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {name}\n\n"
+              "Сұрақтарыңыз болса — жазыңыз, біз әрқашан байланыстамыз.",
+    },
+    "declined": {
+        "ru": "Хорошо, запись отменена. Если захотите записаться снова — просто напишите, будем рады!",
+        "kk": "Жақсы, жазылым тоқтатылды. Қайта жазылғыңыз келсе — жазыңыз, қуана күтеміз!",
+    },
+    "reached_limits": {
+        "ru": (
+            "Похоже, по этому номеру пробное занятие уже было использовано. "
+            "Если, по-вашему, это ошибка — администратор с радостью всё проверит."
+        ),
+        "kk": (
+            "Бұл нөмір бойынша сынақ сабағы бұрын қолданылған сияқты. "
+            "Егер бұл қате деп ойласаңыз — әкімші бәрін тексеріп береді."
+        ),
+    },
+    "has_active_trial": {
+        "ru": (
+            "У вас уже есть запись на пробное занятие. "
+            "Если хотите уточнить дату или перенести её, напишите: «моя запись» или «перенести запись»."
+        ),
+        "kk": (
+            "Сізде сынақ сабағына жазылым бар. "
+            "Күнін білгіңіз немесе ауыстырғыңыз келсе: «менің жазылымым» немесе «жазылымды ауыстыру» деп жазыңыз."
+        ),
+    },
+    "details_updated_confirm": {
+        "ru": "Спасибо, данные обновлены! Проверьте, пожалуйста, детали и подтвердите запись.",
+        "kk": "Рахмет, деректер жаңартылды! Мәліметтерді тексеріп, жазылымды растаңызшы.",
+    },
+    "details_updated": {
+        "ru": "Спасибо, данные обновлены!",
+        "kk": "Рахмет, деректер жаңартылды!",
+    },
+    "slot_no_longer_eligible": {
+        "ru": "После изменения данных выбранная группа, к сожалению, уже не подходит. Дату и время пришлось сбросить — выберите, пожалуйста, подходящий вариант заново.",
+        "kk": "Деректер өзгергеннен кейін таңдалған топ, өкінішке қарай, сәйкес келмейді. Күн мен уақытты алып тастадым — қолайлы нұсқаны қайта таңдаңызшы.",
+    },
+}
+
+_BOT_TEXTS = {"dopsy_boxing": BOXING_T}
+
+# The bot whose flow is running. Set by the handler entry points (_bot_scoped)
+# so _loc can pick per-bot wording without threading bot_name through every
+# helper.
+_current_bot: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "trial_flow_bot", default=None,
+)
+
+
+def _bot_scoped(method):
+    signature = inspect.signature(method)
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        bot_name = signature.bind(*args, **kwargs).arguments.get("bot_name")
+        token = _current_bot.set(bot_name)
+        try:
+            return method(*args, **kwargs)
+        finally:
+            _current_bot.reset(token)
+
+    return wrapper
 
 WEEKDAY = {
     "ru": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
@@ -164,6 +316,8 @@ _EXPERIENCE_ALIASES = {
     "новичок": "Beginner",
     "начальный": "Beginner",
     "бастапқы": "Beginner",
+    "бастауыш": "Beginner",
+    "бастаушы": "Beginner",
     "2": "Intermediate",
     "intermediate": "Intermediate",
     "средний": "Intermediate",
@@ -172,6 +326,7 @@ _EXPERIENCE_ALIASES = {
     "advanced": "Advanced",
     "продвинутый": "Advanced",
     "жоғары": "Advanced",
+    "жетілген": "Advanced",
 }
 LEVEL_LABELS = {
     "ru": {
@@ -287,10 +442,15 @@ def _reasoned_fallback(
         logger.exception("[TRIAL] RAG lookup failed in reasoned fallback")
         context = ""
 
+    answer_style = (
+        "Тепло и дружелюбно, но по существу ответь"
+        if bot_name == "dopsy_boxing"
+        else "Кратко ответь по существу"
+    )
     hint = (
         "Пользователь сейчас в процессе записи на пробное занятие и написал "
         "что-то, что не является ни значением для текущего вопроса, ни "
-        "подтверждением/отменой записи. Кратко ответь по существу на его "
+        f"подтверждением/отменой записи. {answer_style} на его "
         "вопрос или возражение, используя базу знаний, если она относится к "
         "теме; если базы знаний недостаточно, вежливо скажи, что уточнишь у "
         "администратора. Не подтверждай и не отменяй запись сам."
@@ -353,10 +513,35 @@ _SELF_SIGNUP_RE = re.compile(
     r"\b(?:мне|я\s+хочу|хочу\s+записаться|хочу\s+заниматься|маған|өзім)\b",
     re.IGNORECASE,
 )
+# A parent also says «мне/маған» ("маған баламды жаздыру керек"), so a child
+# mentioned in the same message overrides the self-signup markers above.
+# "сын" is matched by exact forms only — «сынақ» is Kazakh for "trial".
+_CHILD_SUBJECT_RE = re.compile(
+    r"\b(?:реб[её]н\w*|дет(?:и|ей|ям|ьми)|сын(?:а|у|ом|ок|ка|ишка|овей|овья)?|доч\w*|"
+    r"внук\w*|внучк\w*|бала\w*|ұлым\w*|қызым\w*|немере\w*)\b",
+    re.IGNORECASE,
+)
+# Lead-ins around a name in a reply to "what's the name?" — «менің атым Айдос»,
+# «меня зовут Айдос», «баламның аты Айдос», «Айдос менің атым».
+_NAME_LEAD_RE = re.compile(
+    r"^(?:(?:менің|меним)\s+(?:атым|есімім|есимим)|атым|есімім|есимим|"
+    r"(?:баламның|балаңыздың|ұлымның|қызымның)\s+(?:аты|есімі)|"
+    r"(?:меня|его|её|ее|сына|дочь|дочку|реб[её]нка)\s+зовут|"
+    r"(?:мо[её]|его|её|ее)\s+имя|я|мен)\s+",
+    re.IGNORECASE,
+)
+_NAME_TAIL_RE = re.compile(
+    r"\s+(?:(?:менің\s+)?(?:атым|есімім)|меня\s+зовут|(?:баламның\s+)?аты)$",
+    re.IGNORECASE,
+)
+# «Мен Айдоспын» — the first-person copula suffix after «мен».
+_KK_COPULA_RE = re.compile(r"^(\w{2,}?)(?:пын|бын|мын|пін|бін|мін)$", re.IGNORECASE)
 
 
 def _loc(lang: str, key: str, **fmt) -> str:
-    text = T[key].get(lang) or T[key]["ru"]
+    table = _BOT_TEXTS.get(_current_bot.get(), {})
+    entry = table.get(key) or T[key]
+    text = entry.get(lang) or entry["ru"]
     return text.format(**fmt) if fmt else text
 
 
@@ -374,7 +559,22 @@ def _birth_year_from_age(text: str, today: date | None = None) -> int | None:
 
 
 def _signup_actor(text: str | None) -> str | None:
-    return "self" if _SELF_SIGNUP_RE.search(text or "") else None
+    text = text or ""
+    if _CHILD_SUBJECT_RE.search(text):
+        return None
+    return "self" if _SELF_SIGNUP_RE.search(text) else None
+
+
+def _strip_name_lead(text: str) -> str:
+    """«менің атым Айдос» / «меня зовут Айдос» / «Мен Айдоспын» -> «Айдос»."""
+    value = (text or "").strip().strip(".,!;")
+    stripped = _NAME_LEAD_RE.sub("", value, count=1)
+    if stripped != value and value.lower().startswith("мен ") and " " not in stripped:
+        match = _KK_COPULA_RE.match(stripped)
+        if match:
+            stripped = match.group(1)
+    stripped = _NAME_TAIL_RE.sub("", stripped)
+    return stripped.strip().strip(".,!;") or value
 
 
 def _is_my_trial_query(text: str) -> bool:
@@ -408,6 +608,59 @@ def _extract_user_data(
 
 def _filled_patch(data: dict) -> dict:
     return {key: value for key, value in (data or {}).items() if value not in (None, "")}
+
+
+# Intake fields that decide which groups are eligible. Only a real change to
+# one of these invalidates the offered slot list.
+_SLOT_FIELDS = ("child_birth_year", "experience", "school_shift")
+
+
+# Session states owned by LlmTrialFlowHandler (see handle_session_turn).
+LLM_FLOW_STATES = (
+    "trial_intake", "trial_select_day", "trial_select_slot",
+    "trial_fallback_offer", "trial_confirm",
+)
+_WEEKDAY_FILLER = {"в", "во", "на"}
+
+
+def _words(text: str | None) -> list[str]:
+    return re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
+
+
+def _is_bare_yes_no(text: str) -> bool:
+    """The whole message is a yes/no — "да, а сколько стоит?" is not."""
+    return " ".join(_words(text)) in _YES | _NO
+
+
+def _offered_weekday(text: str, dates: list) -> bool:
+    """The message is just a weekday ("среда", "в среду") that is on offer."""
+    words = [w for w in _words(text) if w not in _WEEKDAY_FILLER]
+    if len(words) != 1:
+        return False
+    weekdays = trial_logic.parse_weekdays(words[0])
+    return len(weekdays) == 1 and any(
+        datetime.strptime(str(d), "%Y-%m-%d").weekday() == weekdays[0] for d in dates
+    )
+
+
+def _is_clean_value(field: str, text: str) -> bool:
+    """The message is a usable value for the intake field and nothing else."""
+    if "?" in text or is_factual_question(text):
+        return False
+    return _normalize_manual_value(field, text) is not None
+
+
+def _asks_other_day(patch: dict, chosen_date, user_text: str) -> bool:
+    """True when the client asks to move to a different day ("давайте в пятницу").
+
+    A question that merely names a day ("а что в пятницу у Ерлана?") also
+    yields a preferred_date, so questions are excluded — they are answered by
+    the reasoned fallback without dropping the chosen day.
+    """
+    preferred = patch.get("preferred_date")
+    if not preferred or str(preferred) == str(chosen_date):
+        return False
+    return "?" not in user_text and not is_factual_question(user_text)
 
 
 def _match_day_choice(user_text: str, history: list, dates: list) -> object | None:
@@ -446,11 +699,11 @@ def _normalize_manual_value(field: str, text: str):
         exact = _EXPERIENCE_ALIASES.get(low)
         if exact:
             return exact
-        if "начина" in low or "нович" in low or "бастап" in low:
+        if "начина" in low or "нович" in low or "бастап" in low or "бастау" in low:
             return "Beginner"
         if "средн" in low or "орта" in low:
             return "Intermediate"
-        if "продвин" in low or "жоғары" in low:
+        if "продвин" in low or "жоғары" in low or "жетілген" in low:
             return "Advanced"
         return None
     if field == "school_shift":
@@ -466,9 +719,10 @@ def _normalize_manual_value(field: str, text: str):
         years = [int(part) for part in low.replace(",", " ").split() if part.isdigit() and len(part) == 4]
         return years[-1] if years else None
     if field == "child_name":
-        if not _is_plausible_child_name(text):
+        name = _strip_name_lead(text)
+        if not _is_plausible_child_name(name):
             return None
-        return text.strip() or None
+        return name or None
     return None
 
 
@@ -789,6 +1043,71 @@ def _confirmation(draft: dict, lang: str) -> str:
 
 
 class LlmTrialFlowHandler:
+    @_bot_scoped
+    def try_fast_path(
+        self,
+        chat_id: str,
+        sender_phone: str,
+        bot_name: str,
+        user_text: str,
+        history: list,
+        session: dict,
+    ) -> str | None:
+        """Handle a message that plainly answers the pending step, without the
+        intent router. Returns None when the message needs routing.
+        """
+        state = session["state"]
+        params = session["params"]
+        text = (user_text or "").strip()
+        interrupt = _session_interrupt_response(params.get("lang", "ru"), text) is not None
+
+        if state == "trial_intake":
+            field = params.get("waiting_for")
+            plain = interrupt or bool(field and _is_clean_value(field, text))
+        elif state == "trial_select_day":
+            plain = interrupt or text.isdigit() or _offered_weekday(text, params.get("dates") or [])
+        elif state == "trial_select_slot":
+            plain = interrupt or text.isdigit()
+        elif state in ("trial_confirm", "trial_fallback_offer"):
+            plain = _is_bare_yes_no(text)
+        else:
+            plain = False
+
+        if not plain:
+            return None
+        logger.info("[TRIAL] Fast path: state=%s chat_id=%s", state, chat_id)
+        return self.handle_session_turn(chat_id, sender_phone, bot_name, user_text, history, session)
+
+    @_bot_scoped
+    def pending_prompt(self, bot_name: str, session: dict) -> str:
+        """The question the flow is waiting on, re-shown after a side answer."""
+        state = session["state"]
+        params = session["params"]
+        lang = params.get("lang", "ru")
+
+        if state == "trial_intake":
+            field = params.get("waiting_for")
+            return _ask_missing(lang, field, params.get("signup_actor")) if field else ""
+        if state == "trial_select_day":
+            dates = params.get("dates") or []
+            return f"{_loc(lang, 'choose_day')}\n\n{_day_lines(dates, lang)}"
+        if state == "trial_select_slot":
+            chosen_date = params.get("chosen_date")
+            header = (_loc(lang, "choose_slot", date=_fmt_date(chosen_date, lang))
+                      if chosen_date else _loc(lang, "choose_day"))
+            return f"{header}\n\n{_group_lines_for_day(params.get('slots') or [], lang)}"
+        if state == "trial_fallback_offer":
+            return _loc(
+                lang, "fallback_offer",
+                requested=_level_label(params.get("requested_level"), lang),
+                offered=_level_label(params.get("offered_level"), lang),
+            )
+        if state == "trial_confirm":
+            draft = academy_repo.get_trial(params.get("trial_id"))
+            return _confirmation(draft, lang) if draft and draft.get("trial_day") else ""
+        return ""
+
+    @_bot_scoped
     def handle(
         self,
         chat_id: str,
@@ -889,6 +1208,7 @@ class LlmTrialFlowHandler:
             )
         return reply
 
+    @_bot_scoped
     def _continue_from_draft(
         self,
         chat_id: str,
@@ -1035,6 +1355,7 @@ class LlmTrialFlowHandler:
         draft = result["data"]["trial"]
         return _confirmation(draft, lang)
 
+    @_bot_scoped
     def handle_session_turn(
         self,
         chat_id: str,
@@ -1105,29 +1426,47 @@ class LlmTrialFlowHandler:
                 draft = academy_repo.get_trial(trial_id)
                 return self._assign_slot_and_confirm(chat_id, bot_name, draft, slots[idx], lang)
 
-            patch = _filled_patch(_extract_user_data(history, user_text))
-            if not patch:
-                _log_rejected("slot_choice", "not_a_number", user_text, trial_id=trial_id)
-                reminder = f"{header}\n\n{_group_lines_for_day(slots, lang)}"
-                return _reasoned_fallback(bot_name, lang, user_text, reminder)
+            reminder = f"{header}\n\n{_group_lines_for_day(slots, lang)}"
+            # The extractor reads the whole conversation, so facts the client
+            # gave earlier come back on every turn. Only values that differ
+            # from the stored draft count as an edit — otherwise a side
+            # question would wipe the chosen day and restart day selection.
+            patch = _real_changes(
+                _filled_patch(_extract_user_data(history, user_text)),
+                academy_repo.get_trial(trial_id),
+            )
+            slot_change = any(field in patch for field in _SLOT_FIELDS)
 
-            result = trial_service.update_intake(
-                bot_name,
-                trial_id,
-                {
-                    **patch,
-                    "trial_day": None,
-                    "start_time": None,
-                    "end_time": None,
-                    "group_id": None,
-                    "language": lang,
-                },
-            )
-            if not result["ok"]:
-                return result.get("message") or _loc(lang, "no_groups")
-            return self._continue_from_draft(
-                chat_id, bot_name, result["data"]["trial"], lang, params.get("signup_actor")
-            )
+            if slot_change or _asks_other_day(patch, chosen_date, user_text):
+                result = trial_service.update_intake(
+                    bot_name,
+                    trial_id,
+                    {
+                        **patch,
+                        "trial_day": None,
+                        "start_time": None,
+                        "end_time": None,
+                        "group_id": None,
+                        "language": lang,
+                    },
+                )
+                if not result["ok"]:
+                    return result.get("message") or _loc(lang, "no_groups")
+                return self._continue_from_draft(
+                    chat_id, bot_name, result["data"]["trial"], lang, params.get("signup_actor")
+                )
+
+            # A new name doesn't change which groups fit — keep the list.
+            if patch.get("child_name"):
+                result = trial_service.update_intake(
+                    bot_name, trial_id, {"child_name": patch["child_name"], "language": lang},
+                )
+                if not result["ok"]:
+                    return result.get("message") or reminder
+                return f"{_loc(lang, 'details_updated')}\n\n{reminder}"
+
+            _log_rejected("slot_choice", "not_a_number", user_text, trial_id=trial_id)
+            return _reasoned_fallback(bot_name, lang, user_text, reminder)
 
         if state == "trial_fallback_offer":
             decision = _confirm_decision(user_text) or ""

@@ -92,7 +92,13 @@ EXTRACT_TRIAL_DATA_LLM = {
                     "description": (
                         "Child's name. Null unless explicitly provided as a plausible name. "
                         "Never use questions, greetings, acknowledgements, commands, or "
-                        "whole sentences as a name."
+                        "whole sentences as a name. This is the STUDENT's name. If the writer is a "
+                        "parent signing up a child and gives THEIR OWN name ('меня зовут Айгуль', "
+                        "'менің атым Махамбет, баламды жаздырғым келеді'), return null. But if the "
+                        "writer is the student signing up themselves — they give their own age "
+                        "('мне 12 лет', 'маған 12 жас'), say 'сам/сама/өзім', or answer the assistant's "
+                        "'как вас зовут / есіміңіз кім' — their own name IS the student's name. "
+                        "Return only the name itself ('менің атым Айдос' -> 'Айдос')."
                     ),
                 },
                 "child_birth_year": {
@@ -107,8 +113,8 @@ EXTRACT_TRIAL_DATA_LLM = {
                     "type": ["string", "null"],
                     "enum": ["Beginner", "Intermediate", "Advanced", None],
                     "description": (
-                        "Training level. Map beginner/новичок/бастапқы to Beginner, "
-                        "intermediate/средний/орта to Intermediate, advanced/продвинутый/жоғары to Advanced."
+                        "Training level. Map beginner/новичок/бастапқы/бастауыш to Beginner, "
+                        "intermediate/средний/орта to Intermediate, advanced/продвинутый/жоғары/жетілген to Advanced."
                     ),
                 },
                 "school_shift": {
@@ -219,9 +225,12 @@ CANCEL_TRIAL_TOOL = {
 # shape here: a trial has no time_end (it comes from the class the parent
 # picks, never from the parent), and the person being registered is not the
 # person writing — hence child_name / child_age rather than name / players.
+#
+# Legacy: used only by handlers/extractor.py. Must not reuse the
+# EXTRACT_TRIAL_DATA_LLM name — that silently shadowed the academy schema above.
 # ---------------------------------------------------------------------------
 
-EXTRACT_TRIAL_DATA_LLM = {
+EXTRACT_TRIAL_DATA_LEGACY_LLM = {
     "type": "function",
     "function": {
         "name": "extract_trial_data",
