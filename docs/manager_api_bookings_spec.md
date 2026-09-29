@@ -117,7 +117,7 @@ id directly.)
 
 ### `PriceRow` — `GET /fields` → `data.prices[]`
 `format_name`:string, `pricing_type`:one of
-`morning_day|evening|late_night|after_midnight|weekend_holiday`, `price_per_hour`:float.
+`morning_day|evening|late_night|after_midnight|weekday_special`, `price_per_hour`:float.
 
 ### `CreatedBooking` — create/batch responses
 `{ "booking_id": int, "status": "ОЖИДАНИЕ" }` (fixed RU label for `awaiting_payment`).

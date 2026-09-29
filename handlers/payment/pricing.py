@@ -1,6 +1,5 @@
 from datetime import date, datetime, time, timedelta
 
-import config
 from handlers.payment.pricing_repo import get_total_field_prices, get_prices_for_format
 
 PRICING_TYPE_LABELS = {
@@ -9,14 +8,14 @@ PRICING_TYPE_LABELS = {
         "evening": "Вечер",
         "late_night": "Поздний вечер",
         "after_midnight": "После полуночи",
-        "weekend_holiday": "Выходные / праздники",
+        "weekday_special": "Будни, спец. тариф",
     },
     "kk": {
         "morning_day": "Таңғы / күндізгі",
         "evening": "Кешкі",
         "late_night": "Кеш түнгі",
         "after_midnight": "Түн ортасынан кейін",
-        "weekend_holiday": "Демалыс / мереке",
+        "weekday_special": "Жұмыс күндері, арнайы тариф",
     },
 }
 
@@ -27,9 +26,9 @@ PRICING_TIME_RANGE = {
     "evening": "18:30 – 22:00",
     "late_night": "22:00 – 00:00",
     "after_midnight": "00:00 – 07:00",
-    "weekend_holiday": {
-        "ru": "весь день",
-        "kk": "күні бойы",
+    "weekday_special": {
+        "ru": "пн–пт 12:00 – 16:00 и 18:30 – 20:00",
+        "kk": "дс–жм 12:00 – 16:00 және 18:30 – 20:00",
     },
 }
 
@@ -39,6 +38,18 @@ PRICING_PERIODS = [
     ("morning_day",    420,  1110),  # 07:00 – 18:30
     ("evening",        1110, 1320),  # 18:30 – 22:00
     ("late_night",     1320, 1440),  # 22:00 – 24:00
+]
+
+# Mon–Fri only: PRICING_PERIODS with the weekday_special windows
+# (12:00 – 16:00 and 18:30 – 20:00) cut out of morning_day and evening.
+WEEKDAY_PRICING_PERIODS = [
+    ("after_midnight",  0,    420),   # 00:00 – 07:00
+    ("morning_day",     420,  720),   # 07:00 – 12:00
+    ("weekday_special", 720,  960),   # 12:00 – 16:00
+    ("morning_day",     960,  1110),  # 16:00 – 18:30
+    ("weekday_special", 1110, 1200),  # 18:30 – 20:00
+    ("evening",         1200, 1320),  # 20:00 – 22:00
+    ("late_night",      1320, 1440),  # 22:00 – 24:00
 ]
 
 
@@ -70,11 +81,8 @@ def _to_date(d) -> date:
     return datetime.strptime(str(d), "%Y-%m-%d").date()
 
 
-def _is_weekend_or_holiday(d) -> bool:
-    d = _to_date(d)
-    if d.weekday() in (5, 6):
-        return True
-    return d in config.HOLIDAYS
+def _is_weekday(d) -> bool:
+    return _to_date(d).weekday() < 5
 
 
 def calculate_booking_price(format_name: str, booking_date,
@@ -91,12 +99,10 @@ def calculate_booking_price(format_name: str, booking_date,
     if end_min < start_min:
         end_min = 1440
 
-    if _is_weekend_or_holiday(booking_date):
-        duration_hours = (end_min - start_min) / 60.0
-        return round(duration_hours * prices.get("weekend_holiday", 0), 2)
+    periods = WEEKDAY_PRICING_PERIODS if _is_weekday(booking_date) else PRICING_PERIODS
 
     total = 0.0
-    for period_type, period_start, period_end in PRICING_PERIODS:
+    for period_type, period_start, period_end in periods:
         overlap = max(0, min(end_min, period_end) - max(start_min, period_start))
         if overlap > 0:
             total += (overlap / 60.0) * prices.get(period_type, 0)
