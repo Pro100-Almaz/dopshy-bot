@@ -11,6 +11,7 @@ import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify, abort
+from werkzeug.exceptions import HTTPException
 from flask_cors import CORS
 
 import config
@@ -38,6 +39,23 @@ if config.POSTGRES_DSN:
         logger.warning("PostgreSQL migrations skipped: %s", _e)
 
 app = Flask(__name__)
+
+
+@app.errorhandler(HTTPException)
+def _json_manager_routing_error(exc: HTTPException):
+    """Return JSON for unmatched/invalid manager API routes.
+
+    Blueprint handlers cannot catch a 404 when Flask never matched a route to
+    that blueprint, so this small app-level guard covers that remaining source
+    of HTML responses without changing webhook/browser behavior elsewhere.
+    """
+    if request.path == "/api/manager" or request.path.startswith("/api/manager/"):
+        return jsonify({
+            "ok": False,
+            "code": exc.name.upper().replace(" ", "_"),
+            "message": exc.description,
+        }), exc.code
+    return exc
 
 # Manager API (Google Apps Script → backend)
 from blueprints.manager_api import manager_api  # noqa: E402

@@ -1,6 +1,7 @@
 """Booking business logic — slot generation, free slots, context formatting."""
 
 import logging
+import re
 from datetime import date, datetime, time, timedelta
 
 from integrations.repo import academy_repo
@@ -9,11 +10,54 @@ from utils import today_almaty
 logger = logging.getLogger(__name__)
 
 _WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_WEEKDAY_KK = ["Дс", "Сс", "Ср", "Бс", "Жм", "Сб", "Жс"]
+_LEVEL_LABELS_RU = {"Beginner": "Начальный", "Intermediate": "Средний", "Advanced": "Продвинутый"}
+_LEVEL_LABELS_KK = {"Beginner": "Бастапқы", "Intermediate": "Орта", "Advanced": "Жоғары"}
 _LEVEL_FALLBACKS = {
     "Advanced": ["Intermediate", "Beginner"],
     "Intermediate": ["Beginner"],
     "Beginner": [],
 }
+
+# Word-boundary patterns, not bare stems: a bare "сред" stem would also match
+# "среди" (among) and "средний" (medium level) — both common in this bot's
+# conversations — so each pattern pins the vowel that actually follows the
+# weekday stem before allowing further suffix letters.
+_WEEKDAY_PATTERNS_RU = {
+    0: re.compile(r"\bпонедельник\w*\b", re.IGNORECASE),
+    1: re.compile(r"\bвторник\w*\b", re.IGNORECASE),
+    2: re.compile(r"\bсред[аеоуы]\w*\b", re.IGNORECASE),
+    3: re.compile(r"\bчетверг\w*\b", re.IGNORECASE),
+    4: re.compile(r"\bпятниц\w*\b", re.IGNORECASE),
+    5: re.compile(r"\bсуббот\w*\b", re.IGNORECASE),
+    6: re.compile(r"\bвоскресень\w*\b", re.IGNORECASE),
+}
+# Every Kazakh weekday name but Friday ends in "-сенбі" (they're literally
+# "Nth-day" compounds), so a plain substring check for Saturday's "сенбі"
+# would also fire on "дүйсенбі"/"сейсенбі"/etc. \b anchors avoid that: since
+# each name is one unbroken word, \b never lands inside it, only around it.
+_WEEKDAY_PATTERNS_KK = {
+    0: re.compile(r"\bдүйсенбі\w*\b", re.IGNORECASE),
+    1: re.compile(r"\bсейсенбі\w*\b", re.IGNORECASE),
+    2: re.compile(r"\bсәрсенбі\w*\b", re.IGNORECASE),
+    3: re.compile(r"\bбейсенбі\w*\b", re.IGNORECASE),
+    4: re.compile(r"\bжұма\w*\b", re.IGNORECASE),
+    5: re.compile(r"\bсенбі\w*\b", re.IGNORECASE),
+    6: re.compile(r"\bжексенбі\w*\b", re.IGNORECASE),
+}
+
+
+def parse_weekdays(text: str) -> list[int]:
+    """Return every weekday (0=Mon..6=Sun) named in `text`, sorted.
+
+    Used for a standalone "which groups train on Wednesday and Thursday"
+    lookup — independent of the extractor's single preferred_weekday field,
+    which only holds one value at a time for the signup flow.
+    """
+    lower = (text or "").lower()
+    found = {day for day, pattern in _WEEKDAY_PATTERNS_RU.items() if pattern.search(lower)}
+    found |= {day for day, pattern in _WEEKDAY_PATTERNS_KK.items() if pattern.search(lower)}
+    return sorted(found)
 
 
 def _parse_time(t: str) -> time:
@@ -59,6 +103,22 @@ def get_trial_daytime(
                 "time_end": end,
             })
     return result
+
+
+def list_classes_by_weekday(bot_name: str, weekdays: list[int]) -> list[dict]:
+    """Every class landing on any of `weekdays` in the next 7 days.
+
+    For a "what trains on Wednesday and Thursday" lookup — a factual
+    schedule question, not a booking eligibility check — so unlike
+    get_eligible_trial_slots this ignores age/experience/shift/capacity and
+    keeps level/trainer so the reply can name them.
+    """
+    result = [
+        {**info, "date": _get_closest_date(info["training_day"])}
+        for info in academy_repo.get_groups_info(bot_name=bot_name)
+        if info["training_day"] in weekdays
+    ]
+    return sorted(result, key=lambda s: (s["date"], s["time_start"]))
 
 
 def get_eligible_trial_slots(
@@ -228,6 +288,41 @@ def format_availability_context(free_windows: list[dict]) -> str:
             )
             field_lines.add(f"{range_str}")
         lines.append(f"  {day_label}:\n" + "\n".join(field_lines))
+    return "\n".join(lines)
+
+
+def format_weekday_schedule(classes: list[dict], lang: str = "ru") -> str:
+    """Render list_classes_by_weekday()'s result as a plain grouped list.
+
+    This is a factual "what's on this day" answer, not a booking-eligibility
+    one — no age/level gating, so it's safe to show even with no draft/intake
+    in progress.
+    """
+    if not classes:
+        return (
+            "На эти дни занятий не нашлось." if lang != "kk"
+            else "Бұл күндерге сабақ табылмады."
+        )
+    weekday_names = _WEEKDAY_KK if lang == "kk" else _WEEKDAY_RU
+    level_labels = _LEVEL_LABELS_KK if lang == "kk" else _LEVEL_LABELS_RU
+
+    by_date: dict[date, list] = {}
+    for c in classes:
+        by_date.setdefault(c["date"], []).append(c)
+
+    lines = []
+    for d in sorted(by_date):
+        lines.append(f"{weekday_names[d.weekday()]} {d.strftime('%d.%m.%Y')}:")
+        for c in sorted(by_date[d], key=lambda x: x["time_start"]):
+            levels = c.get("level") or []
+            if isinstance(levels, str):
+                levels = [levels]
+            level_text = ", ".join(level_labels.get(lv, lv) for lv in levels)
+            name = c.get("group_name") or f"Группа #{c.get('group_id')}"
+            trainer = f" ({c['trainer']})" if c.get("trainer") else ""
+            ts, te = fmt_hhmm(c["time_start"]), fmt_hhmm(c["time_end"])
+            suffix = f" | {level_text}" if level_text else ""
+            lines.append(f"  {name}{trainer} {ts}–{te}{suffix}")
     return "\n".join(lines)
 
 

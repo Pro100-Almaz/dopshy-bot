@@ -123,6 +123,43 @@ def get_booking_reply(
     return response.choices[0].message.content.strip()
 
 
+def get_trial_reply(
+        user_text: str,
+        context: str = "",
+        system_hint: str = "",
+) -> str:
+    """Generate a short natural-language reply for an academy trial-signup
+    conversation that has drifted off the current intake question.
+
+    Used when a message during a gated trial-signup flow is neither a data
+    value, a yes/no, nor a recognized interrupt (greeting/identity/ack) — an
+    objection, a side question, or anything else. The caller appends its own
+    reminder of what's still needed, so this only needs to answer briefly.
+    """
+    system_content = (
+        "Ты — ассистент детской спортивной академии. "
+        "Всегда отвечай на том языке, на котором написал пользователь (русский или казахский). "
+        "Будь кратким (1-2 предложения) и дружелюбным. Не придумывай факты, которых нет в базе знаний. "
+        "ВСЕГДА обращайся на «вы», никогда на «ты», даже если пишут неформально. "
+        "ӘРҚАШАН «сіз» деп қарата сөйле, ешқашан «сен» деп ауыспа."
+    )
+    if system_hint:
+        system_content += f"\n\nИнструкция: {system_hint}"
+    if context:
+        system_content += f"\n\n--- База знаний ---\n{context}\n---"
+
+    response = _client.chat.completions.create(
+        model=config.MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_text},
+        ],
+        temperature=0.4,
+        max_completion_tokens=250,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def route_incoming_message(history: list, user_message: str,
                            prompt: str | None = None,
                            tool: dict | None = None) -> tuple[str, str]:
@@ -189,6 +226,14 @@ def route_trial_message(history: list, user_message: str) -> tuple[str, str]:
         "Use trial_continue only when the user is clearly providing missing signup details "
         "for an already-started child/group trial signup, such as child name, birth year, "
         "experience, school shift, or preferred date/time. "
+        "Use trial_status when the user asks about a signup they already have — e.g. "
+        "'мои занятия', 'какие у меня есть пробные', 'моя запись', 'когда у меня занятие', "
+        "'жазылымым', 'менің сабағым' — this is a lookup, not a new signup, even if the "
+        "wording overlaps with trial_new. "
+        "Use trial_cancel when the user wants to cancel or withdraw an existing signup — "
+        "e.g. 'хочу отменить', 'отмените запись', 'больше не хочу заниматься', 'бас тартамын'. "
+        "Use trial_edit when the user wants to change a detail of an existing signup — "
+        "e.g. 'перенесите на другое время', 'поменяйте дату', 'измените имя ребенка'. "
         "Use human_help when they ask for an administrator or human manager. "
         "Detect Russian as ru and Kazakh as kk."
     )

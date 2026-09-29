@@ -14,6 +14,10 @@ from integrations.sheets.trial_sheets import refresh_all_trials, upsert_trial_ro
 
 logger = logging.getLogger(__name__)
 
+# VARCHAR limits of the academy_trials columns the intake flow writes. A longer
+# value would make the UPDATE fail, so it is refused (and logged) up front.
+TRIAL_TEXT_LIMITS = {"child_name": 30, "phone": 30, "language": 10}
+
 
 def _ok(data: dict | None = None, message: str = "") -> dict:
     return {"ok": True, "code": "OK", "data": data or {}, "message": message}
@@ -36,6 +40,8 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
     # trial lesson is actually taken. The has_active_trial-before-limit ordering
     # introduced on the api_contract_spec branch is preserved there.
     if academy_repo.has_active_trial(bot_name, phone):
+        logger.info("[TRIAL_SERVICE] Draft refused: phone=%s already has an active %s trial",
+                    phone, bot_name)
         return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
 
     result = postgres.create_draft(
@@ -55,6 +61,15 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
 
 
 def update_intake(bot_name: str, trial_id: int, fields: dict) -> dict:
+    for field, max_len in TRIAL_TEXT_LIMITS.items():
+        value = fields.get(field)
+        if isinstance(value, str) and len(value) > max_len:
+            logger.warning(
+                "[TRIAL_SERVICE] Update refused for trial_id=%s: %s is %d chars (max %d) value=%r",
+                trial_id, field, len(value), max_len, value,
+            )
+            return _err("FIELD_TOO_LONG", f"{field} must be at most {max_len} characters.",
+                        {"field": field, "max_len": max_len})
     result = postgres.update_draft(bot_name, trial_id, **fields)
     if not result.get("ok"):
         return result
@@ -95,8 +110,13 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
     if not trial:
         return _err("NOT_FOUND", "Trial not found.")
     if trial.get("state") != "draft":
+        logger.info("[TRIAL_SERVICE] Confirm refused for trial_id=%s: state=%s, expected draft",
+                    trial_id, trial.get("state"))
         return _err("TRIAL_WRONG_STATE", "Trial cannot be confirmed from this state.")
-    if not all(trial.get(k) for k in ("group_id", "trial_day", "start_time", "end_time")):
+    missing_slot = [k for k in ("group_id", "trial_day", "start_time", "end_time") if not trial.get(k)]
+    if missing_slot:
+        logger.info("[TRIAL_SERVICE] Confirm refused for trial_id=%s: slot incomplete, missing %s",
+                    trial_id, ", ".join(missing_slot))
         return _err("INVALID_SLOT", "Trial slot is incomplete.")
 
     # Order matters: a client who already holds a booking must hear that, not
@@ -104,8 +124,12 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
     phone = trial.get("phone")
     if phone:
         if academy_repo.has_active_trial(bot_name, phone):
+            logger.info("[TRIAL_SERVICE] Confirm refused for trial_id=%s: phone=%s already has "
+                        "an active %s trial", trial_id, phone, bot_name)
             return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
         if not academy_repo.check_trial_limits(bot_name, phone):
+            logger.info("[TRIAL_SERVICE] Confirm refused for trial_id=%s: phone=%s reached the "
+                        "%s trial limit", trial_id, phone, bot_name)
             return _err("LIMIT_REACHED", "Trial limit reached.")
 
     if not academy_repo.confirm_trial(trial_id):

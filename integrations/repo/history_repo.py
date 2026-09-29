@@ -105,7 +105,7 @@ def record_history(booking_id: int, source: str,
 # COUNT(*) OVER() window yields the full count in the same round trip.
 # ---------------------------------------------------------------------------
 
-_COLUMNS = "id, booking_id, source, description, created_at"
+_COLUMNS = "id, booking_id, customer_id, discount_id, source, description, created_at"
 
 
 def _fetch(where: str, params: tuple, order: str,

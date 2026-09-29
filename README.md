@@ -180,7 +180,7 @@ poetry run python app.py
 For the test suite (requires a disposable Postgres — tables are truncated between tests):
 
 ```bash
-POSTGRES_DSN=postgresql://dopshy:changeme@localhost:5432/dopshy POSTGRES_MAX_CONN=60 \
+POSTGRES_DSN=postgresql://dopshy:changeme@localhost:5433/dopshy POSTGRES_MAX_CONN=60 \
   poetry run pytest
 ```
 

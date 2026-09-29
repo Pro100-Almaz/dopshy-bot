@@ -5,11 +5,11 @@ contact is paused. The manager UI toggles state through set_bot_paused(); the
 whatsapp.smb.message.echoes webhook flips it automatically (reason='auto') when
 a human agent replies on WhatsApp.
 """
-import re
-
 import psycopg2.extras
 
 from integrations.repo.postgres import _conn
+from integrations.repo.utils import normalize_phone as _normalize_phone_value
+from integrations.repo.utils import phone_variants
 
 
 def _normalize(phone: str | None) -> str:
@@ -20,7 +20,7 @@ def _normalize(phone: str | None) -> str:
     pause table on digits only so a contact paused once stays paused no matter
     which formatting an inbound message arrives with.
     """
-    return re.sub(r"\D", "", phone or "")
+    return _normalize_phone_value(phone)
 
 
 # Public alias — other modules (e.g. the contacts endpoint) normalize phones
@@ -35,9 +35,11 @@ def is_bot_paused(phone: str) -> bool:
         return False
     with _conn() as conn:
         with conn.cursor() as cur:
+            # Rows written before normalization may still hold '+7...'.
             cur.execute(
-                "SELECT paused FROM bot_paused_contacts WHERE phone = %s",
-                (key,),
+                "SELECT paused FROM bot_paused_contacts WHERE phone = ANY(%s) "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (phone_variants(phone),),
             )
             row = cur.fetchone()
     return bool(row and row[0])
@@ -85,17 +87,21 @@ def get_statuses(phones: list[str]) -> dict[str, dict]:
     keys = [k for k in by_key if k]
     if not keys:
         return result
+    candidates = list(dict.fromkeys(v for k in keys for v in phone_variants(k)))
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Oldest first, so the most recently updated row wins when both a
+            # legacy '+7...' and a normalized row exist for the same number.
             cur.execute(
-                "SELECT phone, paused, reason FROM bot_paused_contacts WHERE phone = ANY(%s)",
-                (keys,),
+                "SELECT phone, paused, reason FROM bot_paused_contacts "
+                "WHERE phone = ANY(%s) ORDER BY updated_at",
+                (candidates,),
             )
             for row in cur.fetchall():
                 status = {
                     "paused": bool(row["paused"]),
                     "paused_reason": row["reason"] if row["paused"] else None,
                 }
-                for original in by_key.get(row["phone"], []):
+                for original in by_key.get(_normalize(row["phone"]), []):
                     result[original] = status
     return result

@@ -5,6 +5,7 @@ import psycopg2.extras
 import psycopg2.pool
 
 from integrations.repo.postgres import _conn
+from integrations.repo.utils import normalize_phone, phone_variants
 from utils import today_almaty
 
 '''
@@ -386,13 +387,13 @@ def get_existing_trial_draft(phone: str, bot_name: str) -> dict | None:
                 SELECT t.*
                 FROM academy_trials t
                 LEFT JOIN academy_groups g ON g.id = t.group_id
-                WHERE t.phone = %s
+                WHERE t.phone = ANY(%s)
                   AND t.state = 'draft'
                   AND (t.group_id IS NULL OR g.group_type = %s)
                 ORDER BY t.updated_at DESC, t.id DESC
                 LIMIT 1
                 """,
-                (phone, group_type),
+                (phone_variants(phone), group_type),
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -662,7 +663,7 @@ def create_user(
                 (
                     child_name,
                     child_birth_year,
-                    parent_phone,
+                    normalize_phone(parent_phone) or None,
                     total_trials,
                     assigned_group_id,
                     subscribed,
@@ -691,6 +692,8 @@ def update_user(user_id: int, **patch) -> dict | None:
     for key, value in patch.items():
         if key not in allowed:
             continue
+        if key == "parent_phone":
+            value = normalize_phone(value) or None
         fields.append(f"{key} = %s")
         values.append(value)
 
@@ -730,14 +733,14 @@ def update_user(user_id: int, **patch) -> dict | None:
                         updated_at = NOW()
                     WHERE group_id = %s
                       AND (
-                          phone = %s
+                          phone = ANY(%s)
                           OR lower(child_name) = lower(%s)
                       )
                     """,
                     (
                         user["subscribed"],
                         user["assigned_group_id"],
-                        user["parent_phone"],
+                        phone_variants(user["parent_phone"]),
                         user["child_name"],
                     ),
                 )
@@ -747,7 +750,7 @@ def update_user(user_id: int, **patch) -> dict | None:
 def _identity_clause(alias: str = "u") -> str:
     return f"""
         (
-            ({alias}.parent_phone IS NOT NULL AND {alias}.parent_phone <> '' AND {alias}.parent_phone = %s)
+            ({alias}.parent_phone IS NOT NULL AND {alias}.parent_phone <> '' AND {alias}.parent_phone = ANY(%s))
             OR lower({alias}.child_name) = lower(%s)
         )
     """
@@ -793,7 +796,7 @@ def assign_user_to_group(user_id: int, group_id: int) -> dict | None:
                 ORDER BY u.id
                 LIMIT 1
                 """,
-                (user_id, target_type, user["parent_phone"], user["child_name"]),
+                (user_id, target_type, phone_variants(user["parent_phone"]), user["child_name"]),
             )
             sibling = cur.fetchone()
             if sibling:
@@ -839,7 +842,7 @@ def assign_user_to_group(user_id: int, group_id: int) -> dict | None:
                     (
                         user["child_name"],
                         user["child_birth_year"],
-                        user["parent_phone"],
+                        normalize_phone(user["parent_phone"]) or None,
                         user["total_trials"],
                         group_id,
                         user["subscribed"],
@@ -874,7 +877,7 @@ def deassign_user_from_group(user_id: int, group_type: str | None = None) -> dic
                         ORDER BY u.id
                         LIMIT 1
                         """,
-                        (group_type, user["parent_phone"], user["child_name"]),
+                        (group_type, phone_variants(user["parent_phone"]), user["child_name"]),
                     )
                     sibling = cur.fetchone()
                     if not sibling:
@@ -1226,11 +1229,11 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                       -- `subscribed` on a real student with the same name.
                       AND au.is_test = %s
                       AND (
-                          au.parent_phone = %s
+                          au.parent_phone = ANY(%s)
                           OR lower(au.child_name) = lower(%s)
                       )
                     ORDER BY
-                      CASE WHEN au.parent_phone = %s THEN 0 ELSE 1 END,
+                      CASE WHEN au.parent_phone = ANY(%s) THEN 0 ELSE 1 END,
                       au.id
                     LIMIT 1
                 )
@@ -1239,9 +1242,9 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                     subscribed,
                     trial["group_id"],
                     bool(trial.get("is_test")),
-                    trial["phone"],
+                    phone_variants(trial["phone"]),
                     trial["child_name"],
-                    trial["phone"],
+                    phone_variants(trial["phone"]),
                 )
             )
             matched_user = cur.rowcount > 0
@@ -1262,20 +1265,20 @@ def update_trial_subscribed(trial_id: int, subscribed: bool) -> dict | None:
                     FROM academy_trials
                     WHERE group_id = %s
                       AND (
-                          phone = %s
+                          phone = ANY(%s)
                           OR lower(child_name) = lower(%s)
                       )
                     """,
                     (
                         trial["child_name"],
                         trial["child_birth_year"],
-                        trial["phone"],
+                        normalize_phone(trial["phone"]) or None,
                         trial["group_id"],
                         # Inherit the sandbox flag from the trial, so a test
                         # conversation never creates a production academy user.
                         bool(trial.get("is_test")),
                         trial["group_id"],
-                        trial["phone"],
+                        phone_variants(trial["phone"]),
                         trial["child_name"],
                     )
                 )
@@ -1327,14 +1330,14 @@ def update_user_subscribed(user_id: int, subscribed: bool) -> dict | None:
                     updated_at = NOW()
                 WHERE group_id = %s
                   AND (
-                      phone = %s
+                      phone = ANY(%s)
                       OR lower(child_name) = lower(%s)
                   )
                 """,
                 (
                     subscribed,
                     user["assigned_group_id"],
-                    user["parent_phone"],
+                    phone_variants(user["parent_phone"]),
                     user["child_name"],
                 )
             )
@@ -1514,7 +1517,8 @@ def confirm_trial(trial_id: int) -> bool:
                     updated_at = NOW()
                 RETURNING id
                 """,
-                (trial["child_name"], trial["child_birth_year"], trial["phone"],
+                (trial["child_name"], trial["child_birth_year"],
+                 normalize_phone(trial["phone"]) or None,
                  trial["group_id"], trial["experience"], trial["school_shift"],
                  bool(trial.get("is_test"))),
             )
@@ -1528,23 +1532,61 @@ def confirm_trial(trial_id: int) -> bool:
 
 
 def get_all_active_trials(sender_phone: str, bot_name: str) -> list[dict] | None:
+    """Return at most one row: the client interacts with one trial at a time.
+
+    A confirmed trial whose date has already passed, or a draft that reached
+    slot-selection and whose picked date has passed without being confirmed,
+    is stale — cancel it here rather than show it, so the next signup starts
+    clean instead of resuming (or displaying) a dead row. A draft with no
+    trial_day yet (still mid-intake) has no date to judge staleness by, so it
+    is left alone and simply shown as-is.
+
+    Preference order when both exist: the nearest upcoming confirmed trial,
+    else the single most recently touched draft — never a batch of either.
+    """
     group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
+    phones = phone_variants(sender_phone)
+    today = today_almaty()
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE academy_trials t
+                   SET state = 'cancelled', updated_at = NOW()
+                 WHERE t.phone = ANY(%s)
+                   AND t.state IN ('confirmed', 'draft')
+                   AND t.trial_day IS NOT NULL
+                   AND t.trial_day < %s
+                   AND (
+                        t.group_id IS NULL
+                        OR EXISTS (SELECT 1 FROM academy_groups g
+                                    WHERE g.id = t.group_id AND g.group_type = %s)
+                   )
+                """,
+                (phones, today, group_type),
+            )
+
             cur.execute(
                 """
                 SELECT t.*
                 FROM academy_trials t
                 LEFT JOIN academy_groups g ON g.id = t.group_id
-                WHERE t.state IN ('confirmed', 'draft')
-                  AND t.phone = %s
+                WHERE t.phone = ANY(%s)
                   AND (t.group_id IS NULL OR g.group_type = %s)
-                ORDER BY t.trial_day NULLS LAST, t.start_time NULLS LAST, t.id
+                  AND (
+                        (t.state = 'confirmed' AND t.trial_day >= %s)
+                        OR t.state = 'draft'
+                  )
+                ORDER BY
+                    (t.state = 'confirmed') DESC,
+                    t.trial_day ASC NULLS LAST,
+                    t.updated_at DESC
+                LIMIT 1
                 """,
-                (sender_phone, group_type),
+                (phones, group_type, today),
             )
-            trials = cur.fetchall()
-            return [dict(t) for t in trials]
+            row = cur.fetchone()
+            return [dict(row)] if row else []
 
 
 def cancel_all_trials(trial_ids: list) -> None:
@@ -1570,12 +1612,12 @@ def check_trial_limits(bot_name: str, phone: str) -> bool:
                             WHERE group_type = %s
                             LIMIT 1
                         ) limit_row ON TRUE
-                        WHERE at.phone = %s
+                        WHERE at.phone = ANY(%s)
                           AND ag.group_type = %s
                           AND at.state = 'confirmed'
                           AND at.attended IS TRUE
                         GROUP BY limit_row.quantity
-                        """, (group_type, phone, group_type))
+                        """, (group_type, phone_variants(phone), group_type))
 
             row = cur.fetchone()
             return bool(row["can_take_trial"]) if row else True
@@ -1601,11 +1643,11 @@ def has_active_trial(bot_name: str, phone: str) -> bool:
                         SELECT EXISTS (SELECT 1
                                        FROM academy_trials at
                                                 JOIN academy_groups ag ON ag.id = at.group_id
-                                       WHERE at.phone = %s
+                                       WHERE at.phone = ANY(%s)
                                          AND ag.group_type = %s
                                          AND at.state = 'confirmed'
                                          AND at.trial_day >= %s)
-                        """, (phone, group_type, today_almaty()))
+                        """, (phone_variants(phone), group_type, today_almaty()))
 
             has_confirmed_trial = cur.fetchone()
             return has_confirmed_trial['exists']

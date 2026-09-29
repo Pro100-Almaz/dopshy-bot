@@ -12,14 +12,16 @@ repo emits it):
 """
 
 import logging
+import psycopg2
 import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request
+from werkzeug.exceptions import HTTPException
 
 import config
 from integrations import apipay_client, apipay_service, booking_service, client_notify
@@ -30,6 +32,7 @@ from integrations.repo.academy_repo import deactivate_group_repo, setting_traini
 from integrations.sheets.booking_sheets import refresh_week_sheet, _single_table_write, _single_table_erase, \
     upsert_booking_row
 from integrations.repo import booking_repo as repo, postgres, history_repo
+from integrations.repo import customer_discount_repo
 from integrations.repo.bot_pause_repo import get_statuses, normalize_phone, set_bot_paused
 from chat.conversation import list_contacts as _list_conversation_contacts
 from integrations.sheets.trial_sheets import refresh_all_trials, refresh_all_groups
@@ -39,6 +42,44 @@ logger = logging.getLogger(__name__)
 _LOCAL_TZ = ZoneInfo(config.BOOKING_TIMEZONE)
 
 manager_api = Blueprint("manager_api", __name__)
+
+
+@manager_api.errorhandler(HTTPException)
+def _manager_http_exception(exc: HTTPException):
+    """Keep errors raised inside manager routes in the service JSON envelope."""
+    return jsonify({
+        "ok": False,
+        "code": exc.name.upper().replace(" ", "_"),
+        "message": exc.description,
+    }), exc.code
+
+
+@manager_api.errorhandler(Exception)
+def _manager_unhandled_exception(exc: Exception):
+    """Never leak Flask's HTML error page to the JSON-only proxy backend."""
+    error_id = str(uuid.uuid4())
+    logger.exception("[MANAGER_API] Unhandled error id=%s", error_id)
+
+    if isinstance(exc, (psycopg2.errors.UndefinedTable,
+                        psycopg2.errors.UndefinedColumn)):
+        code = "DATABASE_SCHEMA_OUTDATED"
+        message = "Database schema is not up to date. Apply pending migrations."
+        status = 503
+    elif isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+        code = "DATABASE_UNAVAILABLE"
+        message = "Database is temporarily unavailable."
+        status = 503
+    else:
+        code = "INTERNAL_ERROR"
+        message = "Unexpected manager API error."
+        status = 500
+
+    return jsonify({
+        "ok": False,
+        "code": code,
+        "message": message,
+        "error_id": error_id,
+    }), status
 
 # States in which a booking no longer occupies a slot on the week sheet.
 _TERMINAL_BOOKING_STATES = {"cancelled", "unpaid", "failed"}
@@ -547,6 +588,9 @@ def create_booking():
         phone=body.get("phone"),
         notes=body.get("notes"),
         price_total=body.get("price_total"),
+        prepayment=body.get("prepayment"),
+        discount_id=body.get("discount_id"),
+        customer_id=body.get("customer_id"),
         client_token=body.get("client_token"),
         actor_id=_api_key_actor(),
         reserved_until=body.get("reserved_until"),
@@ -663,6 +707,8 @@ def create_bookings_batch():
             updated_by=body.get("source", "Неизвестен"),
             on_created=invoice_hook,
             avans_per_booking=avans_per_booking,
+            discount_id=body.get("discount_id"),
+            customer_id=body.get("customer_id"),
         )
     except ApiPayError as exc:
         # Only reachable before the invoice row is written (a phone ApiPay
@@ -731,6 +777,8 @@ def patch_booking(booking_id: int):
         patch["customer_name"] = body["customer"]
     if "customer_name" in body:
         patch["customer_name"] = body["customer_name"]
+    if "phone" in body:
+        patch["phone"] = body["phone"]
     if "notes" in body:
         patch["notes"] = body["notes"]
     if "price_total" in body:
@@ -755,6 +803,10 @@ def patch_booking(booking_id: int):
         patch["field"] = body["field_id"]
     if "updated_by" in body:
         patch["updated_by"] = body["updated_by"]
+    if "discount_id" in body:
+        patch["discount_id"] = body["discount_id"]
+    if "customer_id" in body:
+        patch["customer_id"] = body["customer_id"]
 
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
@@ -1147,6 +1199,159 @@ def bot_resume(phone: str):
 
 # ------------CONTACTS (unified customer list — WhatsApp texters + bookers)
 
+def _integrity_error(exc: Exception):
+    detail = getattr(getattr(exc, "diag", None), "constraint_name", None)
+    return jsonify({
+        "ok": False,
+        "code": "CONFLICT",
+        "message": "Запись конфликтует с существующими данными.",
+        "constraint": detail,
+    }), 409
+
+
+@manager_api.get("/api/manager/customers")
+def list_registered_customers():
+    phone = request.args.get("phone")
+    if phone is not None:
+        row = customer_discount_repo.get_customer_by_phone(phone)
+        return jsonify({"ok": True, "data": _serialize(row) if row else None}), 200
+    rows = customer_discount_repo.list_customers(request.args.get("search"))
+    return jsonify({"ok": True, "data": [_serialize(row) for row in rows]}), 200
+
+
+@manager_api.get("/api/manager/customers/<int:customer_id>")
+def get_registered_customer(customer_id: int):
+    row = customer_discount_repo.get_customer(customer_id)
+    if not row:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Клиент не найден."}), 404
+    return jsonify({"ok": True, "data": _serialize(row)}), 200
+
+
+@manager_api.post("/api/manager/customers")
+def create_registered_customer():
+    body = request.get_json(silent=True) or {}
+    if not normalize_phone(body.get("phone")):
+        return jsonify({"ok": False, "code": "INVALID", "message": "phone обязателен."}), 400
+    try:
+        row = customer_discount_repo.create_customer(
+            body.get("name"), body["phone"], body.get("is_regular_customer", False),
+            source=body.get("source") or _api_key_actor(),
+        )
+    except psycopg2.IntegrityError as exc:
+        return _integrity_error(exc)
+    return jsonify({"ok": True, "data": _serialize(row)}), 201
+
+
+@manager_api.patch("/api/manager/customers/<int:customer_id>")
+def patch_registered_customer(customer_id: int):
+    body = request.get_json(silent=True) or {}
+    fields = {key: body[key] for key in ("name", "phone", "is_regular_customer") if key in body}
+    try:
+        row = customer_discount_repo.update_customer(
+            customer_id, **fields, source=body.get("source") or _api_key_actor()
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+    except psycopg2.IntegrityError as exc:
+        return _integrity_error(exc)
+    if not row:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Клиент не найден."}), 404
+    return jsonify({"ok": True, "data": _serialize(row)}), 200
+
+
+@manager_api.delete("/api/manager/customers/<int:customer_id>")
+def delete_registered_customer(customer_id: int):
+    try:
+        deleted = customer_discount_repo.delete_customer(customer_id, source=_api_key_actor())
+    except psycopg2.IntegrityError:
+        return jsonify({"ok": False, "code": "CUSTOMER_IN_USE",
+                        "message": "Нельзя удалить клиента с бронями или скидками."}), 409
+    if not deleted:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Клиент не найден."}), 404
+    return jsonify({"ok": True, "data": {"customer_id": customer_id}}), 200
+
+
+def _discount_status(value):
+    # The frontend wording uses Canceled; the persisted workflow calls it rejected.
+    return "rejected" if value == "canceled" else value
+
+
+@manager_api.get("/api/manager/discounts")
+def list_discounts():
+    status = _discount_status(request.args.get("status"))
+    if status is not None and status not in customer_discount_repo.DISCOUNT_STATUSES:
+        return jsonify({"ok": False, "code": "INVALID_STATUS", "message": "Недопустимый статус."}), 400
+    customer_id = request.args.get("customer_id", type=int)
+    rows = customer_discount_repo.list_discounts(
+        customer_id=customer_id,
+        phone=request.args.get("phone"),
+        status=status,
+        available_only=request.args.get("available_only", "").lower() in ("1", "true", "yes"),
+    )
+    return jsonify({"ok": True, "data": [_serialize(row) for row in rows]}), 200
+
+
+@manager_api.get("/api/manager/discounts/<int:discount_id>")
+def get_discount(discount_id: int):
+    row = customer_discount_repo.get_discount(discount_id)
+    if not row:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Скидка не найдена."}), 404
+    return jsonify({"ok": True, "data": _serialize(row)}), 200
+
+
+@manager_api.post("/api/manager/discounts")
+def create_discount():
+    body = request.get_json(silent=True) or {}
+    if body.get("customer_id") is None or body.get("discount_amount") is None:
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "customer_id и discount_amount обязательны."}), 400
+    try:
+        row = customer_discount_repo.create_discount(
+            int(body["customer_id"]), body["discount_amount"],
+            condition=body.get("condition"),
+            status=_discount_status(body.get("status") or "pending"),
+            usage_limit=body.get("usage_limit", 5),
+            source=body.get("source") or _api_key_actor(),
+        )
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+    except psycopg2.IntegrityError as exc:
+        return _integrity_error(exc)
+    return jsonify({"ok": True, "data": _serialize(row)}), 201
+
+
+@manager_api.patch("/api/manager/discounts/<int:discount_id>")
+def patch_discount(discount_id: int):
+    body = request.get_json(silent=True) or {}
+    fields = {key: body[key] for key in
+              ("discount_amount", "condition", "status", "is_active", "usage_limit")
+              if key in body}
+    if "status" in fields:
+        fields["status"] = _discount_status(fields["status"])
+    try:
+        row = customer_discount_repo.update_discount(
+            discount_id, **fields, source=body.get("source") or _api_key_actor()
+        )
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+    except psycopg2.IntegrityError as exc:
+        return _integrity_error(exc)
+    if not row:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Скидка не найдена."}), 404
+    return jsonify({"ok": True, "data": _serialize(row)}), 200
+
+
+@manager_api.delete("/api/manager/discounts/<int:discount_id>")
+def delete_discount(discount_id: int):
+    try:
+        deleted = customer_discount_repo.delete_discount(discount_id, source=_api_key_actor())
+    except psycopg2.IntegrityError:
+        deleted = False
+    if not deleted:
+        return jsonify({"ok": False, "code": "DISCOUNT_IN_USE",
+                        "message": "Скидка не найдена или уже использовалась."}), 409
+    return jsonify({"ok": True, "data": {"discount_id": discount_id}}), 200
+
 @manager_api.get("/api/manager/contacts")
 def list_contacts():
     """Every customer the bot knows, deduped by normalized phone.
@@ -1182,6 +1387,11 @@ def list_contacts():
                 "texted": False,
                 "has_booking": False,
                 "last_activity": None,
+                # Internal source markers.  The public registration flags are
+                # derived only after the SQLite/Postgres merge is complete.
+                "_exists_in_sqlite": False,
+                "_exists_in_postgres": False,
+                "_postgres_is_regular_customer": False,
             }
             contacts[key] = entry
         return entry
@@ -1221,6 +1431,7 @@ def list_contacts():
         if entry is None:
             continue
         entry["texted"] = True
+        entry["_exists_in_sqlite"] = True
         _bump_activity(entry, row.get("updated_at"))
 
     # Customers persisted by the selected bot's domain tables.
@@ -1234,12 +1445,27 @@ def list_contacts():
         entry = _touch(row.get("phone"))
         if entry is None:
             continue
-        entry["has_booking"] = True
+        entry["has_booking"] = bool(row.get("has_booking", True))
+        if row.get("customer_id") is not None:
+            entry["_exists_in_postgres"] = True
+            entry["_postgres_is_regular_customer"] = bool(
+                row.get("is_regular_customer", False)
+            )
         if not entry["name"] and row.get("customer_name"):
             entry["name"] = row["customer_name"]
         _bump_activity(entry, row.get("last_at"))
 
     result = list(contacts.values())
+    for entry in result:
+        # Registration means that the normalized phone has a row in the
+        # PostgreSQL customers table. SQLite-only contacts are not registered.
+        # The SQLite marker remains independent so all four merge cases are
+        # represented correctly, including Postgres-only customers.
+        is_registered = bool(entry.pop("_exists_in_postgres"))
+        entry.pop("_exists_in_sqlite")
+        postgres_regular = bool(entry.pop("_postgres_is_regular_customer"))
+        entry["is_registered"] = is_registered
+        entry["is_regular_customer"] = postgres_regular if is_registered else False
     result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
 
     total = len(result)

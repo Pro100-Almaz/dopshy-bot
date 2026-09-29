@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import re
 import threading
 
 import psycopg2
@@ -9,6 +10,24 @@ import config
 
 _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
+
+
+def normalize_phone(phone: str | None) -> str:
+    """Canonical digits-only phone representation used across repositories."""
+    return re.sub(r"\D", "", phone or "")
+
+
+def phone_variants(phone: str | None) -> list[str]:
+    """Every spelling a stored phone may have: as given, digits-only, '+digits'.
+
+    New rows are saved normalized, but rows written before that (and callers
+    passing the raw WhatsApp '+7...' form) must still match, so lookups compare
+    with `phone = ANY(%s)` against this list instead of a single value.
+    """
+    raw = (phone or "").strip()
+    digits = normalize_phone(raw)
+    candidates = (raw, digits, f"+{digits}" if digits else "")
+    return list(dict.fromkeys(c for c in candidates if c))
 
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
@@ -42,5 +61,4 @@ def _ok(data: dict | None = None, code: str = "OK", message: str = "") -> dict:
 
 def _err(code: str, message: str) -> dict:
     return {"ok": False, "code": code, "data": None, "message": message}
-
 
