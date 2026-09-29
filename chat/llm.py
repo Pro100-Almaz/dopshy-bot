@@ -206,8 +206,19 @@ def route_incoming_message(history: list, user_message: str,
         return "other", "ru"
 
 
-def route_trial_message(history: list, user_message: str) -> tuple[str, str]:
-    """Classify the latest academy/QA bot message into a strict trial intent."""
+def route_trial_message(
+    history: list,
+    user_message: str,
+    pending: str | None = None,
+    fallback: str | None = "other",
+) -> tuple[str | None, str]:
+    """Classify the latest academy/QA bot message into a strict trial intent.
+
+    `pending` is the question the bot is waiting on during a signup; it lets
+    the router tell an answer from a side question. `fallback` is returned
+    when classification fails — None lets a mid-signup caller keep the
+    message in the flow instead of treating it as "other".
+    """
     system_content = (
         "You route WhatsApp messages for academy trial signup bots. "
         "Greetings, thanks, and small talk such as hello/hi/привет/сәлем/че там/как дела are always other. "
@@ -237,6 +248,14 @@ def route_trial_message(history: list, user_message: str) -> tuple[str, str]:
         "Use human_help when they ask for an administrator or human manager. "
         "Detect Russian as ru and Kazakh as kk."
     )
+    if pending:
+        system_content += (
+            " The client is in the middle of a trial signup. The bot's pending question was:\n"
+            f"{pending}\n"
+            "Use trial_continue only if the message answers that question or changes signup data. "
+            "A question about the schedule, trainers, prices, etc. is NOT trial_continue, even if it "
+            "mentions a day or a trainer from the options."
+        )
     messages = [{"role": "system", "content": system_content}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
@@ -252,15 +271,15 @@ def route_trial_message(history: list, user_message: str) -> tuple[str, str]:
 
         tool_calls = response.choices[0].message.tool_calls
         if not tool_calls:
-            return "other", "ru"
+            return fallback, "ru"
 
         raw_args = tool_calls[0].function.arguments
         if not raw_args:
-            return "other", "ru"
+            return fallback, "ru"
 
         data = json.loads(raw_args)
-        return data.get("type", "other"), data.get("lang", "ru")
+        return data.get("type", fallback), data.get("lang", "ru")
 
     except Exception as err:
         logging.error(f"route_trial_message failed: {err}")
-        return "other", "ru"
+        return fallback, "ru"

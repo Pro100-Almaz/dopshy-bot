@@ -17,6 +17,7 @@ from handlers.questions import check_slots
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from handlers.llm_trial_flow import LlmTrialFlowHandler
+from handlers.llm_trial_flow import LLM_FLOW_STATES as LLM_TRIAL_FLOW_STATES
 from handlers.llm_trial_flow import is_greeting as is_trial_greeting
 from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
 from handlers.llm_trial_flow import is_bot_identity_question
@@ -232,6 +233,45 @@ def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
     return f"Адрес: Астана, Сыганак 6Ф. Телефон администратора: {_ACADEMY_ADMIN_PHONE}."
 
 
+def _with_pending(answer: str, pending: str | None) -> str:
+    return f"{answer}\n\n{pending}" if pending else answer
+
+
+def _dispatch_in_trial_session(
+    intent: str | None,
+    session: dict,
+    pending: str | None,
+    chat_id: str,
+    sender_id: str,
+    bot_name: str,
+    user_text: str,
+    history: list,
+    lang: str,
+) -> str | None:
+    """Route one message that arrived during an LLM-flow signup.
+
+    Returns the reply, or None to fall through to RAG/LLM (the caller then
+    appends the pending step). A None intent means the router failed — the
+    message stays in the flow, as it did before routing ran mid-signup.
+    """
+    if intent in (None, "trial_new", "trial_continue", "trial_edit"):
+        return LlmTrialFlowHandler().handle_session_turn(
+            chat_id, sender_id, bot_name, user_text, history, session
+        )
+    if intent == "trial_cancel":
+        return handle_cancel_trial_request(chat_id, sender_id, bot_name)
+    if intent == "trial_status":
+        return _with_pending(handle_trial_status_request(sender_id, bot_name, lang), pending)
+    if intent == "human_help":
+        return _with_pending(
+            "Передам администратору. Он сможет уточнить детали по записи.\n\n"
+            "Әкімшіге жіберемін. Ол жазылым бойынша нақтылап береді.",
+            pending,
+        )
+    # Info questions (schedule, trainers, prices, ...) are answered by RAG/LLM.
+    return None
+
+
 def _format_payment_reject_message(
         code: str, parsed: dict, booking: dict
 ) -> str:
@@ -368,6 +408,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
         history = get_history(chat_id)
         logger.info("[LLM] History length: %d messages", len(history))
+
+        # Academy only: an LLM-flow signup in progress and its pending step.
+        booking_session = None
+        pending = None
 
         # 1. Booking handler (Bot 1 — Dopshy field rental)
         #
@@ -534,10 +578,28 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             bot_name = bot_config["name"]
             logger.info("[TRIAL] Checking trial branch for chat_id=%s", chat_id)
 
-            # (a) A step-flow conversation started before this deploy must be
-            # allowed to finish; both flows write the same draft row, so the
-            # session has to win while it exists.
-            if _pg.get_active_session(bot_name, chat_id):
+            # (a) An LLM-flow signup in progress: a message that plainly
+            # answers the pending step goes straight to the flow; anything else
+            # is routed below like any other message, and the pending step is
+            # re-shown after the answer.
+            session = _pg.get_active_session(bot_name, chat_id)
+            booking_session = (
+                session if session and session["state"] in LLM_TRIAL_FLOW_STATES else None
+            )
+            if booking_session:
+                fast_reply = LlmTrialFlowHandler().try_fast_path(
+                    chat_id, sender_id, bot_name, user_text, history, booking_session
+                )
+                if fast_reply is not None:
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", fast_reply)
+                    send_text_message(channel, sender_id, fast_reply)
+                    return
+
+            # (a') A step-flow conversation started before this deploy, or a
+            # cancel selection, must be allowed to finish; both flows write the
+            # same draft row, so the session has to win while it exists.
+            elif session:
                 trial_reply = handle_trial_turn(
                     chat_id, phone_number_id, sender_id, user_text, bot_name
                 )
@@ -550,7 +612,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     send_text_message(channel, sender_id, trial_reply)
                     return
 
-            if is_trial_greeting(user_text):
+            if not booking_session and is_trial_greeting(user_text):
                 handle_reply = (
                     "Здравствуйте! Чем могу помочь?\n\n"
                     "Сәлеметсіз бе! Қалай көмектесе аламын?"
@@ -560,7 +622,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
-            if is_bot_identity_question(user_text):
+            if not booking_session and is_bot_identity_question(user_text):
                 handle_reply = (
                     "Я бот-ассистент академии. Могу ответить на вопросы о тренировках "
                     "и помочь записаться на пробное занятие.\n\n"
@@ -572,7 +634,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
-            if is_trial_acknowledgement(user_text):
+            if not booking_session and is_trial_acknowledgement(user_text):
                 handle_reply = (
                     "Хорошо. Если появятся вопросы по тренировкам или пробному занятию, напишите.\n\n"
                     "Жақсы. Жаттығулар немесе сынақ сабағы бойынша сұрақ болса, жазыңыз."
@@ -587,9 +649,29 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
-            trial_intent, trial_lang = route_trial_message(history, user_text)
+            pending = (
+                LlmTrialFlowHandler().pending_prompt(bot_name, booking_session)
+                if booking_session else None
+            )
+            trial_intent, trial_lang = route_trial_message(
+                history, user_text, pending=pending,
+                # Router failure mid-signup keeps the message in the flow.
+                fallback=None if booking_session else "other",
+            )
             logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
                         trial_intent, trial_lang)
+
+            if booking_session:
+                trial_lang = booking_session["params"].get("lang") or trial_lang
+                handle_reply = _dispatch_in_trial_session(
+                    trial_intent, booking_session, pending, chat_id, sender_id,
+                    bot_name, user_text, history, trial_lang,
+                )
+                if handle_reply is not None:
+                    append_message(chat_id, "user", user_text)
+                    append_message(chat_id, "assistant", handle_reply)
+                    send_text_message(channel, sender_id, handle_reply)
+                    return
 
             # The router is tuned to over-trigger signup intent. The booking flow
             # cannot answer a price/schedule/location question, so veto the router
@@ -683,6 +765,21 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         )
         logger.info("[LLM] Raw reply (%.120s) | tool_call=%s", reply, tool_call)
 
+        # 5a. Mid-signup the flow already owns the draft: starting a signup is
+        # a no-op and an edit goes through the current step, which only resets
+        # the chosen day when a slot-affecting field really changed.
+        if tool_call and booking_session:
+            if tool_call["name"] == "start_trial":
+                logger.info("[TRIAL] Ignoring start_trial tool — signup already in progress")
+                tool_call = None
+            elif tool_call["name"] == "edit_trial":
+                edit_reply = LlmTrialFlowHandler().handle_session_turn(
+                    chat_id, sender_id, bot_config["name"], user_text, history, booking_session
+                )
+                reply = f"{reply}\n\n{edit_reply}" if reply else edit_reply
+                tool_call = None
+                pending = None
+
         # 5. LLM may have asked us to launch a deterministic sub-flow.
         if tool_call:
             handle_reply = reply
@@ -712,6 +809,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
 
             reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
+
+        # 5b. A side question answered mid-signup: remind the pending step.
+        elif pending:
+            reply = f"{reply}\n\n{pending}" if reply else pending
 
         # 6. Save to history
         append_message(chat_id, "user", user_text)

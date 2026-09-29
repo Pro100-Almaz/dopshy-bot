@@ -6,7 +6,7 @@ from datetime import date, datetime, time
 from chat.conversation import clear_history
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import postgres
-from utils import today_almaty, is_past_booking_time, normalize_end_time
+from utils import is_past_booking_time, normalize_end_time, parse_weekdays, today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -133,16 +133,6 @@ class BaseStepHandler:
     YES = {"да", "иә", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "растаймын", "👍"}
     NO = {"нет", "жоқ", "no", "отмена", "изменить", "өзгерт", "болмайды", "бастапқы", "бас тартамын"}
 
-    WEEKDAY_ALIASES = [
-        ["понедельник", "пн", "дүйсенбі", "дс", "дүйсенбіге"],
-        ["вторник", "вт", "сейсенбі", "сс", "сейсенбіге"],
-        ["среда", "ср", "сәрсенбі", "сәрсенбіге", "среду"],
-        ["четверг", "чт", "бейсенбі", "бс", "бейсенбіге"],
-        ["пятница", "пятницу", "пят", "пт", "жұма", "жм", "жұмаға"],
-        ["суббота", "субботу", "суб", "сб", "сенбі", "сенбіге"],
-        ["воскресенье", "воскр", "вс", "жексенбі", "жс", "жексенбіге"],
-    ]
-
     def __init__(
             self, logger_messages: dict[str, str],
             builder: BasePromptBuilder,
@@ -233,12 +223,9 @@ class BaseStepHandler:
                 # check if date is given as weekday
                 else:
                     available_days_by_weekday = {i.weekday(): i for i in available_days[:7]}
-                    text_words = text.split(" ")
-                    for day, alias in enumerate(self.WEEKDAY_ALIASES, 0):
-                        for word in text_words:
-                            if word in alias:
-                                chosen = available_days_by_weekday.get(day, None)
-                                break
+                    weekdays = parse_weekdays(text)
+                    if len(weekdays) == 1:
+                        chosen = available_days_by_weekday.get(weekdays[0])
 
 
         if not chosen or chosen not in available_days:

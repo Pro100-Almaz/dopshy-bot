@@ -1,11 +1,10 @@
 """Booking business logic — slot generation, free slots, context formatting."""
 
 import logging
-import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 
 from integrations.repo import academy_repo
-from utils import today_almaty
+from utils import closest_weekday_date, parse_weekdays
 
 logger = logging.getLogger(__name__)
 
@@ -19,54 +18,12 @@ _LEVEL_FALLBACKS = {
     "Beginner": [],
 }
 
-# Word-boundary patterns, not bare stems: a bare "сред" stem would also match
-# "среди" (among) and "средний" (medium level) — both common in this bot's
-# conversations — so each pattern pins the vowel that actually follows the
-# weekday stem before allowing further suffix letters.
-_WEEKDAY_PATTERNS_RU = {
-    0: re.compile(r"\bпонедельник\w*\b", re.IGNORECASE),
-    1: re.compile(r"\bвторник\w*\b", re.IGNORECASE),
-    2: re.compile(r"\bсред[аеоуы]\w*\b", re.IGNORECASE),
-    3: re.compile(r"\bчетверг\w*\b", re.IGNORECASE),
-    4: re.compile(r"\bпятниц\w*\b", re.IGNORECASE),
-    5: re.compile(r"\bсуббот\w*\b", re.IGNORECASE),
-    6: re.compile(r"\bвоскресень\w*\b", re.IGNORECASE),
-}
-# Every Kazakh weekday name but Friday ends in "-сенбі" (they're literally
-# "Nth-day" compounds), so a plain substring check for Saturday's "сенбі"
-# would also fire on "дүйсенбі"/"сейсенбі"/etc. \b anchors avoid that: since
-# each name is one unbroken word, \b never lands inside it, only around it.
-_WEEKDAY_PATTERNS_KK = {
-    0: re.compile(r"\bдүйсенбі\w*\b", re.IGNORECASE),
-    1: re.compile(r"\bсейсенбі\w*\b", re.IGNORECASE),
-    2: re.compile(r"\bсәрсенбі\w*\b", re.IGNORECASE),
-    3: re.compile(r"\bбейсенбі\w*\b", re.IGNORECASE),
-    4: re.compile(r"\bжұма\w*\b", re.IGNORECASE),
-    5: re.compile(r"\bсенбі\w*\b", re.IGNORECASE),
-    6: re.compile(r"\bжексенбі\w*\b", re.IGNORECASE),
-}
-
-
-def parse_weekdays(text: str) -> list[int]:
-    """Return every weekday (0=Mon..6=Sun) named in `text`, sorted.
-
-    Used for a standalone "which groups train on Wednesday and Thursday"
-    lookup — independent of the extractor's single preferred_weekday field,
-    which only holds one value at a time for the signup flow.
-    """
-    lower = (text or "").lower()
-    found = {day for day, pattern in _WEEKDAY_PATTERNS_RU.items() if pattern.search(lower)}
-    found |= {day for day, pattern in _WEEKDAY_PATTERNS_KK.items() if pattern.search(lower)}
-    return sorted(found)
-
-
 def _parse_time(t: str) -> time:
     return datetime.strptime(t, "%H:%M").time()
 
 
 def _get_closest_date(n: int):
-    today = today_almaty()
-    return today + timedelta(days=(n-today.weekday()+7)%7)
+    return closest_weekday_date(n)
 
 
 def get_trial_daytime(
