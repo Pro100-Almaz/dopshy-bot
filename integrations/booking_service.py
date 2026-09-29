@@ -21,7 +21,7 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, time, timedelta
 
-from utils import is_past_booking_time, normalize_end_time
+from utils import is_past_booking_time, normalize_end_time, round_time_to_half_hour
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -678,7 +678,18 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
     consistent; a clashing slot returns SLOT_TAKEN. `end_date` is not a
     single-booking column and is ignored here (it only affects repeat generation
     at create time).
+
+    time_start/time_end are rounded to the nearest half hour (e.g. 13:07 ->
+    13:00) before anything else runs, since the board only ever books
+    half-hour slots. Rescheduling (field/date/time_start/time_end) also
+    recomputes price_total from the effective new-or-existing slot, unless
+    the caller explicitly passes their own price_total.
     """
+    if fields.get("time_start") is not None:
+        fields["time_start"] = round_time_to_half_hour(fields["time_start"])
+    if fields.get("time_end") is not None:
+        fields["time_end"] = round_time_to_half_hour(fields["time_end"])
+
     patch = {k: v for k, v in fields.items() if k in _MANAGER_PATCH_FIELDS}
     slot = {k: fields[k] for k in _MANAGER_SLOT_FIELDS if k in fields}
     if not patch and not slot:
@@ -691,38 +702,56 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
         if int(slot["field"]) not in valid_fields:
             return _err("INVALID_FIELD", "Такого поля не существует.")
 
-    set_parts = [f"{k} = %s" for k in patch]
-    vals = list(patch.values())
-
-    if slot:
-        # SET expressions read the row's OLD values, so COALESCE(param, column)
-        # keeps unchanged slot fields at their current value.
-        for k in _MANAGER_SLOT_FIELDS:
-            set_parts.append(f"{k} = COALESCE(%s, {k})")
-            vals.append(slot.get(k))
-        set_parts.append("start_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_start)) AT TIME ZONE %s")
-        vals += [slot.get("date"), slot.get("time_start"), config.BOOKING_TIMEZONE]
-        set_parts.append("end_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_end)) AT TIME ZONE %s")
-        vals += [slot.get("date"), slot.get("time_end"), config.BOOKING_TIMEZONE]
-
-    set_clause = ", ".join(set_parts) + ", updated_at = NOW()"
-    vals.append(booking_id)
-
-    # Columns whose before-values we need to render history (state + payments).
+    # Columns whose before-values we need: history (state + payments), and —
+    # when the slot changes without an explicit price override — the
+    # unchanged slot fields, to price the effective (new-or-existing) range.
+    recompute_price = bool(slot) and "price_total" not in patch
     history_cols = (["state"] if "state" in patch else []) + \
                    [f for f in _PAYMENT_HISTORY_KEYS if f in patch]
+    select_cols = set(history_cols)
+    if recompute_price:
+        select_cols |= {"date", "time_start", "time_end", "field"}
 
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 old = {}
-                if history_cols:
+                if select_cols:
                     cur.execute(
-                        f"SELECT {', '.join(history_cols)} FROM bookings WHERE id = %s",
+                        f"SELECT {', '.join(select_cols)} FROM bookings WHERE id = %s",
                         (booking_id,),
                     )
                     _prev = cur.fetchone()
                     old = dict(_prev) if _prev else {}
+
+                if recompute_price and old:
+                    eff_field = int(slot.get("field", old["field"]))
+                    conf = next((f for f in config.BOOKING_FIELDS if f["id"] == eff_field), None)
+                    if conf:
+                        eff_date = str(slot.get("date", old["date"]))
+                        eff_ts = str(slot.get("time_start", str(old["time_start"])[:5]))[:5]
+                        eff_te = str(slot.get("time_end", str(old["time_end"])[:5]))[:5]
+                        patch["price_total"] = calculate_booking_price(
+                            conf["format"], eff_date, eff_ts, eff_te
+                        )
+
+                set_parts = [f"{k} = %s" for k in patch]
+                vals = list(patch.values())
+
+                if slot:
+                    # SET expressions read the row's OLD values, so COALESCE(param, column)
+                    # keeps unchanged slot fields at their current value.
+                    for k in _MANAGER_SLOT_FIELDS:
+                        set_parts.append(f"{k} = COALESCE(%s, {k})")
+                        vals.append(slot.get(k))
+                    set_parts.append("start_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_start)) AT TIME ZONE %s")
+                    vals += [slot.get("date"), slot.get("time_start"), config.BOOKING_TIMEZONE]
+                    set_parts.append("end_at = (COALESCE(%s::date, date) + COALESCE(%s::time, time_end)) AT TIME ZONE %s")
+                    vals += [slot.get("date"), slot.get("time_end"), config.BOOKING_TIMEZONE]
+
+                set_clause = ", ".join(set_parts) + ", updated_at = NOW()"
+                vals.append(booking_id)
+
                 cur.execute(
                     f"UPDATE bookings SET {set_clause} WHERE id = %s AND state NOT IN ('draft') RETURNING id", vals
                 )
@@ -741,8 +770,10 @@ def manager_update_booking(booking_id: int, actor_id: str | None = None, **field
                     # caller tell a real transition from a manager re-saving the
                     # status it already had — only the former is worth a message
                     # to the client.
-                    return _ok({"booking_id": booking_id,
-                                "old_state": old.get("state")})
+                    result = {"booking_id": booking_id, "old_state": old.get("state")}
+                    if "price_total" in patch:
+                        result["price_total"] = patch["price_total"]
+                    return _ok(result)
     except psycopg2.errors.ExclusionViolation:
         logger.info("[BOOKING_SERVICE] manager_update_booking id=%d — slot taken (exclusion)", booking_id)
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
