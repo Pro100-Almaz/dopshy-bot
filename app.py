@@ -213,6 +213,22 @@ def _reconcile_apipay():
         logger.error("[APIPAY] Reconciliation failed: %s", exc)
 
 
+def _issue_contract_installments() -> None:
+    """Send every contract installment whose due time has come.
+
+    Kaspi-registered numbers get an ApiPay invoice (queued in the same outbox
+    as the avans, so `_sweep_apipay_outbox` retries a failed send); the others
+    get the payment link on WhatsApp. See integrations/contract_billing.py.
+    """
+    if not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import contract_billing
+        contract_billing.issue_due_installments()
+    except Exception as exc:
+        logger.error("[CONTRACT] Installment sweep failed: %s", exc)
+
+
 def _purge_agent_test_orphans() -> None:
     """Delete sandbox rows from console sessions that were never cleaned up.
 
@@ -255,6 +271,13 @@ _scheduler.add_job(
     _reconcile_apipay,
     trigger="interval",
     minutes=2,
+)
+# Installments fall due at a set time (static plans) or when a booking ends
+# (per-booking plans); a minute's granularity is plenty for either.
+_scheduler.add_job(
+    _issue_contract_installments,
+    trigger="interval",
+    minutes=1,
 )
 _scheduler.add_job(
     _purge_agent_test_orphans,

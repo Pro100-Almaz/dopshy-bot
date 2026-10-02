@@ -192,6 +192,17 @@ APIPAY_CHECK_CLIENT: bool = os.getenv("APIPAY_CHECK_CLIENT", "1").strip().lower(
 # without them keeps the old manual-receipt flow instead of failing batches.
 APIPAY_ENABLED: bool = bool(APIPAY_API_KEY and APIPAY_WEBHOOK_SECRET)
 
+# Contract payment plans (integrations/contract_billing.py).
+# Local time a static installment is sent on its due date — ApiPay's own
+# subscriptions default to 13:00 Almaty for the same reason: mid-day, when the
+# client is awake to confirm the push.
+CONTRACT_BILLING_TIME: str = os.getenv("CONTRACT_BILLING_TIME", "13:00")
+# An unpaid installment invoice (expired/cancelled/error) is sent again after
+# this many hours, up to CONTRACT_INVOICE_MAX_ATTEMPTS invoices in total; after
+# that the installment is 'overdue' and waits for a manager.
+CONTRACT_INVOICE_RETRY_HOURS: int = int(os.getenv("CONTRACT_INVOICE_RETRY_HOURS", "24"))
+CONTRACT_INVOICE_MAX_ATTEMPTS: int = int(os.getenv("CONTRACT_INVOICE_MAX_ATTEMPTS", "3"))
+
 
 def get_whatsapp_api_url(phone_number_id : str) -> str:
     return f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"

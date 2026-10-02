@@ -24,7 +24,7 @@ from flask import Blueprint, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 import config
-from integrations import apipay_client, apipay_service, booking_service, client_notify
+from integrations import apipay_client, apipay_service, booking_service, client_notify, contract_billing
 from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.repo import academy_repo
 from integrations.repo.academy_repo import deactivate_group_repo, setting_training_time, get_group_by_id, \
@@ -462,14 +462,14 @@ def create_contract():
         source=body.get("source") or body.get("updated_by") or "contract",
         slots=body.get("slots"),
         actor_id=_api_key_actor(),
+        payment_plan=body.get("payment_plan"),
     )
     if res["ok"]:
         for bid in (res.get("data") or {}).get("booking_ids", []):
             booking_row = repo.get_booking(bid)
             if booking_row:
                 _single_table_write(booking_row)
-    status_code = 200 if res["ok"] else (409 if res.get("code") == "SLOT_TAKEN" else 400)
-    return jsonify(res), status_code
+    return jsonify(_jsonable(res)), _contract_status_code(res)
 
 
 @manager_api.patch("/api/manager/contracts/<int:contract_id>")
@@ -484,8 +484,7 @@ def patch_contract(contract_id: int):
     res = booking_service.update_contract(contract_id, actor_id=_api_key_actor(), **patch)
     if res["ok"] and "status" in patch:
         refresh_week_sheet()
-    status_code = 200 if res["ok"] else (409 if res.get("code") == "SLOT_TAKEN" else 404)
-    return jsonify(res), status_code
+    return jsonify(res), _contract_status_code(res)
 
 
 @manager_api.delete("/api/manager/contracts/<int:contract_id>")
@@ -565,6 +564,118 @@ def delete_contract_bookings_batch(contract_id: int):
     if res["ok"]:
         refresh_week_sheet()
     return jsonify(res), (200 if res["ok"] else 404)
+
+
+# ---------------------------------------------------------------------------
+# Contract payment plans (integrations/contract_billing.py, docs/contract_payments.md)
+# ---------------------------------------------------------------------------
+
+def _jsonable(value):
+    """JSON-safe copy that keeps None as null (unlike `_serialize`, which is
+    flat and turns None into "" for the sheet)."""
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    return value
+
+
+def _contract_status_code(res: dict) -> int:
+    if res.get("ok"):
+        return 200
+    return {"SLOT_TAKEN": 409, "NOT_FOUND": 404,
+            "PAYMENT_PROVIDER_ERROR": 502}.get(res.get("code"), 400)
+
+
+@manager_api.post("/api/manager/contracts/check-slots")
+def check_contract_slots():
+    """Which of these slots are already taken? Writes nothing.
+
+    Body: ``{slots: [...], start_date?, end_date?}``. Answers every conflicting
+    occurrence, so the modal can show them all before the manager submits.
+    """
+    body = request.get_json(silent=True) or {}
+    slots, err = booking_service._normalize_contract_slots(body.get("slots"))
+    if err:
+        return jsonify(err), 400
+    if body.get("start_date") and body.get("end_date") and not \
+            booking_service._contract_slots_in_range(slots, body["start_date"], body["end_date"]):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "contract booking slots must be within start_date and end_date."}), 400
+    conflicts = booking_service.find_slot_conflicts(slots)
+    return jsonify({"ok": True, "data": {
+        "free": not conflicts,
+        "conflicts": conflicts,
+        "occurrences": booking_service.count_slot_occurrences(slots),
+    }}), 200
+
+
+@manager_api.post("/api/manager/contracts/payment-plan/preview")
+def preview_contract_payment_plan():
+    """The installments a plan would create — for step 5 of the modal. Writes nothing."""
+    body = request.get_json(silent=True) or {}
+    if body.get("slots"):
+        slots, err = booking_service._normalize_contract_slots(body["slots"])
+        if err:
+            return jsonify(err), 400
+    else:
+        slots = []
+    res = contract_billing.preview_plan(
+        body.get("payment_plan"), price=body.get("price"),
+        start_date=body.get("start_date"), end_date=body.get("end_date"),
+        phone=body.get("phone"), slots=slots)
+    return jsonify(_jsonable(res)), _contract_status_code(res)
+
+
+@manager_api.get("/api/manager/contracts/<int:contract_id>/payments")
+def get_contract_payments(contract_id: int):
+    res = contract_billing.get_plan(contract_id)
+    return jsonify(_jsonable(res)), _contract_status_code(res)
+
+
+@manager_api.put("/api/manager/contracts/<int:contract_id>/payment-plan")
+def put_contract_payment_plan(contract_id: int):
+    body = request.get_json(silent=True) or {}
+    res = contract_billing.replace_plan(contract_id, body.get("payment_plan", body))
+    return jsonify(_jsonable(res)), _contract_status_code(res)
+
+
+@manager_api.delete("/api/manager/contracts/<int:contract_id>/payment-plan")
+def delete_contract_payment_plan(contract_id: int):
+    res = contract_billing.stop_plan(contract_id)
+    return jsonify(_jsonable(res)), _contract_status_code(res)
+
+
+@manager_api.patch("/api/manager/contracts/<int:contract_id>/installments/<int:installment_id>")
+def patch_contract_installment(contract_id: int, installment_id: int):
+    body = request.get_json(silent=True) or {}
+    fields = {k: body[k] for k in ("amount", "due_date") if k in body}
+    if not fields:
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "Передайте amount и/или due_date."}), 400
+    res = contract_billing.update_installment(contract_id, installment_id, fields)
+    return jsonify(_jsonable(res)), _contract_status_code(res)
+
+
+@manager_api.post("/api/manager/contracts/<int:contract_id>/installments/<int:installment_id>/mark-paid")
+def mark_contract_installment_paid(contract_id: int, installment_id: int):
+    body = request.get_json(silent=True) or {}
+    res = contract_billing.mark_installment_paid(
+        contract_id, installment_id, amount=body.get("amount"),
+        note=body.get("note") or f"manual:{_api_key_actor() or 'manager'}")
+    return jsonify(_jsonable(res)), _contract_status_code(res)
+
+
+@manager_api.post("/api/manager/contracts/<int:contract_id>/installments/<int:installment_id>/send")
+def send_contract_installment(contract_id: int, installment_id: int):
+    res = contract_billing.send_installment_now(contract_id, installment_id)
+    return jsonify(_jsonable(res)), _contract_status_code(res)
 
 
 @manager_api.post("/api/manager/bookings")

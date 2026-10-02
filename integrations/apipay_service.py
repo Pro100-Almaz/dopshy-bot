@@ -391,6 +391,19 @@ def sweep_pending_sends() -> int:
 
     sent = 0
     for row in rows:
+        if row.get("contract_installment_id"):
+            # A contract installment: no bookings to re-cut, but the
+            # installment itself may have been paid or cancelled meanwhile.
+            from integrations import contract_billing
+            try:
+                if contract_billing.resend_queued(row):
+                    sent += 1
+            except ApiPayError:
+                pass  # already logged, and recorded on the row
+            except Exception:
+                logger.exception("[APIPAY] Ошибка повторной отправки счёта %s",
+                                 row["external_order_id"])
+            continue
         booking_ids = list(row["booking_ids"] or [])
         # The slots may have expired while the send was failing; charging for
         # them now would be worse than never sending at all.
@@ -657,6 +670,9 @@ def apply_webhook_status(invoice_id, status: str, paid_at=None,
             )
             if row is None:
                 return None
+            if row.get("contract_installment_id"):
+                from integrations import contract_billing
+                return contract_billing.apply_invoice_status(cur, row, status)
             if status == apipay_client.STATUS_PAID:
                 return {"invoice": row, "changed": apply_paid(cur, row),
                         "released": False, "paid": True, "status": status}
@@ -680,6 +696,13 @@ def after_transition(invoice_row: dict, booking_ids: list[int],
     `status` is the invoice's new status; without it only the paid case can be
     told apart, which is why the two callers always pass it.
     """
+    if invoice_row.get("contract_installment_id"):
+        # A contract installment moves no booking and has its own message.
+        from integrations import contract_billing
+        contract_billing.after_invoice_transition(invoice_row, paid)
+        if status == apipay_client.STATUS_REFUNDED:
+            notify_refunded(invoice_row)
+        return
     if paid:
         notify_paid(invoice_row, booking_ids)
     elif released:

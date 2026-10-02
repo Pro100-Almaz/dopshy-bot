@@ -77,6 +77,6 @@ def clean_db(request):
         with conn.cursor() as cur:
             cur.execute(
                 "TRUNCATE customers, discounts, contracts, contract_bookings, bookings, booking_events, payments, booking_sessions, "
-                "apipay_invoices RESTART IDENTITY CASCADE"
+                "apipay_invoices, contract_installments RESTART IDENTITY CASCADE"
             )
     yield
