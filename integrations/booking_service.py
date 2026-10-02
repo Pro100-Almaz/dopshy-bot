@@ -1246,6 +1246,87 @@ def _conflict(conflicts: list[dict]) -> dict:
             "message": "Часть слотов уже занята — ни одна бронь не создана."}
 
 
+def _expand_slots(slots: list[dict], discount_id=None) -> tuple[list[dict], set[int], datetime, datetime]:
+    """Expand slots to their occurrence dates, plus the range the lookup must cover.
+
+    Returns ``(expanded, fields, min_date, max_date)``; each expanded slot is
+    its normalized fields plus ``bases`` — the occurrence dates.
+    """
+    expanded: list[dict] = []
+    min_date: datetime | None = None
+    max_date: datetime | None = None
+    fields: set[int] = set()
+    for s in slots:
+        field = int(s["field"])
+        date = str(s["date"])
+        ts = str(s["time_start"])[:5]
+        te_raw = str(s["time_end"])[:5]
+        te = normalize_end_time(ts, te_raw)          # 24:00 / 00:00 → 23:59
+        repeat_mode = s.get("repeat_mode") or "none"
+        repeat_until = s.get("repeat_until") or date
+        bases = occurrence_dates(date, repeat_until, repeat_mode)
+        fields.add(field)
+        for b in bases:
+            min_date = b if min_date is None else min(min_date, b)
+            # +1 day so the second half of a day-crossing occurrence is covered.
+            top = b + timedelta(days=1)
+            max_date = top if max_date is None else max(max_date, top)
+        expanded.append({"field": field, "ts": ts, "te": te, "te_raw": te_raw,
+                         "repeat_mode": repeat_mode, "repeat_until": repeat_until,
+                         "bases": bases, "discount_id": s.get("discount_id", discount_id)})
+    return expanded, fields, min_date, max_date
+
+
+def _find_conflicts(cur, expanded: list[dict], fields: set[int],
+                    min_date: datetime, max_date: datetime) -> list[dict]:
+    """Every expanded occurrence that overlaps a booking already holding its slot."""
+    from integrations.booking import check_range_free  # local import avoids import cycle
+
+    cur.execute(
+        """SELECT field, date, time_start, time_end
+             FROM bookings
+            WHERE field = ANY(%s) AND date BETWEEN %s AND %s
+              AND state <> 'cancelled' AND state = ANY(%s)
+              AND time_start IS NOT NULL AND time_end IS NOT NULL
+              AND NOT is_test""",
+        (sorted(fields), min_date.strftime("%Y-%m-%d"),
+         max_date.strftime("%Y-%m-%d"), list(_BLOCKING_STATES)),
+    )
+    booked = [dict(r) for r in cur.fetchall()]
+
+    conflicts: list[dict] = []
+    for e in expanded:
+        for b in e["bases"]:
+            d_str = b.strftime("%Y-%m-%d")
+            if not check_range_free(booked, d_str, e["ts"], e["te"], e["field"]):
+                conflicts.append({"field": e["field"], "date": d_str,
+                                  "time_start": e["ts"], "time_end": e["te_raw"]})
+    return conflicts
+
+
+def find_slot_conflicts(slots: list[dict]) -> list[dict]:
+    """The occurrences of `slots` that are already taken — nothing is written.
+
+    Backs the contract modal's "check" button, so a manager sees every clash
+    before submitting rather than one SLOT_TAKEN for the whole request.
+    """
+    if not slots:
+        return []
+    expanded, fields, min_date, max_date = _expand_slots(slots)
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            return _find_conflicts(cur, expanded, fields, min_date, max_date)
+
+
+def count_slot_occurrences(slots: list[dict]) -> int:
+    """How many bookable occurrences `slots` expand to (one per date, a
+    day-crossing interval counting once — the unit a per-booking plan bills)."""
+    if not slots:
+        return 0
+    expanded, _, _, _ = _expand_slots(slots)
+    return sum(len(e["bases"]) for e in expanded)
+
+
 def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
                                   notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
                                   reserved_until: int = 30, updated_by: str = 'manager',
@@ -1272,35 +1353,12 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
     where the ApiPay invoice is created. Anything it raises rolls the whole
     batch back, so bookings never outlive a failed invoice.
     """
-    from integrations.booking import check_range_free  # local import avoids import cycle
-
     if not slots:
         return _err("INVALID", "Не удалось сформировать ни одной брони из слотов.")
 
     # Expand every slot once; reuse the expansion for both the conflict
     # pre-check and the covering date range of the existing-bookings query.
-    expanded: list[dict] = []          # per-slot: normalized fields + occurrence base dates
-    min_date: datetime | None = None
-    max_date: datetime | None = None
-    fields: set[int] = set()
-    for s in slots:
-        field = int(s["field"])
-        date = str(s["date"])
-        ts = str(s["time_start"])[:5]
-        te_raw = str(s["time_end"])[:5]
-        te = normalize_end_time(ts, te_raw)          # 24:00 / 00:00 → 23:59
-        repeat_mode = s.get("repeat_mode") or "none"
-        repeat_until = s.get("repeat_until") or date
-        bases = occurrence_dates(date, repeat_until, repeat_mode)
-        fields.add(field)
-        for b in bases:
-            min_date = b if min_date is None else min(min_date, b)
-            # +1 day so the second half of a day-crossing occurrence is covered.
-            top = b + timedelta(days=1)
-            max_date = top if max_date is None else max(max_date, top)
-        expanded.append({"field": field, "ts": ts, "te": te, "te_raw": te_raw,
-                         "repeat_mode": repeat_mode, "repeat_until": repeat_until,
-                         "bases": bases, "discount_id": s.get("discount_id", discount_id)})
+    expanded, fields, min_date, max_date = _expand_slots(slots, discount_id)
 
     created: list[dict] = []
     booking_ids: list[int] = []
@@ -1309,25 +1367,7 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """SELECT field, date, time_start, time_end
-                         FROM bookings
-                        WHERE field = ANY(%s) AND date BETWEEN %s AND %s
-                          AND state <> 'cancelled' AND state = ANY(%s)
-                          AND time_start IS NOT NULL AND time_end IS NOT NULL
-                          AND NOT is_test""",
-                    (sorted(fields), min_date.strftime("%Y-%m-%d"),
-                     max_date.strftime("%Y-%m-%d"), list(_BLOCKING_STATES)),
-                )
-                booked = [dict(r) for r in cur.fetchall()]
-
-                conflicts: list[dict] = []
-                for e in expanded:
-                    for b in e["bases"]:
-                        d_str = b.strftime("%Y-%m-%d")
-                        if not check_range_free(booked, d_str, e["ts"], e["te"], e["field"]):
-                            conflicts.append({"field": e["field"], "date": d_str,
-                                              "time_start": e["ts"], "time_end": e["te_raw"]})
+                conflicts = _find_conflicts(cur, expanded, fields, min_date, max_date)
                 if conflicts:
                     return _conflict(conflicts)
 
@@ -1424,7 +1464,16 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
                     phone: str | None = None, status: str = "confirmed",
                     notes: str | None = None, source: str | None = None,
                     slots: list[dict] | None = None,
-                    actor_id: str | None = None) -> dict:
+                    actor_id: str | None = None,
+                    payment_plan: dict | None = None) -> dict:
+    """Create a contract, its bookings and — with `payment_plan` — its installments.
+
+    Everything is one transaction. The plan is validated and its number checked
+    against Kaspi BEFORE it opens (see `contract_billing.prepare_plan`); nothing
+    is billed here — installments are issued by the scheduler on their due date.
+    """
+    from integrations import contract_billing  # local import avoids import cycle
+
     status = status or "confirmed"
     phone = normalize_phone(phone) or None
     if status not in _CONTRACT_STATES:
@@ -1436,6 +1485,16 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
             return err
         if not _contract_slots_in_range(normalized_slots, start_date, end_date):
             return _err("INVALID", "contract booking slots must be within start_date and end_date.")
+        conflicts = find_slot_conflicts(normalized_slots)
+        if conflicts:
+            return _conflict(conflicts)
+
+    prepared = None
+    if payment_plan is not None:
+        prepared, err = contract_billing.prepare_plan(
+            payment_plan, price=price, start_date=start_date, end_date=end_date, phone=phone)
+        if err:
+            return err
 
     try:
         with _conn() as conn:
@@ -1475,6 +1534,8 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
                         "INSERT INTO contract_bookings (contract_id, booking_id) VALUES (%s, %s)",
                         [(contract_id, bid) for bid in booking_ids],
                     )
+                if prepared is not None:
+                    contract_billing.write_plan(cur, contract_id, prepared, booking_ids)
     except psycopg2.errors.ExclusionViolation:
         return _conflict([])
     except psycopg2.errors.CheckViolation:
@@ -1482,24 +1543,33 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
     except DiscountError as exc:
         return _err(exc.code, exc.message)
 
-    return _ok({
+    data = {
         "contract_id": contract_id,
         "booking_ids": booking_ids,
         "created": created,
         "created_count": len(booking_ids),
-    })
+    }
+    if prepared is not None:
+        data["payment_plan"] = contract_billing.get_plan(contract_id)["data"]
+    return _ok(data)
 
 
 def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | None = None,
                           source: str | None = None) -> dict:
+    from integrations import contract_billing  # local import avoids import cycle
+
     normalized_slots, err = _normalize_contract_slots(slots)
     if err:
         return err
+    conflicts = find_slot_conflicts(normalized_slots)
+    if conflicts:
+        return _conflict(conflicts)
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT id, customer_name, phone, status, notes FROM contracts WHERE id = %s FOR UPDATE",
+                    "SELECT id, customer_name, phone, status, notes, start_date, end_date "
+                    "FROM contracts WHERE id = %s FOR UPDATE",
                     (contract_id,),
                 )
                 contract = cur.fetchone()
@@ -1537,13 +1607,18 @@ def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | N
                     "INSERT INTO contract_bookings (contract_id, booking_id) VALUES (%s, %s)",
                     [(contract_id, bid) for bid in booking_ids],
                 )
+                # A per-booking plan bills the new bookings too; the shares of
+                # the not-yet-issued ones shrink to keep the price.
+                installments_added = contract_billing.add_booking_installments(
+                    cur, contract_id, booking_ids)
     except psycopg2.errors.ExclusionViolation:
         return _conflict([])
     except DiscountError as exc:
         return _err(exc.code, exc.message)
 
     return _ok({"contract_id": contract_id, "booking_ids": booking_ids,
-                "created": created, "created_count": len(booking_ids)})
+                "created": created, "created_count": len(booking_ids),
+                "installments_added": installments_added})
 
 
 def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> dict:
@@ -1556,6 +1631,8 @@ def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> 
     if "status" in patch and patch["status"] not in _CONTRACT_STATES:
         return _err("INVALID_STATUS", "Недопустимый статус договора.")
 
+    from integrations import contract_billing  # local import avoids import cycle
+
     set_clause = ", ".join(f"{k} = %s" for k in patch) + ", updated_at = NOW()"
     vals = list(patch.values()) + [contract_id]
     try:
@@ -1564,6 +1641,8 @@ def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> 
                 cur.execute(f"UPDATE contracts SET {set_clause} WHERE id = %s RETURNING id", vals)
                 if not cur.fetchone():
                     return _err("NOT_FOUND", "Договор не найден.")
+                if "price" in patch:
+                    contract_billing.on_price_changed(cur, contract_id)
                 if "status" in patch:
                     cur.execute(
                         "UPDATE bookings b SET state = %s, updated_at = NOW() "
@@ -1580,6 +1659,10 @@ def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> 
         return _conflict([])
     except psycopg2.errors.CheckViolation:
         return _err("INVALID", "end_date must be >= start_date.")
+    except contract_billing.PlanError as exc:
+        return _err(exc.code, exc.message)
+    if patch.get("status") in ("cancelled", "failed"):
+        contract_billing.on_contract_cancelled(contract_id, reason="contract_status_" + patch["status"])
     return _ok({"contract_id": contract_id})
 
 
@@ -1608,6 +1691,8 @@ def cancel_contract(contract_id: int, actor_id: str | None = None, reason: str =
     if cancelled_ids:
         from integrations import apipay_service
         apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason)
+    from integrations import contract_billing
+    contract_billing.on_contract_cancelled(contract_id, reason=reason)
     return _ok({"contract_id": contract_id, "cancelled_ids": cancelled_ids})
 
 
@@ -1638,6 +1723,7 @@ def cancel_contract_bookings(contract_id: int, booking_ids: list[int] | None = N
                 _record_event(cur, bid, "contract_booking_cancelled", "manager", actor_id, reason)
 
     if cancelled_ids:
-        from integrations import apipay_service
+        from integrations import apipay_service, contract_billing
         apipay_service.on_bookings_cancelled(cancelled_ids, reason=reason)
+        contract_billing.on_contract_bookings_cancelled(contract_id, cancelled_ids, reason=reason)
     return _ok({"contract_id": contract_id, "cancelled_ids": cancelled_ids})

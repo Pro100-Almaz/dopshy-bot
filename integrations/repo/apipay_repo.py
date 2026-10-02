@@ -36,20 +36,25 @@ def insert_invoice(cur, external_order_id: str, phone: str, amount,
                    booking_ids: list[int], source: str = "manager",
                    notify_chat_id: str | None = None,
                    notify_provider: str | None = None,
-                   notify_lang: str | None = None) -> int:
+                   notify_lang: str | None = None,
+                   contract_installment_id: int | None = None) -> int:
     """Queue an invoice on the caller's cursor; returns its local id.
 
     Writes the row only — ApiPay is NOT called here. The caller commits this
     alongside its bookings, then hands the row to `apipay_service.send_invoice`.
     `notify_*` carry who to message when it is paid (bot flow); NULL for
     manager-created invoices, which are reported in the manager UI instead.
+    `contract_installment_id` marks a contract installment invoice (migration
+    056) — those carry no `booking_ids` and are settled by `contract_billing`.
     """
     cur.execute(
         "INSERT INTO apipay_invoices (external_order_id, phone, amount, booking_ids, "
-        "  status, source, notify_chat_id, notify_provider, notify_lang) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        "  status, source, notify_chat_id, notify_provider, notify_lang, "
+        "  contract_installment_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (external_order_id, phone, amount, list(booking_ids), STATUS_CREATED,
-         source, notify_chat_id, notify_provider, notify_lang),
+         source, notify_chat_id, notify_provider, notify_lang,
+         contract_installment_id),
     )
     return cur.fetchone()["id"]
 
