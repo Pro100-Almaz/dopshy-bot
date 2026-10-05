@@ -43,6 +43,34 @@ def _full_context_docs(bot_name: str) -> list[tuple[str, str]]:
     return [(p.name, p.read_text(encoding="utf-8").strip()) for p in files]
 
 
+# Documents sent in full, and only when the router picks their intent. They are
+# kept out of similarity search (scope "academy_voucher") so they never take the
+# top-k slots of unrelated questions, and cost tokens only when actually needed.
+_INTENT_DOCS: dict[tuple[str, str], str] = {
+    ("dopsy_fs_school", "question_voucher"): "academy_football_voucher_transfer_steps.md",
+}
+
+
+def intent_context(bot_name: str | None, intent: str | None) -> str | None:
+    """Full text of the document dedicated to this intent, or None if there is none."""
+    name = _INTENT_DOCS.get((bot_name, intent))
+    if not name:
+        return None
+    path = Path(config.DOCUMENTS_PATH) / name
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    test_context.record(
+        "rag",
+        query=intent,
+        bot_name=bot_name,
+        mode="intent",
+        chunks=[{"source": name, "scope": "intent", "text": text}],
+    )
+    return f"[{name}]\n{text}"
+
+
 def retrieve_context(
     query: str,
     k: int = config.TOP_K_RESULTS,

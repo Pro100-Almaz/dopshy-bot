@@ -131,3 +131,39 @@ def test_no_trial_on_record_points_to_admin(monkeypatch, call):
 
     assert "+7 700 555 6000" in reply
     assert "табылмады" not in reply and "жоқ" not in reply
+
+
+def test_voucher_question_answers_from_full_voucher_guide(academy, monkeypatch):
+    academy["intent"] = ("question_voucher", "kk")
+    seen = {}
+
+    def fake_llm(**kwargs):
+        seen.update(kwargs)
+        return "Қадамдар: ...", None
+
+    monkeypatch.setattr(message_handler, "retrieve_context", lambda *a, **k: "UNRELATED CHUNKS")
+    monkeypatch.setattr(message_handler, "get_ai_response", fake_llm)
+
+    message_handler.handle_incoming_message(_text("Ваучермен сіздерге ауысуға бола ма?"))
+
+    assert "academy_football_voucher_transfer_steps.md" in seen["context"]
+    assert "Выданные ваучеры" in seen["context"]
+    assert "UNRELATED CHUNKS" not in seen["context"]
+    assert academy["sent"] == ["Қадамдар: ..."]
+
+
+def test_non_voucher_question_keeps_normal_rag_context(academy, monkeypatch):
+    academy["intent"] = ("other", "kk")
+    seen = {}
+
+    def fake_llm(**kwargs):
+        seen.update(kwargs)
+        return "ok", None
+
+    monkeypatch.setattr(message_handler, "retrieve_context", lambda *a, **k: "NORMAL CHUNKS")
+    monkeypatch.setattr(message_handler, "get_ai_response", fake_llm)
+
+    message_handler.handle_incoming_message(_text("Турнир бола ма?"))
+
+    assert "NORMAL CHUNKS" in seen["context"]
+    assert "voucher" not in seen["context"]

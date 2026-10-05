@@ -51,6 +51,9 @@ def get_vector_store() -> Chroma:
 
 def _document_scope(file_path: Path) -> str:
     name = file_path.name.lower()
+    # Loaded in full only for voucher questions (rag.retriever.intent_context).
+    if name.startswith("academy_") and "voucher" in name:
+        return "academy_voucher"
     if name.startswith("academy_football_"):
         return "academy_football"
     if name.startswith("academy_boxing_"):
