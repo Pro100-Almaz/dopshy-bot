@@ -68,7 +68,9 @@ def retrieve_context(
     try:
         results = store.similarity_search(query, k=k, filter=filter_)
     except Exception:
-        if filter_:
+        # An unscoped search would hand academy bots arena documents (and the
+        # arena's contacts), so only the arena bot may fall back to it.
+        if filter_ and bot_name == "dopsy_bot":
             results = store.similarity_search(query, k=k)
         else:
             raise

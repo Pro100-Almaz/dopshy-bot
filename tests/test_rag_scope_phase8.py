@@ -70,3 +70,31 @@ def test_other_bots_still_use_vector_search(tmp_path, monkeypatch):
         retriever._scope_filter("dopsy_bot"),
         retriever._scope_filter("dopsy_fs_school"),
     ]
+
+
+class _BrokenFilterStore:
+    def __init__(self):
+        self.calls = []
+
+    def similarity_search(self, query, k, filter=None):
+        self.calls.append(filter)
+        if filter is not None:
+            raise ValueError("filter not supported")
+        return []
+
+
+def test_academy_bot_never_falls_back_to_unscoped_search(monkeypatch):
+    store = _BrokenFilterStore()
+    monkeypatch.setattr(retriever, "_load_store", lambda: store)
+
+    with pytest.raises(ValueError):
+        retriever.retrieve_context("q", bot_name="dopsy_fs_school")
+    assert store.calls == [retriever._scope_filter("dopsy_fs_school")]
+
+
+def test_arena_bot_keeps_unscoped_fallback(monkeypatch):
+    store = _BrokenFilterStore()
+    monkeypatch.setattr(retriever, "_load_store", lambda: store)
+
+    assert retriever.retrieve_context("q", bot_name="dopsy_bot") == ""
+    assert store.calls == [retriever._scope_filter("dopsy_bot"), None]

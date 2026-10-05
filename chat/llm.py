@@ -234,6 +234,10 @@ def route_trial_message(
         "Use question_child_training for factual child group questions that do not yet ask to book. "
         "Use question_payment for payment method/payment day questions, question_discounts for discounts/promotions, "
         "and question_contacts for phone/address/contact questions. "
+        "Use question_invoice when the user asks to be sent an invoice, bill or payment "
+        "details — e.g. 'шот жіберіңіз', 'маған шот жіберіңіз', 'төлемге шот керек', "
+        "'скиньте счёт', 'выставьте счёт', 'реквизиты для оплаты'. This is never "
+        "trial_status or trial_cancel. "
         "Use trial_continue only when the user is clearly providing missing signup details "
         "for an already-started child/group trial signup, such as child name, birth year, "
         "experience, school shift, or preferred date/time. "
@@ -246,6 +250,10 @@ def route_trial_message(
         "Use trial_edit when the user wants to change a detail of an existing signup — "
         "e.g. 'перенесите на другое время', 'поменяйте дату', 'измените имя ребенка'. "
         "Use human_help when they ask for an administrator or human manager. "
+        "Use unclear when you cannot tell what the user means: garbled or random text, "
+        "a fragment with no clear question or request, or a message whose meaning is "
+        "ambiguous even with the conversation history. Do not use unclear for greetings, "
+        "thanks, or a short answer to the bot's own question. "
         "Detect Russian as ru and Kazakh as kk."
     )
     if pending:
