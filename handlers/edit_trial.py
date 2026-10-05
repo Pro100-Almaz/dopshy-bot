@@ -39,6 +39,17 @@ SHIFT_LABELS = {
 }
 
 
+# No trial on record usually means a client from before the bot — not
+# "nothing exists". Hand them to the admin instead of a confusing "not found".
+_NO_TRIAL_RU = (
+    "Чтобы уточнить вашу запись, свяжитесь, пожалуйста, с администратором школы: "
+    "+7 700 555 6000."
+)
+_NO_TRIAL_KK = (
+    "Жазылымыңызды нақтылау үшін мектеп әкімшісіне хабарласыңыз: +7 700 555 6000."
+)
+
+
 def _bilingual(ru: str, kk: str) -> str:
     return f"{ru}\n\n— — —\n\n{kk}"
 
@@ -204,11 +215,7 @@ def _normalize_edit_patch(diff: dict, extracted: dict) -> dict:
 def handle_trial_status_request(sender_phone: str, bot_name: str, lang: str = "ru") -> str:
     trials = _active_trials(bot_name, sender_phone)
     if not trials:
-        return (
-            "Сізде сынақ сабағына белсенді жазылым жоқ."
-            if lang == "kk"
-            else "У вас нет активной записи на пробное занятие."
-        )
+        return _NO_TRIAL_KK if lang == "kk" else _NO_TRIAL_RU
 
     confirmed = [t for t in trials if t.get("state") == "confirmed"]
     drafts = [t for t in trials if t.get("state") == "draft"]
@@ -233,10 +240,7 @@ def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) 
     postgres.delete_session(bot_name, chat_id)
 
     if not trials:
-        return _bilingual(
-            "Записи не найдены на ваш номер.",
-            "Сіздің нөміріңізге сабаққа жазылым табылмады.",
-        )
+        return _bilingual(_NO_TRIAL_RU, _NO_TRIAL_KK)
     if len(trials) == 1:
         trial_service.cancel_trial(bot_name, chat_id, trials[0]["id"], "user_cancel_trial")
         return _bilingual(
@@ -302,10 +306,7 @@ def handle_edit_request(
         )
 
     if not confirmed_trials:
-        return _bilingual(
-            "У вас нет активной записи на пробный урок, которую можно изменить.",
-            "Сізде өзгертуге болатын белсенді сынақ сабағы жоқ.",
-        )
+        return _bilingual(_NO_TRIAL_RU, _NO_TRIAL_KK)
     if len(confirmed_trials) > 1:
         return _bilingual(
             "У вас несколько записей. Пока изменение через бот доступно только если запись одна.",

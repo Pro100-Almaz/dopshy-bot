@@ -51,6 +51,7 @@ def test_document_messages_do_not_trigger_receipt_reader_when_disabled(monkeypat
         False,
     )
     monkeypatch.setattr(message_handler, "is_bot_paused", lambda phone: False)
+    monkeypatch.setattr(message_handler, "is_existing_academy_client", lambda phone: False)
     monkeypatch.setattr(
         message_handler,
         "mark_as_read",
@@ -83,6 +84,7 @@ def test_academy_reset_cancels_existing_trial_draft(monkeypatch):
         }
     })
     monkeypatch.setattr(message_handler, "is_bot_paused", lambda phone: False)
+    monkeypatch.setattr(message_handler, "is_existing_academy_client", lambda phone: False)
     monkeypatch.setattr(
         message_handler,
         "mark_as_read",
@@ -123,3 +125,63 @@ def test_academy_reset_cancels_existing_trial_draft(monkeypatch):
         call[0] == "send" and "История разговора сброшена" in call[2]
         for call in calls
     )
+
+
+import pytest
+
+
+def _academy_non_text(monkeypatch, msg_type, receipts_enabled=False):
+    calls = []
+
+    monkeypatch.setattr(message_handler.config, "BOT_CONFIGS", {
+        "academy-phone-id": {
+            "name": "dopsy_fs_school",
+            "phone_number_id": "academy-phone-id",
+        }
+    })
+    monkeypatch.setattr(
+        message_handler.config,
+        "PAYMENT_RECEIPT_RECOGNITION_ENABLED",
+        receipts_enabled,
+    )
+    monkeypatch.setattr(message_handler, "is_bot_paused", lambda phone: False)
+    monkeypatch.setattr(message_handler, "is_existing_academy_client", lambda phone: False)
+    monkeypatch.setattr(
+        message_handler,
+        "mark_as_read",
+        lambda channel, message_id: calls.append(("read", message_id)),
+    )
+    monkeypatch.setattr(
+        message_handler,
+        "_handle_payment_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("receipt reader called")),
+    )
+    monkeypatch.setattr(
+        message_handler,
+        "send_text_message",
+        lambda channel, to, text: calls.append(("send", to, text)),
+    )
+
+    payload = _payload()
+    payload.message_type = msg_type
+    payload.text = None
+    message_handler.handle_incoming_message(payload)
+    return calls
+
+
+@pytest.mark.parametrize("msg_type", ["image", "reaction", "sticker", "document"])
+@pytest.mark.parametrize("receipts_enabled", [False, True])
+def test_academy_stays_silent_on_receipts_and_media(monkeypatch, msg_type, receipts_enabled):
+    calls = _academy_non_text(monkeypatch, msg_type, receipts_enabled)
+
+    # No reply, and left unread so the school admin notices it.
+    assert calls == []
+
+
+@pytest.mark.parametrize("msg_type", ["audio", "video"])
+def test_academy_asks_to_write_instead_of_voice_or_video(monkeypatch, msg_type):
+    calls = _academy_non_text(monkeypatch, msg_type)
+
+    assert ("read", "wa-msg-1") in calls
+    sends = [call for call in calls if call[0] == "send"]
+    assert sends == [("send", "+77001112233", message_handler._ACADEMY_VOICE_VIDEO_REPLY)]

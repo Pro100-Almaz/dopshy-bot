@@ -26,6 +26,7 @@ from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChan
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations.repo.academy_repo import get_existing_trial_draft
 from integrations.repo.bot_pause_repo import is_bot_paused
+from integrations.repo.existing_client_repo import is_existing_academy_client
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from integrations.sheets.trial_sheets import refresh_all_trials
@@ -175,11 +176,47 @@ _LOCATION_MESSAGE = (
 
 _ACADEMY_ADMIN_PHONE = "+7 700 555 6000"
 
+# WhatsApp sends voice notes as "audio"; round video notes arrive as "video".
+_ACADEMY_VOICE_VIDEO_TYPES = {"audio", "voice", "video"}
+_ACADEMY_VOICE_VIDEO_REPLY = (
+    "Кешіріңіз, дауыстық және бейне хабарламаларды тыңдай алмаймын 🙏 "
+    "Сұрағыңызды мәтінмен жазып жіберсеңіз, бірден жауап беремін.\n\n"
+    "–––\n\n"
+    "Извините, я не могу прослушать голосовые и видеосообщения 🙏 "
+    "Напишите, пожалуйста, ваш вопрос текстом — я сразу отвечу."
+)
+
+_ACADEMY_UNCLEAR_REPLY = {
+    "kk": "Күте тұрыңыз, сізбен мектеп әкімшісі байланысады.",
+    "ru": "Подождите, пожалуйста, с вами свяжется администратор школы.",
+}
+
+_PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
+
+
+def _has_foreign_phone(text: str) -> bool:
+    """True if the text names any phone number other than the school admin's.
+
+    Academy replies must never carry the arena's or an invented number.
+    """
+    admin = re.sub(r"\D", "", _ACADEMY_ADMIN_PHONE)
+    for match in _PHONE_RE.finditer(text or ""):
+        digits = re.sub(r"\D", "", match.group())
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        # Full KZ numbers (+7 7xx… mobile, +7 71xx… city) are 11 digits starting
+        # with 77 — this keeps price ranges like "10 000 - 15 000" from matching.
+        if len(digits) == 11 and digits.startswith("77") and digits != admin:
+            return True
+    return False
+
+
 _ACADEMY_INFO_INTENTS = {
     "question_personal_training",
     "question_adult_training",
     "question_child_training",
     "question_payment",
+    "question_invoice",
     "question_discounts",
     "question_contacts",
 }
@@ -220,6 +257,11 @@ def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
         if lang == "kk":
             return f"Төлем шарттарын әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
         return f"Условия оплаты уточнит администратор: {_ACADEMY_ADMIN_PHONE}."
+
+    if intent == "question_invoice":
+        if lang == "kk":
+            return f"Төлемге шотты мектеп әкімшісі жібереді. Әкімші телефоны: {_ACADEMY_ADMIN_PHONE}."
+        return f"Счёт на оплату отправит администратор школы. Телефон администратора: {_ACADEMY_ADMIN_PHONE}."
 
     if intent == "question_discounts":
         if lang == "kk":
@@ -325,6 +367,27 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             if message_id:
                 mark_as_read(channel, message_id)
             logger.info("[PAUSED] Bot paused for %s — skipping auto-reply", sender_id)
+            return
+
+        # Existing academy clients are handled by managers: the bot has no record
+        # of their earlier chats. Left unread so the message stays visible to them.
+        is_academy = bot_config["name"] != "dopsy_bot"
+        if is_academy and is_existing_academy_client(sender_id):
+            logger.info("[EXISTING] %s is an existing client of %s — skipping auto-reply",
+                        sender_id, bot_config["name"])
+            return
+
+        if is_academy and msg_type not in ("text", "interactive"):
+            # Voice and video notes get a polite "please write instead".
+            if msg_type in _ACADEMY_VOICE_VIDEO_TYPES:
+                if message_id:
+                    mark_as_read(channel, message_id)
+                send_text_message(channel, sender_id, _ACADEMY_VOICE_VIDEO_REPLY)
+                return
+            # Receipts, photos, files, reactions: no reply, and left unread so
+            # the school admin notices and handles them manually.
+            logger.info("[SKIP] %s message from %s via %s — no auto-reply",
+                        msg_type, sender_id, bot_config["name"])
             return
 
         # Mark as read immediately
@@ -755,6 +818,14 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
+            # Meaning unclear: hand over to the admin rather than let the LLM guess.
+            if trial_intent == "unclear":
+                handle_reply = _ACADEMY_UNCLEAR_REPLY.get(trial_lang, _ACADEMY_UNCLEAR_REPLY["kk"])
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
         # 4. Generate response
         reply, tool_call = get_ai_response(
             phone_number_id=phone_number_id,
@@ -764,6 +835,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             context=context,
         )
         logger.info("[LLM] Raw reply (%.120s) | tool_call=%s", reply, tool_call)
+
+        if is_academy and _has_foreign_phone(reply):
+            logger.warning("[LLM] Academy reply named a foreign phone number — replaced: %.200s", reply)
+            reply = _ACADEMY_UNCLEAR_REPLY.get(builder.detect_lang(user_text), _ACADEMY_UNCLEAR_REPLY["kk"])
 
         # 5a. Mid-signup the flow already owns the draft: starting a signup is
         # a no-op and an edit goes through the current step, which only resets
