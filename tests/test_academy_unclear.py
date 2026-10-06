@@ -20,12 +20,20 @@ _RU = message_handler._ACADEMY_UNCLEAR_REPLY["ru"]
     "77011234567",
 ])
 def test_foreign_phone_detected(text):
-    assert message_handler._has_foreign_phone(text)
+    assert message_handler._has_foreign_phone(text, "dopsy_fs_school")
+
+
+@pytest.mark.parametrize("bot_name, text", [
+    ("dopsy_fs_school", "Позвоните +7 700 555 2202"),
+    ("dopsy_boxing", "Позвоните +7 700 555 6006"),
+])
+def test_other_academy_admin_phone_is_foreign(bot_name, text):
+    assert message_handler._has_foreign_phone(text, bot_name)
 
 
 @pytest.mark.parametrize("text", [
-    "Әкімші телефоны: +7 700 555 6000.",
-    "Позвоните 8 700 555 60 00",
+    "Әкімші телефоны: +7 700 555 6006.",
+    "Позвоните 8 700 555 60 06",
     "Абонемент 10 000 - 15 000 тг",
     "Цены от 70 000 – 75 000 тг",
     "Занятия в 18:00–19:30, 2015–2017 г.р.",
@@ -33,7 +41,7 @@ def test_foreign_phone_detected(text):
     None,
 ])
 def test_admin_phone_prices_and_dates_are_allowed(text):
-    assert not message_handler._has_foreign_phone(text)
+    assert not message_handler._has_foreign_phone(text, "dopsy_fs_school")
 
 
 @pytest.fixture
@@ -95,11 +103,11 @@ def test_llm_reply_with_foreign_number_is_replaced(academy):
 
 
 def test_llm_reply_with_admin_number_is_kept(academy):
-    academy["llm_reply"] = "Әкімшіге хабарласыңыз: +7 700 555 6000"
+    academy["llm_reply"] = "Әкімшіге хабарласыңыз: +7 700 555 6006"
 
     message_handler.handle_incoming_message(_text("турнир қашан"))
 
-    assert academy["sent"] == ["Әкімшіге хабарласыңыз: +7 700 555 6000"]
+    assert academy["sent"] == ["Әкімшіге хабарласыңыз: +7 700 555 6006"]
 
 
 @pytest.mark.parametrize("lang, needle", [("kk", "шотты"), ("ru", "Счёт")])
@@ -112,7 +120,7 @@ def test_invoice_request_goes_to_admin(academy, monkeypatch, lang, needle):
 
     [reply] = academy["sent"]
     assert needle in reply
-    assert "+7 700 555 6000" in reply
+    assert "+7 700 555 6006" in reply
     assert "табылмады" not in reply
 
 
@@ -129,7 +137,7 @@ def test_no_trial_on_record_points_to_admin(monkeypatch, call):
 
     reply = call(edit_trial)
 
-    assert "+7 700 555 6000" in reply
+    assert "+7 700 555 6006" in reply
     assert "табылмады" not in reply and "жоқ" not in reply
 
 

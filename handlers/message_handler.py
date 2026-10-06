@@ -9,6 +9,8 @@ from typing import Union
 
 import requests
 
+from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES
+
 from chat.conversation import append_message, get_history, clear_history
 from chat.llm import get_ai_response, route_incoming_message, route_trial_message
 from handlers.extractor import extract_booking_details
@@ -174,8 +176,6 @@ _LOCATION_MESSAGE = (
     "2GIS сілтемесі: https://2gis.kz/astana/geo/70000001074875383\n"
 )
 
-_ACADEMY_ADMIN_PHONE = "+7 700 555 6000"
-
 # WhatsApp sends voice notes as "audio"; round video notes arrive as "video".
 _ACADEMY_VOICE_VIDEO_TYPES = {"audio", "voice", "video"}
 _ACADEMY_VOICE_VIDEO_REPLY = (
@@ -194,12 +194,12 @@ _ACADEMY_UNCLEAR_REPLY = {
 _PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
 
 
-def _has_foreign_phone(text: str) -> bool:
-    """True if the text names any phone number other than the school admin's.
+def _has_foreign_phone(text: str, bot_name: str) -> bool:
+    """True if the text names any phone number other than this school's admin.
 
     Academy replies must never carry the arena's or an invented number.
     """
-    admin = re.sub(r"\D", "", _ACADEMY_ADMIN_PHONE)
+    admin = re.sub(r"\D", "", ACADEMY_ADMIN_PHONES[bot_name])
     for match in _PHONE_RE.finditer(text or ""):
         digits = re.sub(r"\D", "", match.group())
         if len(digits) == 11 and digits.startswith("8"):
@@ -226,17 +226,18 @@ builder = BasePromptBuilder({}, "", (), ())
 
 def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
     is_boxing = bot_name == "dopsy_boxing"
+    phone = ACADEMY_ADMIN_PHONES[bot_name]
 
     if intent in {"question_personal_training", "question_adult_training"}:
         if lang == "kk":
             return (
                 "Жеке немесе ересектерге арналған жаттығулар бойынша баға мен бос уақытты "
-                f"әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
+                f"әкімші нақтылайды: {phone}."
             )
         subject = "персональным и взрослым тренировкам" if is_boxing else "индивидуальным условиям"
         return (
             f"По {subject} стоимость и свободное время уточняет администратор: "
-            f"{_ACADEMY_ADMIN_PHONE}."
+            f"{phone}."
         )
 
     if intent == "question_child_training":
@@ -255,24 +256,24 @@ def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
 
     if intent == "question_payment":
         if lang == "kk":
-            return f"Төлем шарттарын әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
-        return f"Условия оплаты уточнит администратор: {_ACADEMY_ADMIN_PHONE}."
+            return f"Төлем шарттарын әкімші нақтылайды: {phone}."
+        return f"Условия оплаты уточнит администратор: {phone}."
 
     if intent == "question_invoice":
         if lang == "kk":
-            return f"Төлемге шотты мектеп әкімшісі жібереді. Әкімші телефоны: {_ACADEMY_ADMIN_PHONE}."
-        return f"Счёт на оплату отправит администратор школы. Телефон администратора: {_ACADEMY_ADMIN_PHONE}."
+            return f"Төлемге шотты мектеп әкімшісі жібереді. Әкімші телефоны: {phone}."
+        return f"Счёт на оплату отправит администратор школы. Телефон администратора: {phone}."
 
     if intent == "question_discounts":
         if lang == "kk":
-            return f"Жеңілдіктер мен арнайы шарттарды әкімші нақтылайды: {_ACADEMY_ADMIN_PHONE}."
-        return f"Скидки и специальные условия уточнит администратор: {_ACADEMY_ADMIN_PHONE}."
+            return f"Жеңілдіктер мен арнайы шарттарды әкімші нақтылайды: {phone}."
+        return f"Скидки и специальные условия уточнит администратор: {phone}."
 
     if lang == "kk":
         return (
-            f"Мекенжай: Астана, Сығанақ 6Ф. Әкімші телефоны: {_ACADEMY_ADMIN_PHONE}."
+            f"Мекенжай: Астана, Сығанақ 6Ф. Әкімші телефоны: {phone}."
         )
-    return f"Адрес: Астана, Сыганак 6Ф. Телефон администратора: {_ACADEMY_ADMIN_PHONE}."
+    return f"Адрес: Астана, Сыганак 6Ф. Телефон администратора: {phone}."
 
 
 def _with_pending(answer: str, pending: str | None) -> str:
@@ -843,7 +844,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         )
         logger.info("[LLM] Raw reply (%.120s) | tool_call=%s", reply, tool_call)
 
-        if is_academy and _has_foreign_phone(reply):
+        if is_academy and _has_foreign_phone(reply, bot_config["name"]):
             logger.warning("[LLM] Academy reply named a foreign phone number — replaced: %.200s", reply)
             reply = _ACADEMY_UNCLEAR_REPLY.get(builder.detect_lang(user_text), _ACADEMY_UNCLEAR_REPLY["kk"])
 

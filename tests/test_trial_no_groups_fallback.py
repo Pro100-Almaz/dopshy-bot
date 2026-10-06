@@ -110,4 +110,4 @@ def test_no_age_filtered_groups_tells_user_to_call_admin(monkeypatch):
     )
 
     assert "позвоните администратору" in reply
-    assert "+7 700 555 6000" in reply
+    assert "+7 700 555 6006" in reply
