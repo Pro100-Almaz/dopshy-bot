@@ -49,6 +49,7 @@ SELECT_TRIAL_INTENT_LLM = {
                         "question_child_training",
                         "question_payment",
                         "question_invoice",
+                        "question_voucher",
                         "question_discounts",
                         "question_contacts",
                         "trial_new",

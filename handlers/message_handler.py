@@ -30,7 +30,7 @@ from integrations.repo.existing_client_repo import is_existing_academy_client
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
 from integrations.sheets.trial_sheets import refresh_all_trials
-from rag.retriever import retrieve_context
+from rag.retriever import intent_context, retrieve_context
 from handlers.whatsapp_client import send_text_message as _send_text_message, mark_as_read, download_media
 from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
@@ -817,6 +817,13 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)
                 return
+
+            # Voucher questions: the LLM answers from the full voucher guide only,
+            # instead of the usual top-k chunks and availability.
+            if trial_intent == "question_voucher":
+                voucher_doc = intent_context(bot_name, trial_intent)
+                if voucher_doc:
+                    context = voucher_doc
 
             # Meaning unclear: hand over to the admin rather than let the LLM guess.
             if trial_intent == "unclear":

@@ -98,3 +98,28 @@ def test_arena_bot_keeps_unscoped_fallback(monkeypatch):
 
     assert retriever.retrieve_context("q", bot_name="dopsy_bot") == ""
     assert store.calls == [retriever._scope_filter("dopsy_bot"), None]
+
+
+def test_voucher_docs_get_their_own_scope():
+    assert _document_scope(Path("academy_football_voucher_transfer_steps.md")) == "academy_voucher"
+    # ...which no bot's similarity-search filter includes.
+    for bot in ("dopsy_bot", "dopsy_fs_school", "dopsy_boxing"):
+        assert "academy_voucher" not in str(retriever._scope_filter(bot))
+
+
+def test_intent_context_loads_voucher_doc_only_for_football_voucher(tmp_path, monkeypatch):
+    (tmp_path / "academy_football_voucher_transfer_steps.md").write_text(
+        "voucher steps", encoding="utf-8"
+    )
+    monkeypatch.setattr(retriever.config, "DOCUMENTS_PATH", str(tmp_path))
+
+    assert retriever.intent_context("dopsy_fs_school", "question_voucher") == (
+        "[academy_football_voucher_transfer_steps.md]\nvoucher steps"
+    )
+    assert retriever.intent_context("dopsy_boxing", "question_voucher") is None
+    assert retriever.intent_context("dopsy_fs_school", "question_price") is None
+
+
+def test_voucher_doc_exists_in_documents():
+    name = retriever._INTENT_DOCS[("dopsy_fs_school", "question_voucher")]
+    assert (Path(__file__).parent.parent / "documents" / name).is_file()
