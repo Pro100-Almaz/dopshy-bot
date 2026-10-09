@@ -7,6 +7,9 @@ use it for the **avans (prepayment)** on bookings made from the manager UI and
 from the WhatsApp bot alike — one avans of `APIPAY_AVANS_PER_BOOKING` per slot,
 pushed to the client's Kaspi app.
 
+Contract installments (subscription-style payment plans) reuse this same
+pipeline — outbox, webhook, reconciliation — see `contract_payments.md`.
+
 ---
 
 ## 1. What was added

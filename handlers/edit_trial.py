@@ -3,6 +3,7 @@
 import logging
 from datetime import date, datetime
 
+from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES
 from handlers.academy_extractor import extract_trial_details
 from integrations import trial_service
 from integrations.repo import postgres
@@ -41,13 +42,15 @@ SHIFT_LABELS = {
 
 # No trial on record usually means a client from before the bot — not
 # "nothing exists". Hand them to the admin instead of a confusing "not found".
-_NO_TRIAL_RU = (
-    "Чтобы уточнить вашу запись, свяжитесь, пожалуйста, с администратором школы: "
-    "+7 700 555 6000."
-)
-_NO_TRIAL_KK = (
-    "Жазылымыңызды нақтылау үшін мектеп әкімшісіне хабарласыңыз: +7 700 555 6000."
-)
+def _no_trial_ru(bot_name: str) -> str:
+    return (
+        "Чтобы уточнить вашу запись, свяжитесь, пожалуйста, с администратором школы: "
+        f"{ACADEMY_ADMIN_PHONES[bot_name]}."
+    )
+
+
+def _no_trial_kk(bot_name: str) -> str:
+    return f"Жазылымыңызды нақтылау үшін мектеп әкімшісіне хабарласыңыз: {ACADEMY_ADMIN_PHONES[bot_name]}."
 
 
 def _bilingual(ru: str, kk: str) -> str:
@@ -215,7 +218,7 @@ def _normalize_edit_patch(diff: dict, extracted: dict) -> dict:
 def handle_trial_status_request(sender_phone: str, bot_name: str, lang: str = "ru") -> str:
     trials = _active_trials(bot_name, sender_phone)
     if not trials:
-        return _NO_TRIAL_KK if lang == "kk" else _NO_TRIAL_RU
+        return _no_trial_kk(bot_name) if lang == "kk" else _no_trial_ru(bot_name)
 
     confirmed = [t for t in trials if t.get("state") == "confirmed"]
     drafts = [t for t in trials if t.get("state") == "draft"]
@@ -240,7 +243,7 @@ def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) 
     postgres.delete_session(bot_name, chat_id)
 
     if not trials:
-        return _bilingual(_NO_TRIAL_RU, _NO_TRIAL_KK)
+        return _bilingual(_no_trial_ru(bot_name), _no_trial_kk(bot_name))
     if len(trials) == 1:
         trial_service.cancel_trial(bot_name, chat_id, trials[0]["id"], "user_cancel_trial")
         return _bilingual(
@@ -306,7 +309,7 @@ def handle_edit_request(
         )
 
     if not confirmed_trials:
-        return _bilingual(_NO_TRIAL_RU, _NO_TRIAL_KK)
+        return _bilingual(_no_trial_ru(bot_name), _no_trial_kk(bot_name))
     if len(confirmed_trials) > 1:
         return _bilingual(
             "У вас несколько записей. Пока изменение через бот доступно только если запись одна.",

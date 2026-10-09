@@ -1,4 +1,4 @@
-from chat.system_prompts.academy_rules import ACADEMY_RULES
+from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES, ACADEMY_RULES
 
 SYSTEM_PROMPT = """Ты — умный ассистент академии бокса «Boxy Academy» в Астане 🥊.
 Ты общаешься с клиентами в WhatsApp на русском или казахском языке — всегда отвечай на том языке, на котором написал пользователь.
@@ -92,4 +92,4 @@ SYSTEM_PROMPT = """Ты — умный ассистент академии бо�
 - Markdown қолданба: тақырыптар (#), сілтемелер [мәтін](url), кестелер
 - Сирек ерекшеле — тек ең маңыздысын (мысалы, уақыт немесе баға), тұтас сөйлемдерді емес
 """
-SYSTEM_PROMPT += ACADEMY_RULES
+SYSTEM_PROMPT += ACADEMY_RULES.replace("{admin_phone}", ACADEMY_ADMIN_PHONES["dopsy_boxing"])
