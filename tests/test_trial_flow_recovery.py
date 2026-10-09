@@ -11,13 +11,20 @@ Real production incidents this covers:
 - "мои занятия" / "какие есть у меня пробные" during intake was treated as an
   attempted (invalid) value for whatever field was being asked, instead of
   answering the actual question.
-- Every reasoned-fallback reply during intake got "Укажите имя ребенка."
-  glued on verbatim regardless of context — e.g. right after the bot itself
-  asked the user's own age in response to "можно ли записаться взрослому?",
-  making the very next line ask for a child's name.
 """
 
-from handlers.llm_trial_flow import LlmTrialFlowHandler, _confirm_decision, _reasoned_fallback
+import pytest
+
+from handlers import llm_trial_flow
+from handlers.llm_trial_flow import BOXING_T, T, LlmTrialFlowHandler, _confirm_decision
+
+pytestmark = pytest.mark.no_db
+
+_CHOSEN_DRAFT = {
+    "id": 11, "trial_day": "2026-09-25", "start_time": "16:00", "end_time": "17:00", "group_id": 7,
+    "child_name": "Ерсултан", "child_birth_year": 2016,
+    "experience": "Intermediate", "school_shift": "morning",
+}
 
 
 def test_confirm_decision_ignores_da_inside_other_words():
@@ -33,59 +40,42 @@ def test_confirm_decision_recognizes_cancel_stems():
     assert _confirm_decision("нет") == "no"
 
 
-def test_trial_confirm_unrelated_question_gets_reasoned_fallback_not_autoconfirm(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.academy_repo.get_trial",
-        lambda trial_id: {
-            "id": trial_id,
-            "trial_day": "2026-09-25",
-            "start_time": "16:00",
-            "end_time": "17:00",
-            "child_name": "Ерсултан",
-            "child_birth_year": 2016,
-            "experience": "Intermediate",
-            "school_shift": "morning",
-        },
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow._extract_user_data",
-        lambda *args, **kwargs: {},
-    )
-    calls = {}
+def _with_draft(monkeypatch, draft, extracted=None):
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
+                        lambda phone, bot_name: dict(draft))
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
+                        lambda history, user_text: dict(extracted or {}))
+    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake",
+                        lambda bot_name, trial_id, fields: {"ok": True, "data": {"trial": {**draft, **fields}}})
 
-    def fake_fallback(bot_name, lang, user_text, reminder):
-        calls["args"] = (bot_name, lang, user_text)
-        return "FALLBACK_REPLY"
 
-    monkeypatch.setattr("handlers.llm_trial_flow._reasoned_fallback", fake_fallback)
+def test_unrelated_question_with_a_chosen_class_does_not_autoconfirm(monkeypatch):
+    _with_draft(monkeypatch, _CHOSEN_DRAFT)
+    monkeypatch.setattr(llm_trial_flow.trial_service, "confirm_trial",
+                        lambda *a: pytest.fail("must not confirm"))
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "get_eligible_trial_slots", lambda *a, **k: [{
+        "group_id": 7, "date": "2026-09-25", "time_start": "16:00", "time_end": "17:00", "level": [],
+    }])
 
-    reply = LlmTrialFlowHandler().handle_session_turn(
-        "chat-1", "7700", "dopsy_boxing",
-        "кстати можешь дать информацию по тренерам?",
-        [],
-        {"state": "trial_confirm", "params": {"trial_id": 11, "lang": "ru"}},
+    reply = LlmTrialFlowHandler().handle(
+        "chat-1", "7700", "dopsy_boxing", "кстати можешь дать информацию по тренерам?", [], "ru",
     )
 
-    assert reply == "FALLBACK_REPLY"
-    assert calls["args"] == ("dopsy_boxing", "ru", "кстати можешь дать информацию по тренерам?")
+    assert "Детали записи" in reply
 
 
-def test_trial_confirm_cancel_phrase_actually_cancels(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.academy_repo.get_trial",
-        lambda trial_id: {"id": trial_id},
-    )
+def test_cancel_phrase_with_a_chosen_class_actually_cancels(monkeypatch):
+    _with_draft(monkeypatch, _CHOSEN_DRAFT)
     cancelled = {}
     monkeypatch.setattr(
-        "handlers.llm_trial_flow.trial_service.cancel_trial",
+        llm_trial_flow.trial_service, "cancel_trial",
         lambda bot_name, chat_id, trial_id, reason: cancelled.update(
             bot_name=bot_name, chat_id=chat_id, trial_id=trial_id, reason=reason
         ),
     )
 
-    reply = LlmTrialFlowHandler().handle_session_turn(
-        "chat-1", "7700", "dopsy_boxing", "хочу отменить все", [],
-        {"state": "trial_confirm", "params": {"trial_id": 11, "lang": "ru"}},
+    reply = LlmTrialFlowHandler().handle(
+        "chat-1", "7700", "dopsy_boxing", "хочу отменить все", [], "ru",
     )
 
     assert cancelled == {
@@ -95,69 +85,61 @@ def test_trial_confirm_cancel_phrase_actually_cancels(monkeypatch):
     assert "отменена" in reply
 
 
-def test_birth_year_gibberish_gets_reasoned_fallback_not_echoed_back(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.academy_repo.get_existing_trial_draft",
-        lambda phone, bot_name: {"id": 11, "child_name": "Ерсултан"},
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.postgres.get_active_session",
-        lambda bot_name, chat_id: {
-            "params": {"waiting_for": "child_birth_year", "lang": "ru"}
-        },
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.extract_trial_details",
-        lambda history, user_text: {
-            "child_name": None, "child_birth_year": None, "experience": None,
-            "school_shift": None, "preferred_date": None, "preferred_weekday": None,
-            "preferred_time_start": None, "preferred_time_end": None,
-        },
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.postgres.upsert_session",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.trial_service.update_intake",
-        lambda bot_name, trial_id, fields: {
-            "ok": True,
-            "data": {
-                "trial": {
-                    "id": trial_id, "child_name": "Ерсултан", "child_birth_year": None,
-                    "experience": None, "school_shift": None,
-                },
-            },
-        },
-    )
-    calls = {}
-
-    def fake_fallback(bot_name, lang, user_text, reminder, weave_hint=None):
-        calls["user_text"] = user_text
-        calls["weave_hint"] = weave_hint
-        return "FALLBACK_REPLY"
-
-    monkeypatch.setattr("handlers.llm_trial_flow._reasoned_fallback", fake_fallback)
+def test_birth_year_gibberish_is_reasked_not_echoed_back(monkeypatch):
+    _with_draft(monkeypatch, {"id": 11, "child_name": "Ерсултан"})
 
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_fs_school", "что ты несешь?", [], "ru",
     )
 
-    assert reply == "FALLBACK_REPLY"
-    assert calls["user_text"] == "что ты несешь?"
-    # A plain intake question gets a weave hint, not a literal glued-on prompt
-    # — the model should vary the phrasing instead of repeating "Укажите год
-    # рождения ребенка." verbatim on every unrelated message.
-    assert calls["weave_hint"] == "нужно узнать год рождения ребёнка"
+    assert reply == T["ask_birth_year"]["ru"]
+    assert "не подходит" not in reply
+
+
+def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: None)
+    monkeypatch.setattr(llm_trial_flow.trial_service, "create_or_get_draft",
+                        lambda *a: {"ok": True, "data": {"trial": {"id": 11}}})
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
+
+    def fake_update(bot_name, trial_id, fields):
+        saved.update(fields)
+        return {"ok": True, "data": {"trial": {"id": 11, **fields}}}
+
+    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
+
+    reply = LlmTrialFlowHandler().handle(
+        "chat-1", "7700", "dopsy_boxing", "Балама сынақ сабағы керек", [], "kk",
+    )
+
+    assert saved["child_name"] is None
+    assert reply == BOXING_T["ask_name"]["kk"]
+
+
+def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(days=14)}
+    saved = {}
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: dict(stale))
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
+
+    def fake_update(bot_name, trial_id, fields):
+        saved.update(fields)
+        return {"ok": True, "data": {"trial": {**stale, **fields}}}
+
+    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
+
+    reply = LlmTrialFlowHandler().handle(
+        "chat-1", "7700", "dopsy_boxing", "сынақ сабағына жазылғым келеді", [], "kk",
+    )
+
+    assert saved["child_name"] is None
+    assert reply == BOXING_T["ask_name"]["kk"]
 
 
 def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.postgres.get_active_session",
-        lambda bot_name, chat_id: {
-            "params": {"waiting_for": "child_birth_year", "lang": "ru"}
-        },
-    )
     monkeypatch.setattr(
         "handlers.edit_trial.handle_trial_status_request",
         lambda sender_phone, bot_name, lang: "У вас нет активной записи на пробное занятие.",
@@ -169,39 +151,4 @@ def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypa
 
     assert "У вас нет активной записи" in reply
     assert "не подходит" not in reply
-
-
-def test_reasoned_fallback_weave_mode_skips_the_literal_reminder(monkeypatch):
-    monkeypatch.setattr("rag.retriever.retrieve_context", lambda query, bot_name=None: "")
-    monkeypatch.setattr(
-        "chat.llm.get_trial_reply",
-        lambda user_text, context="", system_hint="": "МОДЕЛЬНЫЙ ОТВЕТ, включающий напоминание",
-    )
-
-    reply = _reasoned_fallback(
-        "dopsy_boxing", "ru", "можно ли записаться взрослому?",
-        "Укажите имя ребенка.", weave_hint="нужно узнать имя ребёнка",
-    )
-
-    # Weave mode: the model's own reply is the whole message — no verbatim
-    # "Укажите имя ребенка." appended after it.
-    assert reply == "МОДЕЛЬНЫЙ ОТВЕТ, включающий напоминание"
-    assert "Укажите имя ребенка." not in reply
-
-
-def test_reasoned_fallback_append_mode_keeps_structured_reminder_verbatim(monkeypatch):
-    monkeypatch.setattr("rag.retriever.retrieve_context", lambda query, bot_name=None: "")
-    monkeypatch.setattr(
-        "chat.llm.get_trial_reply",
-        lambda user_text, context="", system_hint="": "Краткий ответ.",
-    )
-
-    reply = _reasoned_fallback(
-        "dopsy_boxing", "ru", "а когда вообще тренировки?",
-        "1. Пн 18:00\n2. Ср 18:00",
-    )
-
-    # No weave_hint: structured content (a slot list) must survive verbatim,
-    # not be paraphrased by the model.
-    assert "1. Пн 18:00\n2. Ср 18:00" in reply
-    assert reply.startswith("Краткий ответ.")
+    assert BOXING_T["ask_birth_year"]["ru"] not in reply

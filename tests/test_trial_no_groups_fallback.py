@@ -22,9 +22,7 @@ def test_school_shift_change_is_detected_inside_sentence():
     assert _normalize_manual_value("school_shift", "давайте дневную смену") == "afternoon"
 
 
-def test_no_exact_groups_returns_age_filtered_groups_and_keeps_session(monkeypatch):
-    upserted = {}
-
+def test_no_exact_groups_returns_age_filtered_groups(monkeypatch):
     monkeypatch.setattr(
         "handlers.llm_trial_flow.trial_logic.get_eligible_trial_slots",
         lambda *args, **kwargs: [],
@@ -48,24 +46,12 @@ def test_no_exact_groups_returns_age_filtered_groups_and_keeps_session(monkeypat
         ],
     )
 
-    def fake_upsert(bot_name, chat_id, state, params, object_id):
-        upserted.update(
-            {
-                "bot_name": bot_name,
-                "chat_id": chat_id,
-                "state": state,
-                "params": params,
-                "object_id": object_id,
-            }
-        )
-
-    monkeypatch.setattr("handlers.llm_trial_flow.postgres.upsert_session", fake_upsert)
-
-    reply = LlmTrialFlowHandler()._evaluate_slots(
+    reply = LlmTrialFlowHandler()._evaluate_and_respond(
         "chat-1",
         "dopsy_fs_school",
         {
             "id": 11,
+            "child_name": "Али",
             "child_birth_year": 2011,
             "school_shift": "afternoon",
             "experience": "Beginner",
@@ -77,9 +63,6 @@ def test_no_exact_groups_returns_age_filtered_groups_and_keeps_session(monkeypat
     assert "Подходящих групп сейчас не нашлось" in reply
     assert "По возрасту 2011 подходят такие группы" in reply
     assert "U15" in reply
-    assert upserted["state"] == "trial_intake"
-    assert upserted["params"]["waiting_for"] is None
-    assert upserted["params"]["signup_actor"] == "self"
 
 
 def test_no_age_filtered_groups_tells_user_to_call_admin(monkeypatch):
@@ -95,13 +78,13 @@ def test_no_age_filtered_groups_tells_user_to_call_admin(monkeypatch):
         "handlers.llm_trial_flow.trial_logic.get_birth_year_trial_slots",
         lambda *args, **kwargs: [],
     )
-    monkeypatch.setattr("handlers.llm_trial_flow.postgres.upsert_session", lambda *args, **kwargs: None)
 
-    reply = LlmTrialFlowHandler()._evaluate_slots(
+    reply = LlmTrialFlowHandler()._evaluate_and_respond(
         "chat-1",
         "dopsy_fs_school",
         {
             "id": 11,
+            "child_name": "Али",
             "child_birth_year": 2011,
             "school_shift": "afternoon",
             "experience": "Beginner",

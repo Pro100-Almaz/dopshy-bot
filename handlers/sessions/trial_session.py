@@ -252,13 +252,15 @@ def handle_trial_turn(
 
             return handle_cancel_selection(chat_id, bot_name, user_text, params)
 
-        if state in ("trial_intake", "trial_select_day", "trial_select_slot", "trial_fallback_offer", "trial_confirm"):
-            from chat.conversation import get_history
-            from handlers.llm_trial_flow import LlmTrialFlowHandler
+        from handlers.llm_trial_flow import LLM_FLOW_STATES
 
-            return LlmTrialFlowHandler().handle_session_turn(
-                chat_id, sender_phone, bot_name, user_text, get_history(chat_id), session
-            )
+        if state in LLM_FLOW_STATES:
+            # The LLM flow keeps no session any more — the draft is its state.
+            # A row left from before that change is dropped and the message
+            # goes on to the regular routing.
+            logger.info("[TRIAL] Dropping legacy LLM-flow session state=%s for %s", state, chat_id)
+            postgres.delete_session(bot_name, chat_id)
+            return None
 
         if builder.is_cancel_intent(user_text):
             tid = params.get("trial_id")

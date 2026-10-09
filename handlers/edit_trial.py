@@ -327,7 +327,7 @@ def handle_edit_request(
 
     from handlers.llm_trial_flow import LlmTrialFlowHandler
 
-    flow_reply = LlmTrialFlowHandler()._continue_from_draft(
+    flow_reply = LlmTrialFlowHandler()._evaluate_and_respond(
         chat_id, bot_name, result["data"]["trial"], lang
     )
     prefix = (

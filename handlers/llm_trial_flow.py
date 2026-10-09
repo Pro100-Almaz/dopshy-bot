@@ -27,21 +27,15 @@ import contextvars
 import functools
 import inspect
 import logging
-import uuid
-
-from chat.conversation import clear_history
-from integrations import trial as trial_logic
-from integrations.repo import academy_repo, postgres
-from integrations.sheets.trial_sheets import refresh_all_trials
-from utils import is_past_booking_time
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
+import config
 from handlers.academy_extractor import extract_trial_details
 from handlers.sessions.trial_session import _MY_TRIAL_KW
 from integrations import trial_service
 from integrations import trial as trial_logic
-from integrations.repo import academy_repo, postgres
+from integrations.repo import academy_repo
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
@@ -90,29 +84,17 @@ T = {
         "ru": "Указанное время не подходит для группы ребенка. Выберите один из доступных вариантов:",
         "kk": "Көрсетілген уақыт балаңызға сәйкес топқа келмейді. Қолжетімді нұсқалардың бірін таңдаңыз:",
     },
-    "fallback_offer": {
-        "ru": "Подходящей группы уровня {requested} сейчас нет.\nЕсть группа уровнем ниже — {offered}, по возрасту и времени подходит.\nЗаписать на пробное туда?",
-        "kk": "Қазір {requested} деңгейіне сәйкес топ жоқ.\nБір деңгей төмен {offered} тобы бар, жасы мен уақыты сәйкес.\nСынақ сабағына сол топқа жазайын ба?",
-    },
-    "fallback_declined": {
-        "ru": "Понял. Администратор поможет подобрать подходящую группу вручную.",
-        "kk": "Түсіндім. Әкімші сәйкес топты қолмен таңдауға көмектеседі.",
+    "fallback_shown": {
+        "ru": "Подходящей группы уровня {requested} сейчас нет. По возрасту и времени подходят группы уровнем ниже:",
+        "kk": "Қазір {requested} деңгейіне сәйкес топ жоқ. Жасы мен уақыты бойынша бір деңгей төмен топтар сәйкес келеді:",
     },
     "choose_slot": {
         "ru": "Выберите группу на {date}:",
         "kk": "{date} күніне топты таңдаңыз:",
     },
-    "slot_invalid": {
-        "ru": "Введите номер из списка доступных вариантов.",
-        "kk": "Қолжетімді нұсқалар тізімінен нөмірді енгізіңіз.",
-    },
     "choose_day": {
         "ru": "На какой день хотите записаться на пробное занятие?",
         "kk": "Сынақ сабағына қай күнге жазылғыңыз келеді?",
-    },
-    "day_invalid": {
-        "ru": "Введите номер даты из списка, или напишите день недели.",
-        "kk": "Тізімдегі күн нөмірін немесе апта күнін жазыңыз.",
     },
     "confirm": {
         "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
@@ -145,14 +127,6 @@ T = {
             "Бұл нөмір бойынша сынақ сабағына белсенді жазылым бар. "
             "Күні керек болса немесе ауыстырғыңыз келсе: «менің жазылымым» немесе «жазылымды ауыстыру» деп жазыңыз."
         ),
-    },
-    "details_updated_confirm": {
-        "ru": "Данные обновил. Проверьте детали и подтвердите запись.",
-        "kk": "Деректер жаңартылды. Мәліметтерді тексеріп, жазылымды растаңыз.",
-    },
-    "details_updated": {
-        "ru": "Данные обновил.",
-        "kk": "Деректер жаңартылды.",
     },
     "slot_no_longer_eligible": {
         "ru": "После изменения данных выбранная группа уже не подходит. Я убрал выбранные дату и время — выберите подходящий вариант заново.",
@@ -209,29 +183,17 @@ BOXING_T = {
         "ru": "К сожалению, в это время подходящей группы нет. Вот что можем предложить — выберите, пожалуйста, удобный вариант:",
         "kk": "Өкінішке қарай, бұл уақытта сәйкес топ жоқ. Мына нұсқалардың бірін таңдаңызшы:",
     },
-    "fallback_offer": {
-        "ru": "Группы уровня {requested} сейчас, к сожалению, нет.\nЗато есть группа уровнем ниже — {offered}, по возрасту и времени подходит.\nЗаписать ребёнка на пробное туда?",
-        "kk": "Өкінішке қарай, қазір {requested} деңгейіндегі топ жоқ.\nБірақ бір деңгей төмен {offered} тобы бар, жасы мен уақыты сәйкес келеді.\nСынақ сабағына сол топқа жазайын ба?",
-    },
-    "fallback_declined": {
-        "ru": "Хорошо, понимаю. Администратор поможет подобрать подходящую группу.",
-        "kk": "Жақсы, түсіндім. Әкімші сәйкес топты таңдауға көмектеседі.",
+    "fallback_shown": {
+        "ru": "Группы уровня {requested} сейчас, к сожалению, нет. Зато по возрасту и времени подходят группы уровнем ниже:",
+        "kk": "Өкінішке қарай, қазір {requested} деңгейіндегі топ жоқ. Бірақ жасы мен уақыты бойынша бір деңгей төмен топтар сәйкес келеді:",
     },
     "choose_slot": {
         "ru": "Вот группы на {date}. Выберите, пожалуйста, удобную:",
         "kk": "{date} күнгі топтар. Ыңғайлысын таңдаңызшы:",
     },
-    "slot_invalid": {
-        "ru": "Пожалуйста, отправьте номер варианта из списка.",
-        "kk": "Тізімдегі нұсқаның нөмірін жіберіңізші.",
-    },
     "choose_day": {
         "ru": "На какой день вам удобно записаться на пробное занятие?",
         "kk": "Сынақ сабағына қай күн сізге ыңғайлы?",
-    },
-    "day_invalid": {
-        "ru": "Пожалуйста, отправьте номер даты из списка или просто напишите день недели.",
-        "kk": "Тізімдегі күн нөмірін немесе апта күнін жазып жіберіңізші.",
     },
     "confirm": {
         "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
@@ -266,14 +228,6 @@ BOXING_T = {
             "Сізде сынақ сабағына жазылым бар. "
             "Күнін білгіңіз немесе ауыстырғыңыз келсе: «менің жазылымым» немесе «жазылымды ауыстыру» деп жазыңыз."
         ),
-    },
-    "details_updated_confirm": {
-        "ru": "Спасибо, данные обновлены! Проверьте, пожалуйста, детали и подтвердите запись.",
-        "kk": "Рахмет, деректер жаңартылды! Мәліметтерді тексеріп, жазылымды растаңызшы.",
-    },
-    "details_updated": {
-        "ru": "Спасибо, данные обновлены!",
-        "kk": "Рахмет, деректер жаңартылды!",
     },
     "slot_no_longer_eligible": {
         "ru": "После изменения данных выбранная группа, к сожалению, уже не подходит. Дату и время пришлось сбросить — выберите, пожалуйста, подходящий вариант заново.",
@@ -400,82 +354,6 @@ def _confirm_decision(text: str) -> str | None:
     return None
 
 
-def _real_changes(patch: dict, current: dict) -> dict:
-    """Drop patch entries that already match the stored value.
-
-    The extractor is fed the whole conversation (needed to resolve relative
-    dates/pronouns), so re-mentioning an already-known fact — even while
-    trying to cancel — can come back as an "extracted" field though nothing
-    actually changed. Only a genuine difference should be treated as an edit.
-    """
-    return {k: v for k, v in patch.items() if str((current or {}).get(k)) != str(v)}
-
-
-def _reasoned_fallback(
-    bot_name: str, lang: str, user_text: str, reminder: str, weave_hint: str | None = None,
-    extra_hint: str | None = None,
-) -> str:
-    """Answer a message that didn't move the flow forward and wasn't caught by
-    any of the specific handlers above (a value, yes/no, or greeting/identity
-    interrupt) — an objection, a side question, or anything else.
-
-    Answers briefly using the academy knowledge base (same RAG used outside
-    the flow).
-
-    `reminder` is the prompt/summary the caller still needs the user to act
-    on. When it's structured content (a slot list, a price/date confirmation
-    card) it is appended verbatim — that's factual data an LLM must not be
-    left to paraphrase or hallucinate. When `weave_hint` is given instead
-    (a plain one-line intake question), the model folds the reminder into
-    its own answer, phrased differently each time and skipped or softened
-    when forcing it would read as a non-sequitur (e.g. re-asking a child's
-    name right after the user asked whether adults can sign up) — a fixed
-    reminder glued onto every reply regardless of context read as the bot
-    ignoring what was just asked.
-    """
-    from chat.llm import get_trial_reply
-    from rag.retriever import retrieve_context
-
-    try:
-        context = retrieve_context(user_text, bot_name=bot_name)
-    except Exception:
-        logger.exception("[TRIAL] RAG lookup failed in reasoned fallback")
-        context = ""
-
-    answer_style = (
-        "Тепло и дружелюбно, но по существу ответь"
-        if bot_name == "dopsy_boxing"
-        else "Кратко ответь по существу"
-    )
-    hint = (
-        "Пользователь сейчас в процессе записи на пробное занятие и написал "
-        "что-то, что не является ни значением для текущего вопроса, ни "
-        f"подтверждением/отменой записи. {answer_style} на его "
-        "вопрос или возражение, используя базу знаний, если она относится к "
-        "теме; если базы знаний недостаточно, вежливо скажи, что уточнишь у "
-        "администратора. Не подтверждай и не отменяй запись сам."
-    )
-    if weave_hint:
-        hint += (
-            f" После ответа, в том же сообщении и своими словами (не повторяй "
-            f"один и тот же вопрос одинаковой фразой каждый раз), напомни, что "
-            f"для продолжения записи на пробное занятие {weave_hint}. Если из "
-            f"сообщения пользователя ясно, что речь может идти не о его "
-            f"ребёнке (например, вопрос про взрослых или про другое "
-            f"направление), не задавай этот вопрос как ни в чём не бывало — "
-            f"сначала мягко проясни это, и лишь при уместности напомни про "
-            f"запись."
-        )
-    if extra_hint:
-        hint += f" {extra_hint}"
-    try:
-        answer = get_trial_reply(user_text, context, system_hint=hint)
-    except Exception:
-        logger.exception("[TRIAL] Reasoned fallback LLM call failed")
-        answer = ""
-    if weave_hint:
-        return answer or reminder
-    return f"{answer}\n\n{reminder}".strip() if answer else reminder
 _GREETINGS = {
     "hello", "hi", "hey", "привет", "здравствуйте", "салам", "сәлем",
     "сәлеметсіз бе", "добрый день", "доброе утро", "добрый вечер",
@@ -585,104 +463,100 @@ def _is_my_trial_query(text: str) -> bool:
     return any(kw in lower for kw in _MY_TRIAL_KW)
 
 
+def _signup_actor_in(history: list, user_text: str) -> str | None:
+    """_signup_actor over everything the client wrote — the flow keeps no
+    session to remember an earlier «мне 15 лет»."""
+    texts = [m.get("content") or "" for m in history or [] if m.get("role") == "user"]
+    return _signup_actor("\n".join([*texts, user_text or ""]))
+
+
 def _extract_user_data(
     history: list,
     user_text: str,
     waiting_for: str | None = None,
-) -> dict:
+) -> tuple[dict, dict[str, tuple[str, object]]]:
+    """LLM extraction, plus a local parse of the one field being asked for.
+
+    The local parse is limited to `waiting_for`: run on every message it read
+    a list choice like "2" as a level or a shift.
+
+    Returns ``(extracted, rejected)`` — see _drop_invalid_fields.
+    """
     extracted = extract_trial_details(history, user_text)
     if not extracted.get("child_birth_year"):
         extracted["child_birth_year"] = _birth_year_from_age(user_text)
-    _drop_invalid_fields(extracted)
-    if not extracted.get("experience"):
-        extracted["experience"] = _normalize_manual_value("experience", user_text)
-    if not extracted.get("school_shift"):
-        extracted["school_shift"] = _normalize_manual_value("school_shift", user_text)
-    if waiting_for and not extracted.get(waiting_for):
-        extracted[waiting_for] = _normalize_manual_value(waiting_for, user_text)
-    if waiting_for == "child_birth_year" and not extracted.get("child_birth_year"):
-        extracted["child_birth_year"] = _birth_year_from_age(user_text)
-    _drop_invalid_fields(extracted)
-    return extracted
+    rejected = _drop_invalid_fields(extracted)
+    if waiting_for and not extracted.get(waiting_for) and waiting_for not in rejected:
+        manual = _normalize_manual_value(waiting_for, user_text)
+        if manual is not None and waiting_for == "child_birth_year":
+            reason = _birth_year_rejection(manual)
+            if reason:
+                _log_rejected(waiting_for, reason, manual,
+                              allowed_age=f"{CHILD_MIN_AGE}-{CHILD_MAX_AGE}")
+                rejected[waiting_for] = (reason, manual)
+                manual = None
+        elif manual is None and waiting_for == "child_name":
+            # _is_plausible_child_name has already logged the reason.
+            rejected[waiting_for] = (_child_name_rejection(user_text) or "empty", user_text)
+        elif manual is None:
+            _log_rejected(waiting_for, "unrecognized", user_text)
+            rejected[waiting_for] = ("unrecognized", user_text)
+        extracted[waiting_for] = manual
+    return extracted, rejected
 
 
-def _filled_patch(data: dict) -> dict:
-    return {key: value for key, value in (data or {}).items() if value not in (None, "")}
+_LATIN_TO_CYRILLIC = (
+    ("sh", "ш"), ("ch", "ч"), ("zh", "ж"), ("kh", "х"), ("ya", "я"), ("yu", "ю"),
+    ("a", "а"), ("b", "б"), ("c", "к"), ("d", "д"), ("e", "е"), ("f", "ф"),
+    ("g", "г"), ("h", "х"), ("i", "и"), ("j", "ж"), ("k", "к"), ("l", "л"),
+    ("m", "м"), ("n", "н"), ("o", "о"), ("p", "п"), ("q", "к"), ("r", "р"),
+    ("s", "с"), ("t", "т"), ("u", "у"), ("v", "в"), ("w", "у"), ("x", "кс"),
+    ("y", "ы"), ("z", "з"),
+)
 
 
-# Intake fields that decide which groups are eligible. Only a real change to
-# one of these invalidates the offered slot list.
-_SLOT_FIELDS = ("child_birth_year", "experience", "school_shift")
+def _name_tokens(text: str | None) -> set[str]:
+    """Lower-cased words of `text` in Cyrillic, so «Box Timur» meets «Тимур»."""
+    value = (text or "").lower().replace("ё", "е")
+    for latin, cyrillic in _LATIN_TO_CYRILLIC:
+        value = value.replace(latin, cyrillic)
+    return set(re.findall(r"\w{2,}", value))
 
 
-# Session states owned by LlmTrialFlowHandler (see handle_session_turn).
+def _is_trainer_name(bot_name: str, name: str) -> bool:
+    """True when `name` is a word from a group name or trainer of this academy
+    — the parent naming the class they want, not renaming the child."""
+    wanted = _name_tokens(name)
+    for info in academy_repo.get_groups_info(bot_name=bot_name):
+        if wanted & _name_tokens(f"{info.get('group_name') or ''} {info.get('trainer') or ''}"):
+            return True
+    return False
+
+
+def is_draft_in_progress(draft: dict) -> bool:
+    """True while the client is still filling this draft in.
+
+    Academy drafts are never swept, so an abandoned one must not keep the
+    client in signup mode forever. Like the arena's draft TTL (and the session
+    TTL this flow used to have), a draft untouched for BOOKING_SESSION_TTL is
+    no longer in progress; its data is still reused if the client signs up
+    again.
+    """
+    updated_at = draft.get("updated_at")
+    if not isinstance(updated_at, datetime):
+        return True
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - updated_at
+    return age <= timedelta(seconds=config.BOOKING_SESSION_TTL)
+
+
+# States of the session the LLM flow used to keep. It keeps none now; a row
+# left from before that change is dropped where it is found.
 LLM_FLOW_STATES = (
     "trial_intake", "trial_select_day", "trial_select_slot",
     "trial_fallback_offer", "trial_confirm",
 )
-_WEEKDAY_FILLER = {"в", "во", "на"}
-
-
-def _words(text: str | None) -> list[str]:
-    return re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
-
-
-def _is_bare_yes_no(text: str) -> bool:
-    """The whole message is a yes/no — "да, а сколько стоит?" is not."""
-    return " ".join(_words(text)) in _YES | _NO
-
-
-def _offered_weekday(text: str, dates: list) -> bool:
-    """The message is just a weekday ("среда", "в среду") that is on offer."""
-    words = [w for w in _words(text) if w not in _WEEKDAY_FILLER]
-    if len(words) != 1:
-        return False
-    weekdays = trial_logic.parse_weekdays(words[0])
-    return len(weekdays) == 1 and any(
-        datetime.strptime(str(d), "%Y-%m-%d").weekday() == weekdays[0] for d in dates
-    )
-
-
-def _is_clean_value(field: str, text: str) -> bool:
-    """The message is a usable value for the intake field and nothing else."""
-    if "?" in text or is_factual_question(text):
-        return False
-    return _normalize_manual_value(field, text) is not None
-
-
-def _asks_other_day(patch: dict, chosen_date, user_text: str) -> bool:
-    """True when the client asks to move to a different day ("давайте в пятницу").
-
-    A question that merely names a day ("а что в пятницу у Ерлана?") also
-    yields a preferred_date, so questions are excluded — they are answered by
-    the reasoned fallback without dropping the chosen day.
-    """
-    preferred = patch.get("preferred_date")
-    if not preferred or str(preferred) == str(chosen_date):
-        return False
-    return "?" not in user_text and not is_factual_question(user_text)
-
-
-def _match_day_choice(user_text: str, history: list, dates: list) -> object | None:
-    """Match free text (a weekday name or an explicit date) against `dates`.
-
-    Weekday-name matching (trial_logic.parse_weekdays) is checked first —
-    it's local, free, and covers the expected phrasing ("на среду"). Only
-    falls back to the LLM extractor's preferred_date for an explicit date
-    ("24 сентября") if no weekday was named.
-    """
-    weekdays = trial_logic.parse_weekdays(user_text)
-    if weekdays:
-        for d in dates:
-            d_date = d if isinstance(d, date) else datetime.strptime(str(d), "%Y-%m-%d").date()
-            if d_date.weekday() in weekdays:
-                return d
-    preferred = _extract_user_data(history, user_text).get("preferred_date")
-    if preferred:
-        for d in dates:
-            if str(d) == str(preferred):
-                return d
-    return None
 
 
 def _fmt_date(value, lang: str) -> str:
@@ -899,17 +773,6 @@ def _missing_prerequisite(data: dict) -> str | None:
     return None
 
 
-# What each intake field means, for _reasoned_fallback's weave_hint — a
-# semantic description the model rephrases each time, not the literal
-# question (that's _ask_missing, used only as the hard-fallback reminder).
-_FIELD_WEAVE_HINTS = {
-    "child_name": "нужно узнать имя ребёнка",
-    "child_birth_year": "нужно узнать год рождения ребёнка",
-    "experience": "нужно узнать уровень подготовки ребёнка (начальный, средний или продвинутый)",
-    "school_shift": "нужно узнать школьную смену ребёнка (утренняя или дневная)",
-}
-
-
 def _ask_missing(lang: str, field: str, signup_actor: str | None = None) -> str:
     if field == "child_name" and signup_actor == "self":
         return _loc(lang, "ask_name_self")
@@ -947,20 +810,71 @@ def _slot_lines(slots: list[dict], lang: str) -> str:
     return "\n".join(lines)
 
 
-def _serialize_slots(slots: list[dict]) -> list[dict]:
-    """Session params are JSON — collapse each slot to plain str/primitive fields."""
-    return [
-        {
-            "group_id": s["group_id"],
-            "date": str(s["date"]),
-            "time_start": str(s["time_start"])[:5],
-            "time_end": str(s["time_end"])[:5],
-            "group_name": s.get("group_name"),
-            "level": s.get("level") or [],
-            "field": s.get("field"),
-        }
+# Draft columns that together hold the chosen class.
+_CLEARED_SLOT = {"trial_day": None, "start_time": None, "end_time": None, "group_id": None}
+
+
+def _iso_date(value) -> str | None:
+    return str(value)[:10] if value not in (None, "") else None
+
+
+def _hhmm(value) -> str | None:
+    return str(value)[:5] if value not in (None, "") else None
+
+
+def _chosen_slot_still_fits(draft: dict, slots: list[dict]) -> bool:
+    """The draft's chosen class is still on offer and the parent hasn't since
+    asked for a different date/time (e.g. picked another option from a list)."""
+    day, start = _iso_date(draft.get("trial_day")), _hhmm(draft.get("start_time"))
+    wanted_day, wanted_start = _iso_date(draft.get("preferred_date")), _hhmm(draft.get("preferred_time_start"))
+    if wanted_day not in (None, day) or wanted_start not in (None, start):
+        return False
+    return any(
+        int(s["group_id"]) == int(draft["group_id"])
+        and str(s["date"]) == day
+        and _hhmm(s["time_start"]) == start
         for s in slots
-    ]
+    )
+
+
+def _narrow(
+    slots: list[dict], draft: dict, lang: str, pick: bool = True, note_unavailable: bool = True,
+) -> tuple[dict | None, str]:
+    """Narrow `slots` by the parent's date/time (preferred_*).
+
+    date + time → that class; date only → that day's classes; time only → the
+    days with a class at that time; nothing → the list of days. Returns
+    ``(slot, "")`` when exactly one class matches what the parent asked for
+    (and `pick` is set), otherwise ``(None, options_text)``. A date/time that
+    matches nothing is dropped with a "not available" note.
+    """
+    wanted_day = _iso_date(draft.get("preferred_date"))
+    wanted_start = _hhmm(draft.get("preferred_time_start"))
+    unavailable = False
+
+    # A date already behind us is a leftover (an old draft or old history),
+    # not something the parent is asking for now — drop it silently.
+    if wanted_day and wanted_day < today_almaty().isoformat():
+        wanted_day = None
+    if wanted_day and wanted_day not in {str(s["date"]) for s in slots}:
+        unavailable, wanted_day = True, None
+    on_day = [s for s in slots if not wanted_day or str(s["date"]) == wanted_day]
+    matches = [s for s in on_day if not wanted_start or _hhmm(s["time_start"]) == wanted_start]
+    if not matches:
+        unavailable, wanted_start, matches = True, None, on_day
+
+    if pick and len(matches) == 1 and (wanted_day or wanted_start) and not unavailable:
+        return matches[0], ""
+
+    days = sorted({str(s["date"]) for s in matches})
+    if len(days) == 1:
+        body = (f"{_loc(lang, 'choose_slot', date=_fmt_date(days[0], lang))}"
+                f"\n\n{_group_lines_for_day(matches, lang)}")
+    else:
+        body = f"{_loc(lang, 'choose_day')}\n\n{_day_lines(days, lang)}"
+    if unavailable and note_unavailable:
+        return None, f"{_loc(lang, 'preferred_unavailable')}\n\n{body}"
+    return None, body
 
 
 def _day_lines(dates: list, lang: str) -> str:
@@ -1043,69 +957,18 @@ def _confirmation(draft: dict, lang: str) -> str:
 
 
 class LlmTrialFlowHandler:
-    @_bot_scoped
-    def try_fast_path(
-        self,
-        chat_id: str,
-        sender_phone: str,
-        bot_name: str,
-        user_text: str,
-        history: list,
-        session: dict,
-    ) -> str | None:
-        """Handle a message that plainly answers the pending step, without the
-        intent router. Returns None when the message needs routing.
-        """
-        state = session["state"]
-        params = session["params"]
-        text = (user_text or "").strip()
-        interrupt = _session_interrupt_response(params.get("lang", "ru"), text) is not None
+    """
+    LLM-driven trial-signup handler — the academy counterpart of
+    LlmBookingFlowHandler.
 
-        if state == "trial_intake":
-            field = params.get("waiting_for")
-            plain = interrupt or bool(field and _is_clean_value(field, text))
-        elif state == "trial_select_day":
-            plain = interrupt or text.isdigit() or _offered_weekday(text, params.get("dates") or [])
-        elif state == "trial_select_slot":
-            plain = interrupt or text.isdigit()
-        elif state in ("trial_confirm", "trial_fallback_offer"):
-            plain = _is_bare_yes_no(text)
-        else:
-            plain = False
+    Main entry point: handle(). The draft row (phone + state='draft') is the
+    only flow state: every message is extracted, merged into the draft, and
+    the draft is evaluated again (_evaluate_and_respond).
+    """
 
-        if not plain:
-            return None
-        logger.info("[TRIAL] Fast path: state=%s chat_id=%s", state, chat_id)
-        return self.handle_session_turn(chat_id, sender_phone, bot_name, user_text, history, session)
-
-    @_bot_scoped
-    def pending_prompt(self, bot_name: str, session: dict) -> str:
-        """The question the flow is waiting on, re-shown after a side answer."""
-        state = session["state"]
-        params = session["params"]
-        lang = params.get("lang", "ru")
-
-        if state == "trial_intake":
-            field = params.get("waiting_for")
-            return _ask_missing(lang, field, params.get("signup_actor")) if field else ""
-        if state == "trial_select_day":
-            dates = params.get("dates") or []
-            return f"{_loc(lang, 'choose_day')}\n\n{_day_lines(dates, lang)}"
-        if state == "trial_select_slot":
-            chosen_date = params.get("chosen_date")
-            header = (_loc(lang, "choose_slot", date=_fmt_date(chosen_date, lang))
-                      if chosen_date else _loc(lang, "choose_day"))
-            return f"{header}\n\n{_group_lines_for_day(params.get('slots') or [], lang)}"
-        if state == "trial_fallback_offer":
-            return _loc(
-                lang, "fallback_offer",
-                requested=_level_label(params.get("requested_level"), lang),
-                offered=_level_label(params.get("offered_level"), lang),
-            )
-        if state == "trial_confirm":
-            draft = academy_repo.get_trial(params.get("trial_id"))
-            return _confirmation(draft, lang) if draft and draft.get("trial_day") else ""
-        return ""
+    # ══════════════════════════════════════════════════════════════════════
+    #  Main Entry Point
+    # ══════════════════════════════════════════════════════════════════════
 
     @_bot_scoped
     def handle(
@@ -1117,18 +980,31 @@ class LlmTrialFlowHandler:
         history: list,
         lang: str,
     ) -> str:
-        # "какие у меня пробные" / "мои занятия" etc. — checked before touching
-        # any draft state, so asking about an existing signup never creates an
-        # unwanted empty one. Works both as a fresh message and mid-intake
-        # (handle_session_turn's trial_intake state re-enters here).
+        """Process one user message through the LLM trial flow."""
+        # "какие у меня пробные" / "мои занятия" — answered before touching any
+        # draft, so asking about an existing signup never creates an empty one.
         if _is_my_trial_query(user_text):
             from handlers.edit_trial import handle_trial_status_request
-            active = postgres.get_active_session(bot_name, chat_id)
-            waiting_for = (active or {}).get("params", {}).get("waiting_for")
-            status = handle_trial_status_request(sender_phone, bot_name, lang)
-            return f"{status}{_waiting_prompt(lang, waiting_for)}" if waiting_for else status
+            return handle_trial_status_request(sender_phone, bot_name, lang)
 
         draft = academy_repo.get_existing_trial_draft(sender_phone, bot_name)
+
+        # ── 1. A draft with a chosen class: yes/no confirms or cancels it ──
+        if draft and draft.get("group_id"):
+            decision = _confirm_decision(user_text)
+            if decision == "yes":
+                logger.info("[TRIAL] YES → confirm id=%d", draft["id"])
+                return self._confirm(chat_id, bot_name, draft, lang)
+            if decision == "no":
+                logger.info("[TRIAL] NO → cancel id=%d", draft["id"])
+                trial_service.cancel_trial(bot_name, chat_id, draft["id"], "user_declined_gated_trial")
+                return _loc(lang, "declined")
+
+        # On the opening message — or when coming back to a stale draft —
+        # nothing has just been asked, so no field is "being answered": a
+        # sentence like «балама сынақ сабағы керек» must not be parsed as the
+        # child's name.
+        asked_before = bool(draft) and is_draft_in_progress(draft)
         if not draft:
             result = trial_service.create_or_get_draft(bot_name, chat_id, sender_phone, lang)
             if not result["ok"]:
@@ -1143,31 +1019,21 @@ class LlmTrialFlowHandler:
                 return result.get("message") or _loc(lang, "no_groups")
             draft = result["data"]["trial"]
 
-        active = postgres.get_active_session(bot_name, chat_id)
-        waiting_for = (active or {}).get("params", {}).get("waiting_for")
-        signup_actor = (active or {}).get("params", {}).get("signup_actor") or _signup_actor(user_text)
+        waiting_for = _missing_prerequisite(_draft_to_data(draft))
+        signup_actor = _signup_actor_in(history, user_text)
         interrupt = _session_interrupt_response(lang, user_text, waiting_for)
-        if waiting_for and interrupt:
-            return interrupt
+        if interrupt:
+            if waiting_for:
+                return interrupt
+            return f"{interrupt}\n\n{self._evaluate_and_respond(chat_id, bot_name, draft, lang, signup_actor)}"
 
-        extracted = extract_trial_details(history, user_text)
-        rejected = _drop_invalid_fields(extracted)
-        if waiting_for and not extracted.get(waiting_for) and waiting_for not in rejected:
-            manual = _normalize_manual_value(waiting_for, user_text)
-            if manual is not None and waiting_for == "child_birth_year":
-                reason = _birth_year_rejection(manual)
-                if reason:
-                    _log_rejected(waiting_for, reason, manual,
-                                  allowed_age=f"{CHILD_MIN_AGE}-{CHILD_MAX_AGE}")
-                    rejected[waiting_for] = (reason, manual)
-                    manual = None
-            elif manual is None and waiting_for == "child_name":
-                # _is_plausible_child_name has already logged the reason.
-                rejected[waiting_for] = (_child_name_rejection(user_text) or "empty", user_text)
-            elif manual is None:
-                _log_rejected(waiting_for, "unrecognized", user_text)
-                rejected[waiting_for] = ("unrecognized", user_text)
-            extracted[waiting_for] = manual
+        # ── 2. Extract and merge into the draft ──
+        extracted, rejected = _extract_user_data(history, user_text, waiting_for if asked_before else None)
+        if (extracted.get("child_name") and draft.get("child_name")
+                and _is_trainer_name(bot_name, extracted["child_name"])):
+            _log_rejected("child_name", "trainer_name", extracted["child_name"], trial_id=draft["id"])
+            extracted["child_name"] = None
+        logger.info("[TRIAL] Extracted for id=%d: %s", draft["id"], extracted)
 
         data = _merge(_draft_to_data(draft), extracted)
         result = trial_service.update_intake(bot_name, draft["id"], {**data, "language": lang})
@@ -1175,378 +1041,147 @@ class LlmTrialFlowHandler:
             return result.get("message") or _loc(lang, "no_groups")
         draft = result["data"]["trial"]
 
-        reply = self._continue_from_draft(chat_id, bot_name, draft, lang, signup_actor)
-        # _continue_from_draft has already re-armed the session to wait for the
-        # missing field; only the prompt changes, so the client knows why it is
-        # asked again.
+        # A value the client gave but the flow refused gets its own message,
+        # so the client knows why the same field is asked again.
         missing = _missing_prerequisite(_draft_to_data(draft))
         reason, bad_value = rejected.get(missing, (None, None))
         if missing == "child_name" and reason == "too_long":
             logger.info("[TRIAL] Asking chat_id=%s for a shorter child_name (max %d chars)",
                         chat_id, CHILD_NAME_MAX_LEN)
             return _loc(lang, "name_too_long", max_len=CHILD_NAME_MAX_LEN)
-        # Only a genuinely parseable-but-out-of-range year gets this specific
-        # message. "unrecognized"/"not_a_year" mean there was no year-like
-        # token in the message at all (e.g. "мои занятия", "что ты несешь?")
-        # — that's not a rejected value, it's a non-answer, and belongs in
-        # the reasoned fallback below, not in a message that echoes it back
-        # as if it were a year.
+        # Only a parseable-but-out-of-range year gets this message; a message
+        # with no year in it at all is a non-answer, and the field is re-asked.
         if missing == "child_birth_year" and reason in ("in_future", "too_young", "too_old"):
             logger.info("[TRIAL] Asking chat_id=%s for a valid child_birth_year (age %d-%d)",
                         chat_id, CHILD_MIN_AGE, CHILD_MAX_AGE)
             return _loc(lang, "birth_year_invalid", year=bad_value,
                         min_age=CHILD_MIN_AGE, max_age=CHILD_MAX_AGE)
-        # Stuck on the exact same field we were waiting for, and the message
-        # wasn't a usable value for it (not caught by either message above) —
-        # it's an objection, a side question, or something else entirely.
-        # Answer it instead of silently repeating the identical prompt.
-        if waiting_for and missing == waiting_for and missing in rejected:
-            logger.info("[TRIAL] chat_id=%s stuck on %s — routing to reasoned fallback",
-                        chat_id, waiting_for)
-            return _reasoned_fallback(
-                bot_name, lang, user_text, reply, weave_hint=_FIELD_WEAVE_HINTS.get(waiting_for),
+
+        # ── 3. Evaluate ──
+        return self._evaluate_and_respond(chat_id, bot_name, draft, lang, signup_actor)
+
+    def _confirm(self, chat_id: str, bot_name: str, draft: dict, lang: str) -> str:
+        """Confirm the draft's chosen class, re-checking it still fits first."""
+        if not trial_logic.is_trial_slot_eligible(bot_name, draft):
+            result = trial_service.update_intake(
+                bot_name, draft["id"],
+                {**_CLEARED_SLOT, "preferred_date": None, "preferred_time_start": None, "language": lang},
             )
-        return reply
-
-    @_bot_scoped
-    def _continue_from_draft(
-        self,
-        chat_id: str,
-        bot_name: str,
-        draft: dict,
-        lang: str,
-        signup_actor: str | None = None,
-    ) -> str:
-        missing = _missing_prerequisite(draft)
-        if missing:
-            postgres.upsert_session(
-                bot_name,
-                chat_id,
-                "trial_intake",
-                {
-                    "trial_id": draft["id"],
-                    "waiting_for": missing,
-                    "lang": lang,
-                    "signup_actor": signup_actor,
-                },
-                draft["id"],
+            if not result["ok"]:
+                return result.get("message") or _loc(lang, "no_groups")
+            return (
+                f"{_loc(lang, 'slot_no_longer_eligible')}\n\n"
+                f"{self._evaluate_and_respond(chat_id, bot_name, result['data']['trial'], lang)}"
             )
-            return _ask_missing(lang, missing, signup_actor)
 
-        return self._evaluate_slots(chat_id, bot_name, draft, lang, signup_actor)
-
-    def _evaluate_slots(
-        self,
-        chat_id: str,
-        bot_name: str,
-        draft: dict,
-        lang: str,
-        signup_actor: str | None = None,
-    ) -> str:
-        slots = trial_logic.get_eligible_trial_slots(
-            bot_name,
-            int(draft["child_birth_year"]),
-            draft["school_shift"],
-            experience=draft.get("experience"),
-        )
-        if not slots:
-            fallback_slots = trial_logic.get_fallback_trial_slots(
-                bot_name,
-                int(draft["child_birth_year"]),
-                draft["school_shift"],
-                draft["experience"],
-            )
-            if fallback_slots:
-                slot_levels = fallback_slots[0].get("level") or []
-                offered = next((level for level in ("Intermediate", "Beginner") if level in slot_levels), "lower")
-                postgres.upsert_session(
-                    bot_name,
-                    chat_id,
-                    "trial_fallback_offer",
-                    {
-                        "trial_id": draft["id"],
-                        "lang": lang,
-                        "requested_level": draft["experience"],
-                        "offered_level": offered,
-                        "slots": _serialize_slots(fallback_slots),
-                    },
-                    draft["id"],
-                )
-                return _loc(
-                    lang, "fallback_offer",
-                    requested=_level_label(draft["experience"], lang),
-                    offered=_level_label(offered, lang),
-                )
-            age_slots = trial_logic.get_birth_year_trial_slots(
-                bot_name,
-                int(draft["child_birth_year"]),
-            )
-            postgres.upsert_session(
-                bot_name,
-                chat_id,
-                "trial_intake",
-                {
-                    "trial_id": draft["id"],
-                    "waiting_for": None,
-                    "lang": lang,
-                    "signup_actor": signup_actor,
-                },
-                draft["id"],
-            )
-            return _no_groups_with_age_options(lang, age_slots, draft, signup_actor)
-
-        return self._enter_day_or_group_selection(chat_id, bot_name, draft["id"], slots, lang)
-
-    def _enter_day_or_group_selection(
-        self, chat_id: str, bot_name: str, trial_id: int, slots: list[dict], lang: str,
-    ) -> str:
-        """Ask which day first, then which group — never a flat mixed list.
-
-        A group meeting 3 times a week otherwise shows up as 3 near-duplicate
-        rows (same group, same levels, different date), which is what made
-        the old single flat list unreadable. Skips the day question when
-        every eligible slot already falls on the same date.
-        """
-        dates = sorted({s["date"] for s in slots})
-        if len(dates) == 1:
-            return self._enter_group_selection_for_day(chat_id, bot_name, trial_id, slots, dates[0], lang)
-
-        postgres.upsert_session(
-            bot_name,
-            chat_id,
-            "trial_select_day",
-            {
-                "trial_id": trial_id,
-                "slots": _serialize_slots(slots),
-                "dates": [str(d) for d in dates],
-                "lang": lang,
-            },
-            trial_id,
-        )
-        return f"{_loc(lang, 'choose_day')}\n\n{_day_lines(dates, lang)}"
-
-    def _enter_group_selection_for_day(
-        self, chat_id: str, bot_name: str, trial_id: int, slots: list[dict], chosen_date, lang: str,
-    ) -> str:
-        day_slots = [s for s in slots if str(s["date"]) == str(chosen_date)]
-        postgres.upsert_session(
-            bot_name,
-            chat_id,
-            "trial_select_slot",
-            {
-                "trial_id": trial_id,
-                "slots": _serialize_slots(day_slots),
-                "chosen_date": str(chosen_date),
-                "lang": lang,
-            },
-            trial_id,
-        )
-        return (
-            f"{_loc(lang, 'choose_slot', date=_fmt_date(chosen_date, lang))}"
-            f"\n\n{_group_lines_for_day(day_slots, lang)}"
+        result = trial_service.confirm_trial(bot_name, chat_id, draft["id"])
+        if not result["ok"]:
+            if result["code"] == "LIMIT_REACHED":
+                return _loc(lang, "reached_limits")
+            if result["code"] == "HAS_ACTIVE_TRIAL":
+                return _loc(lang, "has_active_trial")
+            return result.get("message") or _confirmation(academy_repo.get_trial(draft["id"]), lang)
+        trial = result["data"]["trial"]
+        return _loc(
+            lang,
+            "confirmed",
+            date=_fmt_date(trial["trial_day"], lang),
+            start=str(trial["start_time"])[:5],
+            end=str(trial["end_time"])[:5],
+            name=trial.get("child_name", ""),
         )
 
     def _assign_slot_and_confirm(
         self, chat_id: str, bot_name: str, draft: dict, slot: dict, lang: str
     ) -> str:
-        result = trial_service.assign_slot(bot_name, chat_id, draft["id"], slot, lang)
+        result = trial_service.assign_slot(bot_name, draft["id"], slot)
         if not result["ok"]:
             return result.get("message") or _loc(lang, "no_groups")
-        draft = result["data"]["trial"]
-        return _confirmation(draft, lang)
+        return _confirmation(result["data"]["trial"], lang)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Core Evaluation
+    # ══════════════════════════════════════════════════════════════════════
 
     @_bot_scoped
-    def handle_session_turn(
+    def _evaluate_and_respond(
         self,
         chat_id: str,
-        sender_phone: str,
         bot_name: str,
-        user_text: str,
-        history: list,
-        session: dict,
-    ) -> str | None:
-        state = session["state"]
-        params = session["params"]
-        lang = params.get("lang", "ru")
-        trial_id = params.get("trial_id")
+        draft: dict,
+        lang: str,
+        signup_actor: str | None = None,
+    ) -> str:
+        """Central dispatcher — the next reply follows from what the draft holds.
 
-        if state == "trial_intake":
-            interrupt = _session_interrupt_response(lang, user_text, params.get("waiting_for"))
-            if interrupt:
-                return interrupt
-            return self.handle(chat_id, sender_phone, bot_name, user_text, history, lang)
+        Counterpart of LlmBookingFlowHandler._evaluate_and_respond: no step
+        state, the draft alone decides. Intake comes first; after that the
+        parent's date/time (preferred_*) narrows the classes the child is
+        eligible for, and a single match is assigned straight away.
+        """
+        missing = _missing_prerequisite(_draft_to_data(draft))
+        if missing:
+            return _ask_missing(lang, missing, signup_actor)
 
-        if state == "trial_select_day":
-            dates = params.get("dates") or []
-            all_slots = params.get("slots") or []
-            interrupt = _session_interrupt_response(lang, user_text)
-            if interrupt:
-                return interrupt + "\n\n" + f"{_loc(lang, 'choose_day')}\n\n{_day_lines(dates, lang)}"
-            if user_text.strip().isdigit():
-                idx = int(user_text.strip()) - 1
-                if idx < 0 or idx >= len(dates):
-                    _log_rejected("day_choice", "out_of_range", user_text,
-                                  trial_id=trial_id, options=len(dates))
-                    return _loc(lang, "day_invalid")
-                return self._enter_group_selection_for_day(
-                    chat_id, bot_name, trial_id, all_slots, dates[idx], lang,
-                )
+        slots, note = self._bookable_slots(bot_name, draft, lang)
+        if not slots:
+            age_slots = trial_logic.get_birth_year_trial_slots(bot_name, int(draft["child_birth_year"]))
+            return _no_groups_with_age_options(lang, age_slots, draft, signup_actor)
 
-            matched = _match_day_choice(user_text, history, dates)
-            if matched:
-                return self._enter_group_selection_for_day(
-                    chat_id, bot_name, trial_id, all_slots, matched, lang,
-                )
+        if draft.get("group_id"):
+            if _chosen_slot_still_fits(draft, slots):
+                return _confirmation(draft, lang)
+            result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
+            if not result["ok"]:
+                return result.get("message") or _loc(lang, "no_groups")
+            draft = result["data"]["trial"]
 
-            _log_rejected("day_choice", "not_recognized", user_text, trial_id=trial_id)
-            reminder = f"{_loc(lang, 'choose_day')}\n\n{_day_lines(dates, lang)}"
-            return _reasoned_fallback(
-                bot_name, lang, user_text, reminder,
-                extra_hint=(
-                    "Правило записи: пользователь должен указать дату, "
-                    "прежде чем выбирать группу/тренера — если он называет "
-                    "конкретную группу или тренера, не подтверждай выбор "
-                    "группы сам, а мягко попроси сначала выбрать дату из списка."
-                ),
-            )
+        reply = self._narrow_slots(chat_id, bot_name, draft, slots, lang)
+        return f"{note}\n\n{reply}" if note else reply
 
-        if state == "trial_select_slot":
-            slots = params.get("slots") or []
-            chosen_date = params.get("chosen_date")
-            header = _loc(lang, "choose_slot", date=_fmt_date(chosen_date, lang)) if chosen_date else _loc(lang, "choose_day")
-            interrupt = _session_interrupt_response(lang, user_text)
-            if interrupt:
-                return interrupt + "\n\n" + f"{header}\n\n{_group_lines_for_day(slots, lang)}"
-            if user_text.strip().isdigit():
-                idx = int(user_text.strip()) - 1
-                if idx < 0 or idx >= len(slots):
-                    _log_rejected("slot_choice", "out_of_range", user_text,
-                                  trial_id=trial_id, options=len(slots))
-                    return _loc(lang, "slot_invalid")
-                draft = academy_repo.get_trial(trial_id)
-                return self._assign_slot_and_confirm(chat_id, bot_name, draft, slots[idx], lang)
+    @staticmethod
+    def _bookable_slots(bot_name: str, draft: dict, lang: str) -> tuple[list[dict], str | None]:
+        """Classes the child can join, plus a note when only a lower level fits.
 
-            reminder = f"{header}\n\n{_group_lines_for_day(slots, lang)}"
-            # The extractor reads the whole conversation, so facts the client
-            # gave earlier come back on every turn. Only values that differ
-            # from the stored draft count as an edit — otherwise a side
-            # question would wipe the chosen day and restart day selection.
-            patch = _real_changes(
-                _filled_patch(_extract_user_data(history, user_text)),
-                academy_repo.get_trial(trial_id),
-            )
-            slot_change = any(field in patch for field in _SLOT_FIELDS)
+        The lower-level groups are listed right away rather than behind a
+        yes/no question — picking one is the parent's agreement.
+        """
+        year, shift, level = int(draft["child_birth_year"]), draft["school_shift"], draft.get("experience")
+        slots = trial_logic.get_eligible_trial_slots(bot_name, year, shift, experience=level)
+        if slots:
+            return slots, None
+        lower = trial_logic.get_fallback_trial_slots(bot_name, year, shift, level)
+        if not lower:
+            return [], None
+        return lower, _loc(lang, "fallback_shown", requested=_level_label(level, lang))
 
-            if slot_change or _asks_other_day(patch, chosen_date, user_text):
-                result = trial_service.update_intake(
-                    bot_name,
-                    trial_id,
-                    {
-                        **patch,
-                        "trial_day": None,
-                        "start_time": None,
-                        "end_time": None,
-                        "group_id": None,
-                        "language": lang,
-                    },
-                )
-                if not result["ok"]:
-                    return result.get("message") or _loc(lang, "no_groups")
-                return self._continue_from_draft(
-                    chat_id, bot_name, result["data"]["trial"], lang, params.get("signup_actor")
-                )
+    def _narrow_slots(
+        self, chat_id: str, bot_name: str, draft: dict, slots: list[dict], lang: str,
+    ) -> str:
+        """Assign the single class the parent's date/time points to, or list the options."""
+        picked, text = _narrow(slots, draft, lang)
+        if picked:
+            return self._assign_slot_and_confirm(chat_id, bot_name, draft, picked, lang)
+        return text
 
-            # A new name doesn't change which groups fit — keep the list.
-            if patch.get("child_name"):
-                result = trial_service.update_intake(
-                    bot_name, trial_id, {"child_name": patch["child_name"], "language": lang},
-                )
-                if not result["ok"]:
-                    return result.get("message") or reminder
-                return f"{_loc(lang, 'details_updated')}\n\n{reminder}"
+    @_bot_scoped
+    def pending_prompt(self, bot_name: str, draft: dict | None, lang: str) -> str | None:
+        """The question the flow is waiting on, worked out from the draft.
 
-            _log_rejected("slot_choice", "not_a_number", user_text, trial_id=trial_id)
-            return _reasoned_fallback(bot_name, lang, user_text, reminder)
-
-        if state == "trial_fallback_offer":
-            decision = _confirm_decision(user_text) or ""
-            slots = params.get("slots") or []
-            if decision == "yes":
-                return self._enter_day_or_group_selection(chat_id, bot_name, trial_id, slots, lang)
-            if decision == "no":
-                postgres.delete_session(bot_name, chat_id)
-                return _loc(lang, "fallback_declined")
-            reminder = _loc(
-                lang, "fallback_offer",
-                requested=_level_label(params.get("requested_level"), lang),
-                offered=_level_label(params.get("offered_level"), lang),
-            )
-            return _reasoned_fallback(bot_name, lang, user_text, reminder)
-
-        if state == "trial_confirm":
-            decision = _confirm_decision(user_text) or ""
-            if not decision:
-                draft_now = academy_repo.get_trial(trial_id)
-                patch = _real_changes(
-                    _filled_patch(_extract_user_data(history, user_text)), draft_now,
-                )
-                if patch:
-                    result = trial_service.update_intake(
-                        bot_name,
-                        trial_id,
-                        {**patch, "language": lang},
-                    )
-                    if not result["ok"]:
-                        return result.get("message") or _confirmation(academy_repo.get_trial(trial_id), lang)
-                    return (
-                        f"{_loc(lang, 'details_updated_confirm')}\n\n"
-                        f"{_confirmation(result['data']['trial'], lang)}"
-                    )
-            if decision == "yes":
-                draft = academy_repo.get_trial(trial_id)
-                if not trial_logic.is_trial_slot_eligible(bot_name, draft):
-                    result = trial_service.update_intake(
-                        bot_name,
-                        trial_id,
-                        {
-                            "trial_day": None,
-                            "start_time": None,
-                            "end_time": None,
-                            "group_id": None,
-                            "language": lang,
-                        },
-                    )
-                    if not result["ok"]:
-                        return result.get("message") or _loc(lang, "no_groups")
-                    return (
-                        f"{_loc(lang, 'slot_no_longer_eligible')}\n\n"
-                        f"{self._continue_from_draft(chat_id, bot_name, result['data']['trial'], lang)}"
-                    )
-                result = trial_service.confirm_trial(bot_name, chat_id, trial_id)
-                if not result["ok"]:
-                    if result["code"] == "LIMIT_REACHED":
-                        return _loc(lang, "reached_limits")
-                    if result["code"] == "HAS_ACTIVE_TRIAL":
-                        return _loc(lang, "has_active_trial")
-                    return result.get("message") or _confirmation(academy_repo.get_trial(trial_id), lang)
-                trial = result["data"]["trial"]
-                return _loc(
-                    lang,
-                    "confirmed",
-                    date=_fmt_date(trial["trial_day"], lang),
-                    start=str(trial["start_time"])[:5],
-                    end=str(trial["end_time"])[:5],
-                    name=trial.get("child_name", ""),
-                )
-            if decision == "no":
-                trial_service.cancel_trial(
-                    bot_name, chat_id, trial_id, "user_declined_gated_trial"
-                )
-                return _loc(lang, "declined")
-            # decision is "" and nothing changed — an objection, a side
-            # question, or anything else that isn't a value/yes/no. Answer it
-            # instead of silently re-showing the identical confirmation card.
-            reminder = _confirmation(academy_repo.get_trial(trial_id), lang)
-            return _reasoned_fallback(bot_name, lang, user_text, reminder)
-
-        return None
+        Read-only — nothing is assigned or cleared — so it can be shown after
+        a side answer and handed to the intent router.
+        """
+        if not draft:
+            return None
+        missing = _missing_prerequisite(_draft_to_data(draft))
+        if missing:
+            return _ask_missing(lang, missing)
+        slots, note = self._bookable_slots(bot_name, draft, lang)
+        if not slots:
+            return None
+        if draft.get("group_id") and _chosen_slot_still_fits(draft, slots):
+            return _confirmation(draft, lang)
+        # The "not available" note answered the message that asked for that
+        # date; repeating it under every later side answer would nag.
+        _, text = _narrow(slots, draft, lang, pick=False, note_unavailable=False)
+        return f"{note}\n\n{text}" if note else text

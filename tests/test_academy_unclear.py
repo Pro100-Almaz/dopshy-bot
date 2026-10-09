@@ -53,6 +53,7 @@ def academy(monkeypatch):
     monkeypatch.setattr(message_handler, "append_message", lambda *a: None)
     monkeypatch.setattr(message_handler, "retrieve_context", lambda *a, **k: "")
     monkeypatch.setattr(message_handler._pg, "get_active_session", lambda *a: None)
+    monkeypatch.setattr(message_handler.academy_repo, "get_existing_trial_draft", lambda *a: None)
     monkeypatch.setattr(message_handler.trial, "get_trial_daytime", lambda *a: [])
     monkeypatch.setattr(message_handler.trial, "format_availability_context", lambda free: "")
     monkeypatch.setattr(message_handler, "route_trial_message",

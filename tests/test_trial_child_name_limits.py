@@ -36,21 +36,7 @@ def test_rejected_child_name_is_logged_with_reason(caplog):
 
 
 def test_too_long_name_is_not_saved_and_client_is_told_why(monkeypatch):
-    draft = {"id": 3, "state": "draft"}
-    saved = {}
-
-    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
-                        lambda phone, bot: draft)
-    monkeypatch.setattr(llm_trial_flow.postgres, "get_active_session",
-                        lambda bot, chat: {"params": {"waiting_for": "child_name"}})
-    monkeypatch.setattr(llm_trial_flow.postgres, "upsert_session", lambda *a, **k: None)
-    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
-
-    def fake_update(bot_name, trial_id, fields):
-        saved.update(fields)
-        return {"ok": True, "data": {"trial": {**draft, **fields}}}
-
-    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
+    saved = _stub_intake(monkeypatch, {})
 
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "77072479672", "dopsy_fs_school", _LONG_NAME, [], "ru",
@@ -61,6 +47,26 @@ def test_too_long_name_is_not_saved_and_client_is_told_why(monkeypatch):
         f"Имя слишком длинное — не больше {CHILD_NAME_MAX_LEN} символов. "
         "Напишите, пожалуйста, короче."
     )
+
+
+def _stub_intake(monkeypatch, draft_fields, extracted=None):
+    """Run LlmTrialFlowHandler.handle against an in-memory draft.
+
+    The field being asked for follows from what `draft_fields` lacks.
+    """
+    draft = {"id": 3, "state": "draft", **draft_fields}
+    saved = {}
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
+                        lambda phone, bot: draft)
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
+                        lambda history, text: dict(extracted or {}))
+
+    def fake_update(bot_name, trial_id, fields):
+        saved.update(fields)
+        return {"ok": True, "data": {"trial": {**draft, **fields}}}
+
+    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -79,26 +85,6 @@ from integrations import trial_service  # noqa: E402
 _TODAY = date(2026, 9, 23)
 
 
-def _stub_intake(monkeypatch, waiting_for, extracted=None):
-    """Run LlmTrialFlowHandler.handle against in-memory draft/session stubs."""
-    draft = {"id": 3, "state": "draft"}
-    saved = {}
-    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
-                        lambda phone, bot: draft)
-    monkeypatch.setattr(llm_trial_flow.postgres, "get_active_session",
-                        lambda bot, chat: {"params": {"waiting_for": waiting_for}})
-    monkeypatch.setattr(llm_trial_flow.postgres, "upsert_session", lambda *a, **k: None)
-    monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text: dict(extracted or {}))
-
-    def fake_update(bot_name, trial_id, fields):
-        saved.update(fields)
-        return {"ok": True, "data": {"trial": {**draft, **fields}}}
-
-    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
-    return saved
-
-
 def test_birth_year_rejection_reasons():
     assert _birth_year_rejection(2016, _TODAY) is None
     assert _birth_year_rejection(2026 - CHILD_MIN_AGE, _TODAY) is None
@@ -110,7 +96,7 @@ def test_birth_year_rejection_reasons():
 
 
 def test_implausible_birth_year_is_not_saved_and_client_is_told_why(monkeypatch, caplog):
-    saved = _stub_intake(monkeypatch, "child_birth_year", {"child_name": "Али"})
+    saved = _stub_intake(monkeypatch, {"child_name": "Али"}, {"child_birth_year": 1995})
 
     with caplog.at_level(logging.INFO, logger="handlers.llm_trial_flow"):
         reply = LlmTrialFlowHandler().handle(
@@ -123,7 +109,7 @@ def test_implausible_birth_year_is_not_saved_and_client_is_told_why(monkeypatch,
 
 
 def test_unrecognized_answer_is_logged(monkeypatch, caplog):
-    _stub_intake(monkeypatch, "experience", {"child_name": "Али", "child_birth_year": 2016})
+    _stub_intake(monkeypatch, {"child_name": "Али", "child_birth_year": 2016})
 
     with caplog.at_level(logging.INFO, logger="handlers.llm_trial_flow"):
         LlmTrialFlowHandler().handle(
@@ -143,16 +129,3 @@ def test_update_intake_refuses_values_longer_than_the_column(monkeypatch, caplog
     assert result["code"] == "FIELD_TOO_LONG"
     assert result["data"] == {"field": "child_name", "max_len": 30}
     assert "child_name is 31 chars (max 30)" in caplog.text
-
-
-def test_out_of_range_slot_choice_is_logged(caplog):
-    session = {"state": "trial_select_slot",
-               "params": {"trial_id": 11, "lang": "ru", "slots": [{"group_id": 7}]}}
-
-    with caplog.at_level(logging.INFO, logger="handlers.llm_trial_flow"):
-        reply = LlmTrialFlowHandler().handle_session_turn(
-            "chat-1", "7700", "dopsy_fs_school", "5", [], session,
-        )
-
-    assert reply == "Введите номер из списка доступных вариантов."
-    assert "slot_choice rejected: reason=out_of_range trial_id=11 options=1" in caplog.text
