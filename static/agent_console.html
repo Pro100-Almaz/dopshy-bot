@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Console</title>
+<style>
+  :root { --bg:#f5f5f4; --panel:#fff; --line:#e5e5e5; --text:#1c1c1c; --muted:#777; --me:#d9fdd3; --bot:#fff; --accent:#128c7e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111; --panel:#1b1b1b; --line:#333; --text:#eee; --muted:#999; --me:#005c4b; --bot:#262626; --accent:#25d366; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); display:flex; height:100vh; }
+  aside { width:260px; border-right:1px solid var(--line); background:var(--panel); padding:12px; display:flex; flex-direction:column; gap:8px; overflow:auto; }
+  main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  input, select, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .s { padding:6px 8px; border-radius:6px; cursor:pointer; } .s:hover, .s.on { background:var(--bg); }
+  .s small { color:var(--muted); display:block; }
+  header { padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; gap:8px; align-items:center; }
+  header b { flex:1; }
+  #chat { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:6px; }
+  .m { max-width:70%; padding:8px 10px; border-radius:8px; white-space:pre-wrap; word-wrap:break-word; }
+  .user { align-self:flex-end; background:var(--me); } .assistant { align-self:flex-start; background:var(--bot); border:1px solid var(--line); }
+  details { align-self:flex-start; max-width:90%; color:var(--muted); font-size:12px; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--panel); border:1px solid var(--line); padding:8px; border-radius:6px; max-height:300px; overflow:auto; }
+  form { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); background:var(--panel); }
+  form input[type=text] { flex:1; }
+  .err { color:#d33; }
+</style>
+</head>
+<body>
+<aside>
+  <input id="token" type="password" placeholder="X_SERVICE_TOKEN">
+  <select id="bot">
+    <option value="dopsy_bot">Допшы · аренда полей</option>
+    <option value="dopsy_fs_school">FS DOPȘÝ · академия</option>
+    <option value="dopsy_boxing">Boxy Academy · бокс</option>
+  </select>
+  <button class="primary" id="new">+ Новая сессия</button>
+  <div id="sessions"></div>
+</aside>
+<main>
+  <header><b id="title">Выберите или создайте сессию</b>
+    <button id="reset" disabled>Сбросить</button><button id="del" disabled>Удалить</button></header>
+  <div id="chat"></div>
+  <form id="f">
+    <input id="text" type="text" placeholder="Сообщение…" autocomplete="off" disabled>
+    <label title="Отправить как нажатие интерактивной кнопки"><input id="btn" type="checkbox"> кнопка</label>
+    <button class="primary" disabled id="send">→</button>
+  </form>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let current = null;
+try { $('token').value = localStorage.getItem('agentToken') || ''; } catch {}
+$('token').onchange = () => { try { localStorage.setItem('agentToken', $('token').value); } catch {} loadSessions(); };
+
+async function api(method, path, body) {
+  const r = await fetch('/api/agent-test' + path, {
+    method, headers: { 'X-API-Key': $('token').value, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({ ok: false, message: r.statusText }));
+  if (!j.ok) throw new Error(j.message || j.code);
+  return j.data;
+}
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function bubble(role, text) { $('chat').append(el('div', 'm ' + role, text)); $('chat').scrollTop = 1e9; }
+function error(msg) { $('chat').append(el('div', 'err', '⚠ ' + msg)); }
+function renderHistory(msgs) { $('chat').innerHTML = ''; msgs.forEach(m => bubble(m.role, m.content)); }
+
+function renderTrace(d) {
+  const det = el('details');
+  det.append(el('summary', null, `trace · ${d.elapsed_ms} ms · ${d.trace.length} events`));
+  d.trace.forEach(ev => {
+    const { kind, at, ...rest } = ev;
+    const sub = el('details'); sub.append(el('summary', null, kind), el('pre', null, JSON.stringify(rest, null, 2)));
+    det.append(sub);
+  });
+  $('chat').append(det);
+}
+
+async function loadSessions() {
+  if (!$('token').value) return;
+  try {
+    const list = await api('GET', '/sessions');
+    $('sessions').innerHTML = '';
+    list.forEach(s => {
+      const d = el('div', 's' + (current?.id === s.id ? ' on' : ''), `#${s.id} ${s.bot_name}`);
+      d.append(el('small', null, s.updated_at?.slice(0, 16).replace('T', ' ') || ''));
+      d.onclick = () => open(s.id);
+      $('sessions').append(d);
+    });
+  } catch (e) { $('sessions').textContent = e.message; }
+}
+
+async function open(id) {
+  try {
+    const d = await api('GET', '/sessions/' + id);
+    current = d.session;
+    $('title').textContent = `#${current.id} · ${current.bot_name} · ${current.test_phone}`;
+    ['reset', 'del', 'text', 'send'].forEach(i => $(i).disabled = false);
+    renderHistory(d.messages);
+    loadSessions();
+    $('text').focus();
+  } catch (e) { error(e.message); }
+}
+
+$('new').onclick = async () => {
+  try { const s = await api('POST', '/sessions', { bot_name: $('bot').value }); await open(s.id); }
+  catch (e) { error(e.message); }
+};
+$('reset').onclick = async () => {
+  try { await api('POST', `/sessions/${current.id}/reset`); renderHistory([]); } catch (e) { error(e.message); }
+};
+$('del').onclick = async () => {
+  if (!confirm('Удалить сессию и её тестовые данные?')) return;
+  try { await api('DELETE', '/sessions/' + current.id); current = null; renderHistory([]);
+    $('title').textContent = 'Выберите или создайте сессию'; ['reset', 'del', 'text', 'send'].forEach(i => $(i).disabled = true); loadSessions();
+  } catch (e) { error(e.message); }
+};
+$('f').onsubmit = async e => {
+  e.preventDefault();
+  const text = $('text').value.trim(); if (!text || !current) return;
+  $('text').value = ''; $('send').disabled = true;
+  bubble('user', text);
+  try {
+    const d = await api('POST', `/sessions/${current.id}/messages`, $('btn').checked ? { button_title: text } : { text });
+    d.replies.forEach(r => bubble('assistant', r));
+    if (!d.replies.length) error('нет ответа');
+    renderTrace(d);
+  } catch (e) { error(e.message); }
+  $('send').disabled = false; $('text').focus(); $('chat').scrollTop = 1e9;
+};
+loadSessions();
+</script>
+</body>
+</html>
