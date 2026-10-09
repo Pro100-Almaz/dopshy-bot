@@ -95,8 +95,8 @@ _YES_SYMBOLS = tuple(w for w in BaseChecker._YES_WORDS if not any(ch.isalnum() f
 # "Растаймын✅"/"Бас тартамын❌" reply implies kk, while "Подтверждаю✅"/"Отмена❌"
 # (and anything ambiguous) defaults to ru.
 _CONFIRM_KK_WORDS = {
-    "иә", "растаймын", "жарайды", "дұрыс",
-    "жоқ", "бас тартамын", "болмайды", "өзгерт", "бастапқы",
+    "иә", "ия", "иа", "растаймын", "жарайды", "дұрыс", "дурыс",
+    "жоқ", "жок", "бас тартамын", "болмайды", "өзгерт", "бастапқы",
 }
 
 
@@ -310,7 +310,7 @@ def _dispatch_in_trial_signup(
             chat_id, sender_id, bot_name, user_text, history, lang
         )
     if intent == "trial_cancel":
-        return handle_cancel_trial_request(chat_id, sender_id, bot_name)
+        return handle_cancel_trial_request(chat_id, sender_id, bot_name, lang)
     if intent == "trial_status":
         return _with_pending(handle_trial_status_request(sender_id, bot_name, lang), pending)
     if intent == "human_help":
@@ -796,7 +796,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 return
 
             if trial_intent == "trial_cancel":
-                handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
+                handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"], trial_lang)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)
@@ -900,7 +900,9 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             elif tool_call["name"] == "cancel_trial":
                 logger.info("[CANCEL] LLM called cancel_trial tool")
-                handle_reply = handle_cancel_trial_request(chat_id, sender_id, bot_config["name"])
+                handle_reply = handle_cancel_trial_request(
+                    chat_id, sender_id, bot_config["name"], builder.detect_lang(user_text)
+                )
 
             reply = (reply + "\n\n" + handle_reply) if reply else handle_reply
 

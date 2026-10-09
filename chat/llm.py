@@ -215,6 +215,8 @@ def route_trial_message(
         "wording overlaps with trial_new. "
         "Use trial_cancel when the user wants to cancel or withdraw an existing signup — "
         "e.g. 'хочу отменить', 'отмените запись', 'больше не хочу заниматься', 'бас тартамын'. "
+        "Only the latest message counts: a cancellation earlier in the history does not make "
+        "a later greeting, thanks or question trial_cancel. "
         "Use trial_edit when the user wants to change a detail of an existing signup — "
         "e.g. 'перенесите на другое время', 'поменяйте дату', 'измените имя ребенка'. "
         "Use human_help when they ask for an administrator or human manager. "

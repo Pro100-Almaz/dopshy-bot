@@ -127,7 +127,6 @@ def test_invoice_request_goes_to_admin(academy, monkeypatch, lang, needle):
 
 @pytest.mark.parametrize("call", [
     lambda m: m.handle_trial_status_request("+77001112233", "dopsy_fs_school", "kk"),
-    lambda m: m.handle_cancel_trial_request("chat", "+77001112233", "dopsy_fs_school"),
     lambda m: m.handle_edit_request("chat", "+77001112233", {}, "dopsy_fs_school"),
 ])
 def test_no_trial_on_record_points_to_admin(monkeypatch, call):
@@ -140,6 +139,23 @@ def test_no_trial_on_record_points_to_admin(monkeypatch, call):
 
     assert "+7 700 555 6006" in reply
     assert "табылмады" not in reply and "жоқ" not in reply
+
+
+@pytest.mark.parametrize("lang, needle", [
+    ("kk", "белсенді сынақ сабағына жазылым көрінбейді"),
+    ("ru", "нет активной записи"),
+])
+def test_cancel_with_nothing_active_says_so_and_points_to_admin(monkeypatch, lang, needle):
+    from handlers import edit_trial
+
+    monkeypatch.setattr(edit_trial, "_active_trials", lambda bot_name, phone: [])
+    monkeypatch.setattr(edit_trial.postgres, "delete_session", lambda *a: None)
+
+    reply = edit_trial.handle_cancel_trial_request("chat", "+77001112233", "dopsy_fs_school", lang)
+
+    assert needle in reply
+    assert "+7 700 555 6006" in reply
+    assert "— — —" not in reply
 
 
 def test_voucher_question_answers_from_full_voucher_guide(academy, monkeypatch):
