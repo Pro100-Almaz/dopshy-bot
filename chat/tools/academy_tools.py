@@ -101,7 +101,9 @@ EXTRACT_TRIAL_DATA_LLM = {
                         "writer is the student signing up themselves — they give their own age "
                         "('мне 12 лет', 'маған 12 жас'), say 'сам/сама/өзім', or answer the assistant's "
                         "'как вас зовут / есіміңіз кім' — their own name IS the student's name. "
-                        "Return only the name itself ('менің атым Айдос' -> 'Айдос')."
+                        "Return only the name itself ('менің атым Айдос' -> 'Айдос'). "
+                        "A trainer or group name from the assistant's list ('Box Timur' -> "
+                        "'Тимур') is never the child's name."
                     ),
                 },
                 "child_birth_year": {
@@ -130,7 +132,11 @@ EXTRACT_TRIAL_DATA_LLM = {
                 },
                 "preferred_date": {
                     "type": ["string", "null"],
-                    "description": "Preferred trial date as YYYY-MM-DD, or null.",
+                    "description": (
+                        "Trial date as YYYY-MM-DD, or null: the date the user asked for anywhere "
+                        "in the conversation (latest mention wins), or the date of the option "
+                        "they picked from the assistant's numbered day/group list."
+                    ),
                 },
                 "preferred_weekday": {
                     "type": ["integer", "null"],
@@ -138,7 +144,11 @@ EXTRACT_TRIAL_DATA_LLM = {
                 },
                 "preferred_time_start": {
                     "type": ["string", "null"],
-                    "description": "Preferred start time HH:MM, or null.",
+                    "description": (
+                        "Trial start time HH:MM, or null: the time the user asked for anywhere "
+                        "in the conversation (latest mention wins), or the start time of the "
+                        "group they picked from the assistant's numbered list."
+                    ),
                 },
                 "preferred_time_end": {
                     "type": ["string", "null"],
@@ -213,6 +223,8 @@ CANCEL_TRIAL_TOOL = {
         "description": (
             "ОТМЕНИТЬ уже существующую запись на пробное занятие. "
             "ВЫЗЫВАЙ эту функцию, когда пользователь хочет ОТМЕНИТЬ пробное занятие. "
+            "Смотри только на ПОСЛЕДНЕЕ сообщение: если отмена уже была раньше в истории, "
+            "а сейчас пользователь здоровается, благодарит или спрашивает — НЕ вызывай её. "
             "Не собирай дополнительную информацию и не спрашивай конфирмацию, бэкенд сам начнет процесс отмены занятий. "
             "Ты должен просто запустить процесс и оставить все бэкенду."
         ),

@@ -1,10 +1,10 @@
 """Booking business logic — slot generation, free slots, context formatting."""
 
 import logging
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from integrations.repo import academy_repo
-from utils import closest_weekday_date, parse_weekdays
+from utils import closest_weekday_date, is_past_booking_time, parse_weekdays
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,18 @@ def _parse_time(t: str) -> time:
 
 def _get_closest_date(n: int):
     return closest_weekday_date(n)
+
+
+def _next_class_date(training_day: int, time_start):
+    """Closest date of a weekly class that has not started yet.
+
+    A class later today is still offered; once its start time has passed, the
+    next occurrence is a week later.
+    """
+    d = closest_weekday_date(training_day)
+    if is_past_booking_time(d.isoformat(), str(time_start)[:5]):
+        d += timedelta(days=7)
+    return d
 
 
 def get_trial_daytime(
@@ -122,7 +134,7 @@ def get_eligible_trial_slots(
 
         result.append({
             **info,
-            "date": _get_closest_date(info["training_day"]),
+            "date": _next_class_date(info["training_day"], start),
         })
     return result
 
@@ -173,7 +185,7 @@ def get_birth_year_trial_slots(
 
         result.append({
             **info,
-            "date": _get_closest_date(info["training_day"]),
+            "date": _next_class_date(info["training_day"], info["time_start"]),
         })
     return result
 

@@ -123,43 +123,6 @@ def get_booking_reply(
     return response.choices[0].message.content.strip()
 
 
-def get_trial_reply(
-        user_text: str,
-        context: str = "",
-        system_hint: str = "",
-) -> str:
-    """Generate a short natural-language reply for an academy trial-signup
-    conversation that has drifted off the current intake question.
-
-    Used when a message during a gated trial-signup flow is neither a data
-    value, a yes/no, nor a recognized interrupt (greeting/identity/ack) — an
-    objection, a side question, or anything else. The caller appends its own
-    reminder of what's still needed, so this only needs to answer briefly.
-    """
-    system_content = (
-        "Ты — ассистент детской спортивной академии. "
-        "Всегда отвечай на том языке, на котором написал пользователь (русский или казахский). "
-        "Будь кратким (1-2 предложения) и дружелюбным. Не придумывай факты, которых нет в базе знаний. "
-        "ВСЕГДА обращайся на «вы», никогда на «ты», даже если пишут неформально. "
-        "ӘРҚАШАН «сіз» деп қарата сөйле, ешқашан «сен» деп ауыспа."
-    )
-    if system_hint:
-        system_content += f"\n\nИнструкция: {system_hint}"
-    if context:
-        system_content += f"\n\n--- База знаний ---\n{context}\n---"
-
-    response = _client.chat.completions.create(
-        model=config.MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.4,
-        max_completion_tokens=250,
-    )
-    return response.choices[0].message.content.strip()
-
-
 def route_incoming_message(history: list, user_message: str,
                            prompt: str | None = None,
                            tool: dict | None = None) -> tuple[str, str]:
@@ -252,6 +215,8 @@ def route_trial_message(
         "wording overlaps with trial_new. "
         "Use trial_cancel when the user wants to cancel or withdraw an existing signup — "
         "e.g. 'хочу отменить', 'отмените запись', 'больше не хочу заниматься', 'бас тартамын'. "
+        "Only the latest message counts: a cancellation earlier in the history does not make "
+        "a later greeting, thanks or question trial_cancel. "
         "Use trial_edit when the user wants to change a detail of an existing signup — "
         "e.g. 'перенесите на другое время', 'поменяйте дату', 'измените имя ребенка'. "
         "Use human_help when they ask for an administrator or human manager. "
@@ -265,7 +230,10 @@ def route_trial_message(
         system_content += (
             " The client is in the middle of a trial signup. The bot's pending question was:\n"
             f"{pending}\n"
-            "Use trial_continue only if the message answers that question or changes signup data. "
+            "Use trial_continue only if the message answers that question or changes signup data — "
+            "picking an option from a numbered list by its number, date or time ('2', '2.', "
+            "'1 17:00 орта', '17:00 ге') answers it, and so does a wish for a day or time "
+            "('ертеңге болса жақсы болар еді', 'давайте на завтра', 'кешкі уақыт ыңғайлы'). "
             "A question about the schedule, trainers, prices, etc. is NOT trial_continue, even if it "
             "mentions a day or a trainer from the options."
         )

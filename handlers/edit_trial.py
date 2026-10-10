@@ -238,12 +238,28 @@ def handle_trial_status_request(sender_phone: str, bot_name: str, lang: str = "r
     return "\n\n".join(parts)
 
 
-def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str) -> str:
+def _nothing_to_cancel(bot_name: str, lang: str | None) -> str:
+    # Plain "nothing active" (a repeat cancel lands here), still pointing a
+    # client who signed up outside the bot to the admin.
+    phone = ACADEMY_ADMIN_PHONES[bot_name]
+    ru = ("Сейчас у вас нет активной записи на пробное занятие. "
+          f"Если вы записывались другим способом — свяжитесь с администратором: {phone}.")
+    kk = ("Қазір сізде белсенді сынақ сабағына жазылым көрінбейді. "
+          f"Басқа жолмен жазылған болсаңыз — әкімшіге хабарласыңыз: {phone}.")
+    if lang == "ru":
+        return ru
+    if lang == "kk":
+        return kk
+    return _bilingual(ru, kk)
+
+
+def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str,
+                                lang: str | None = None) -> str:
     trials = _active_trials(bot_name, sender_phone)
     postgres.delete_session(bot_name, chat_id)
 
     if not trials:
-        return _bilingual(_no_trial_ru(bot_name), _no_trial_kk(bot_name))
+        return _nothing_to_cancel(bot_name, lang)
     if len(trials) == 1:
         trial_service.cancel_trial(bot_name, chat_id, trials[0]["id"], "user_cancel_trial")
         return _bilingual(
@@ -330,7 +346,7 @@ def handle_edit_request(
 
     from handlers.llm_trial_flow import LlmTrialFlowHandler
 
-    flow_reply = LlmTrialFlowHandler()._continue_from_draft(
+    flow_reply = LlmTrialFlowHandler()._evaluate_and_respond(
         chat_id, bot_name, result["data"]["trial"], lang
     )
     prefix = (

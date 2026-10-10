@@ -7,8 +7,7 @@ pytestmark = pytest.mark.no_db
 
 
 def _ask_name_via_flow(monkeypatch, bot_name):
-    monkeypatch.setattr(llm_trial_flow.postgres, "upsert_session", lambda *a, **k: None)
-    return LlmTrialFlowHandler()._continue_from_draft("chat-1", bot_name, {"id": 1}, "ru")
+    return LlmTrialFlowHandler()._evaluate_and_respond("chat-1", bot_name, {"id": 1}, "ru")
 
 
 def test_boxing_bot_uses_friendly_texts(monkeypatch):

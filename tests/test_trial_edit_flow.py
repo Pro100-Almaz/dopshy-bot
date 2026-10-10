@@ -1,143 +1,118 @@
+"""Picking a class, editing and confirming — all through LlmTrialFlowHandler.handle.
+
+The flow keeps no session: every message is extracted, merged into the draft
+and the draft is evaluated again.
+"""
 from datetime import date, time
 
-from handlers import edit_trial
+import pytest
+
+from handlers import edit_trial, llm_trial_flow
 from handlers.llm_trial_flow import LlmTrialFlowHandler
 
+pytestmark = pytest.mark.no_db
 
-def test_trial_select_slot_digit_selects_slot_without_reextracting(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow._extract_user_data",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not extract slot number")),
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.academy_repo.get_trial",
-        lambda trial_id: {"id": trial_id},
-    )
-
-    def fake_assign(self, chat_id, bot_name, draft, slot, lang):
-        assert slot["group_id"] == 7
-        return "confirm"
-
-    monkeypatch.setattr(LlmTrialFlowHandler, "_assign_slot_and_confirm", fake_assign)
-
-    reply = LlmTrialFlowHandler().handle_session_turn(
-        "chat-1",
-        "7700",
-        "dopsy_fs_school",
-        "1",
-        [],
-        {
-            "state": "trial_select_slot",
-            "params": {
-                "trial_id": 11,
-                "lang": "ru",
-                "slots": [
-                    {
-                        "group_id": 7,
-                        "date": "2026-08-24",
-                        "time_start": "18:00",
-                        "time_end": "19:30",
-                    }
-                ],
-            },
-        },
-    )
-
-    assert reply == "confirm"
+_SLOT = {
+    "group_id": 7, "group_name": "U15", "training_day": 0, "date": date(2026, 8, 24),
+    "time_start": time(18, 0), "time_end": time(19, 30), "level": ["Beginner"],
+}
+_INTAKE = {
+    "id": 11, "child_name": "Ерсултан", "child_birth_year": 2011,
+    "experience": "Beginner", "school_shift": "afternoon",
+}
+_CHOSEN = {
+    "trial_day": date(2026, 8, 24), "start_time": time(18, 0), "end_time": time(19, 30), "group_id": 7,
+}
 
 
-def test_trial_confirm_edit_updates_draft_and_reasks_confirmation(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow._extract_user_data",
-        lambda *args, **kwargs: {"school_shift": "morning"},
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.trial_service.update_intake",
-        lambda bot_name, trial_id, fields: {
-            "ok": True,
-            "data": {
-                "trial": {
-                    "id": trial_id,
-                    "trial_day": date(2026, 8, 24),
-                    "start_time": time(18, 0),
-                    "end_time": time(19, 30),
-                    "child_name": "Ерсултан",
-                    "child_birth_year": 2011,
-                    "experience": "Beginner",
-                    "school_shift": fields["school_shift"],
-                }
-            },
-        },
-    )
+@pytest.fixture
+def flow(monkeypatch):
+    state = {"draft": None, "updates": [], "assigned": None, "confirmed": False}
+    monkeypatch.setattr(llm_trial_flow, "today_almaty", lambda: date(2026, 8, 20))
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
+                        lambda phone, bot: dict(state["draft"]))
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name: [])
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "get_eligible_trial_slots", lambda *a, **k: [_SLOT])
 
-    reply = LlmTrialFlowHandler().handle_session_turn(
-        "chat-1",
-        "7700",
-        "dopsy_fs_school",
-        "поменяйте смену на утреннюю",
-        [],
-        {"state": "trial_confirm", "params": {"trial_id": 11, "lang": "ru"}},
-    )
+    def fake_update(bot_name, trial_id, fields):
+        state["updates"].append(fields)
+        state["draft"] = {**state["draft"], **fields}
+        return {"ok": True, "data": {"trial": dict(state["draft"])}}
 
-    assert "Данные обновил" in reply
-    assert "🏫 Смена: утренняя" in reply
+    def fake_assign(bot_name, trial_id, slot):
+        state["assigned"] = slot
+        state["draft"] = {**state["draft"], "trial_day": slot["date"], "start_time": slot["time_start"],
+                          "end_time": slot["time_end"], "group_id": slot["group_id"]}
+        return {"ok": True, "data": {"trial": dict(state["draft"])}}
+
+    def fake_confirm(bot_name, chat_id, trial_id):
+        state["confirmed"] = True
+        return {"ok": True, "data": {"trial": dict(state["draft"])}}
+
+    monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
+    monkeypatch.setattr(llm_trial_flow.trial_service, "assign_slot", fake_assign)
+    monkeypatch.setattr(llm_trial_flow.trial_service, "confirm_trial", fake_confirm)
+
+    def run(text, draft, extracted=None):
+        state["draft"] = dict(draft)
+        monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda h, t: dict(extracted or {}))
+        return LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_fs_school", text, [], "ru")
+
+    return run, state
+
+
+def test_choice_from_the_group_list_assigns_the_class(flow):
+    run, state = flow
+
+    reply = run("1 18:00", _INTAKE, {"preferred_date": "2026-08-24", "preferred_time_start": "18:00"})
+
+    assert state["assigned"]["group_id"] == 7
+    assert "📋 Детали записи" in reply and "18:00–19:30" in reply
     assert "Ответьте *да* или *нет*" in reply
 
 
-def test_trial_confirm_yes_clears_ineligible_slot_and_reselects(monkeypatch):
-    updated = {}
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.academy_repo.get_trial",
-        lambda trial_id: {
-            "id": trial_id,
-            "trial_day": date(2026, 8, 24),
-            "start_time": time(18, 0),
-            "end_time": time(19, 30),
-            "group_id": 7,
-            "child_name": "Ерсултан",
-            "child_birth_year": 2011,
-            "experience": "Beginner",
-            "school_shift": "morning",
-        },
-    )
-    monkeypatch.setattr(
-        "handlers.llm_trial_flow.trial_logic.is_trial_slot_eligible",
-        lambda bot_name, draft: False,
-    )
+def test_a_bare_list_number_is_not_read_as_a_level(flow):
+    run, state = flow
 
-    def fake_update(bot_name, trial_id, fields):
-        updated.update(fields)
-        return {
-            "ok": True,
-            "data": {
-                "trial": {
-                    "id": trial_id,
-                    "child_name": "Ерсултан",
-                    "child_birth_year": 2011,
-                    "experience": "Beginner",
-                    "school_shift": "morning",
-                }
-            },
-        }
+    run("2", _INTAKE, {"preferred_date": "2026-08-24"})
 
-    monkeypatch.setattr("handlers.llm_trial_flow.trial_service.update_intake", fake_update)
-    monkeypatch.setattr(
-        LlmTrialFlowHandler,
-        "_continue_from_draft",
-        lambda self, chat_id, bot_name, draft, lang, signup_actor=None: "choose new group",
-    )
+    assert state["updates"][0]["experience"] == "Beginner"
 
-    reply = LlmTrialFlowHandler().handle_session_turn(
-        "chat-1",
-        "7700",
-        "dopsy_fs_school",
-        "да",
-        [],
-        {"state": "trial_confirm", "params": {"trial_id": 11, "lang": "ru"}},
-    )
 
-    assert updated["group_id"] is None
-    assert updated["trial_day"] is None
+def test_edit_with_a_chosen_class_updates_the_draft_and_reasks_confirmation(flow):
+    run, state = flow
+
+    reply = run("поменяйте смену на утреннюю", {**_INTAKE, **_CHOSEN, "school_shift": "afternoon"},
+                {"school_shift": "morning"})
+
+    assert state["updates"][0]["school_shift"] == "morning"
+    assert "🏫 Смена: утренняя" in reply
+    assert "Ответьте *да* или *нет*" in reply
+    assert not state["confirmed"]
+
+
+def test_yes_confirms_the_chosen_class(flow, monkeypatch):
+    run, state = flow
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "is_trial_slot_eligible", lambda bot, draft: True)
+
+    reply = run("да", {**_INTAKE, **_CHOSEN})
+
+    assert state["confirmed"]
+    assert reply.startswith("Вы записаны на пробный урок")
+
+
+def test_yes_clears_an_ineligible_class_and_reselects(flow, monkeypatch):
+    run, state = flow
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "is_trial_slot_eligible", lambda bot, draft: False)
+    monkeypatch.setattr(LlmTrialFlowHandler, "_evaluate_and_respond",
+                        lambda self, chat_id, bot_name, draft, lang, signup_actor=None: "choose new group")
+
+    reply = run("да", {**_INTAKE, **_CHOSEN})
+
+    assert not state["confirmed"]
+    assert state["updates"][0]["group_id"] is None
+    assert state["updates"][0]["trial_day"] is None
+    assert state["updates"][0]["preferred_date"] is None
     assert "выберите подходящий вариант заново" in reply
     assert "choose new group" in reply
 
@@ -163,7 +138,7 @@ def test_confirmed_edit_uses_replacement_draft_flow(monkeypatch):
     )
     monkeypatch.setattr(
         LlmTrialFlowHandler,
-        "_continue_from_draft",
+        "_evaluate_and_respond",
         lambda self, chat_id, bot_name, draft, lang, signup_actor=None: "choose group",
     )
 

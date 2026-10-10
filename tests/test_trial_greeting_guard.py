@@ -17,6 +17,14 @@ def test_trial_greeting_guard_matches_plain_greetings():
     assert is_greeting("как дела")
 
 
+def test_trial_greeting_guard_matches_kazakh_greetings_and_keyboard_spellings():
+    assert is_greeting("Ассалаумағалейкум")
+    assert is_greeting("ассалаумагалейкум")
+    assert is_greeting("саламатсыз ба?")
+    assert is_greeting("Салеметсиз бе!")
+    assert is_greeting("сәлеметсіз бе?")
+
+
 def test_trial_greeting_guard_does_not_match_signup_details():
     assert not is_greeting("2016")
     assert not is_greeting("Али")

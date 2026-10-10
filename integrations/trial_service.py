@@ -79,7 +79,7 @@ def update_intake(bot_name: str, trial_id: int, fields: dict) -> dict:
     return _ok({"trial": trial})
 
 
-def assign_slot(bot_name: str, chat_id: str, trial_id: int, slot: dict, lang: str) -> dict:
+def assign_slot(bot_name: str, trial_id: int, slot: dict) -> dict:
     result = postgres.update_draft(
         bot_name,
         trial_id,
@@ -94,14 +94,6 @@ def assign_slot(bot_name: str, chat_id: str, trial_id: int, slot: dict, lang: st
     trial = academy_repo.get_trial(trial_id)
     if not trial:
         return _err("NOT_FOUND", "Trial not found.")
-
-    postgres.upsert_session(
-        bot_name,
-        chat_id,
-        "trial_confirm",
-        {"trial_id": trial_id, "lang": lang},
-        trial_id,
-    )
     return _ok({"trial": trial})
 
 
