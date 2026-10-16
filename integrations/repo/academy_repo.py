@@ -369,7 +369,7 @@ def get_groups_info(bot_name: str):
                 SELECT s.group_id, s.training_day, s.time_start, s.time_end, s.field,
                        g.group_name, g.group_type, g.max_cap, g.curr_cap,
                        g.birth_years, g.location, g.level, g.age_min, g.age_max,
-                       g.shift, g.trainer, g.is_active
+                       g.shift, g.trainer, g.is_active, g.ignore_days
                 FROM academy_group_schedules s
                 JOIN academy_groups g ON g.id = s.group_id
                 WHERE g.group_type = %s AND g.is_active = TRUE

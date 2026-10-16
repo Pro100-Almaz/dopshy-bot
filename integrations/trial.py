@@ -18,6 +18,11 @@ _LEVEL_FALLBACKS = {
     "Beginner": [],
 }
 
+def _is_ignored_day(info: dict) -> bool:
+    """True when the group takes no trials on this schedule row's weekday."""
+    return info["training_day"] in (info.get("ignore_days") or [])
+
+
 def _parse_time(t: str) -> time:
     return datetime.strptime(t, "%H:%M").time()
 
@@ -53,7 +58,7 @@ def get_trial_daytime(
     all_group_info = academy_repo.get_groups_info(bot_name=bot_name)
     result = []
     for info in all_group_info:
-        if info["training_day"] not in days:
+        if info["training_day"] not in days or _is_ignored_day(info):
             continue
 
         start = info["time_start"]
@@ -108,6 +113,8 @@ def get_eligible_trial_slots(
         allowed_levels.extend(_LEVEL_FALLBACKS.get(experience, []))
 
     for info in academy_repo.get_groups_info(bot_name=bot_name):
+        if _is_ignored_day(info):
+            continue
         birth_years = info.get("birth_years") or []
         if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
             continue
@@ -174,6 +181,8 @@ def get_birth_year_trial_slots(
     """Return available schedule slots filtered only by academy type and birth year."""
     result = []
     for info in academy_repo.get_groups_info(bot_name=bot_name):
+        if _is_ignored_day(info):
+            continue
         birth_years = info.get("birth_years") or []
         if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
             continue
