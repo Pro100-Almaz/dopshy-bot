@@ -71,6 +71,8 @@ def _shift_label(value: str | None) -> str | None:
         return "Таңертең"
     if value == "afternoon":
         return "Түстен кейін"
+    if value == "kindergarten":
+        return "Балабақша"
     return value
 
 
@@ -139,6 +141,9 @@ def _normalize_group_schedules(body: dict) -> tuple[list[dict] | None, tuple | N
     return schedules, None
 
 
+_AUDIENCES = ("child", "adult")
+
+
 def _group(row: dict) -> dict:
     training_day = row.get("training_day")
     training_day_label = WEEKDAY_RU.get(training_day, "") if training_day is not None else ""
@@ -163,6 +168,7 @@ def _group(row: dict) -> dict:
         "age_max": row.get("age_max"),
         "shift": row.get("shift"),
         "is_active": row.get("is_active"),
+        "audience": row.get("audience") or "child",
     })
 
 
@@ -186,6 +192,7 @@ def _trial(row: dict) -> dict:
         "created_at": row.get("created_at"),
         "shift": _shift_label(row.get("school_shift")),
         "school_time": _school_time(row),
+        "audience": row.get("audience") or "child",
     })
 
 
@@ -260,6 +267,8 @@ def create_group(sport: str):
         return _invalid("max_cap, age_min, and age_max must be integers when provided.")
     if "is_active" in body and not isinstance(body.get("is_active"), bool):
         return _invalid("is_active must be a boolean.")
+    if body.get("audience") not in (None, *_AUDIENCES):
+        return _invalid("audience must be 'child' or 'adult'.")
 
     group_id = academy_repo.create_or_update_group(
         group_name=body["group_name"],
@@ -272,6 +281,7 @@ def create_group(sport: str):
         age_max=age_max,
         shift=body.get("shift"),
         trainer=body.get("trainer"),
+        audience=body.get("audience"),
     )
     schedule_rows = academy_repo.replace_group_schedules(group_id, schedules) or []
     refresh_all_groups()
@@ -291,7 +301,8 @@ def patch_group(sport: str, group_id: int):
 
     body = request.get_json(silent=True) or {}
     group_fields = {key for key in (
-        "group_name", "max_cap", "level", "levels", "age_min", "age_max", "shift", "trainer", "is_active"
+        "group_name", "max_cap", "level", "levels", "age_min", "age_max", "shift", "trainer", "is_active",
+        "audience",
     ) if key in body}
     schedules_present = "training_days" in body or "schedules" in body
     if not group_fields and not schedules_present:
@@ -300,6 +311,8 @@ def patch_group(sport: str, group_id: int):
     if group_fields:
         if "is_active" in body and not isinstance(body.get("is_active"), bool):
             return _invalid("is_active must be a boolean.")
+        if "audience" in body and body.get("audience") not in _AUDIENCES:
+            return _invalid("audience must be 'child' or 'adult'.")
         try:
             max_cap = int(body["max_cap"]) if "max_cap" in body and body.get("max_cap") is not None else None
             age_min = int(body["age_min"]) if "age_min" in body and body.get("age_min") is not None else None
@@ -317,6 +330,7 @@ def patch_group(sport: str, group_id: int):
             shift=body.get("shift") if "shift" in body else None,
             trainer=body.get("trainer") if "trainer" in body else None,
             is_active=body.get("is_active") if "is_active" in body else None,
+            audience=body.get("audience") if "audience" in body else None,
         )
         if not res["ok"]:
             return jsonify(res), 400 if res.get("code") == "INVALID_LEVEL" else 404

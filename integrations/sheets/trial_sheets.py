@@ -18,9 +18,9 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 _HEADERS = {
-        'groups' : ['group_id', 'group_name', 'max_cap', 'curr_cap', 'birth_years', 'location', 'level', 'trainer', 'field', 'training_day', 'start_time',	'end_time'],
+        'groups' : ['group_id', 'group_name', 'max_cap', 'curr_cap', 'birth_years', 'location', 'level', 'trainer', 'field', 'training_day', 'start_time',	'end_time', 'audience'],
         'trials' : ['trial_id',	'child_name',	'child_birth_year',	'language',	'phone',	'group_id',	'trial_day',
-                    'start_time',	'end_time',	'state',	'notes',	'attended',	'subscribed']
+                    'start_time',	'end_time',	'state',	'notes',	'attended',	'subscribed', 'audience']
     }
 
 _GROUP_COL_COUNT = len(_HEADERS['groups'])
@@ -33,6 +33,13 @@ _STATES_RUSSIAN = {
     "confirmed":        "ПОДТВЕРЖДЕНО",
     "cancelled":        "ОТМЕНЕНО",
     "failed":           "ПРОВАЛИЛОСЬ",
+}
+
+
+# Children's or adult group, appended as the last column of both sheets.
+_AUDIENCE_RUSSIAN = {
+    "child": "ДЕТИ",
+    "adult": "ВЗРОСЛЫЕ",
 }
 
 
@@ -95,6 +102,7 @@ def _group_to_row(g: dict) -> list:
         WEEKDAY_RU[g["training_day"]],
         str(g["time_start"]),
         str(g["time_end"]),
+        _AUDIENCE_RUSSIAN.get(g.get("audience") or "child"),
     ]
 
 
@@ -113,6 +121,7 @@ def _trial_to_row(g: dict) -> list:
         str(g["notes"]),
         str(g["attended"]),
         str(g["subscribed"]),
+        _AUDIENCE_RUSSIAN.get(g.get("audience") or "child"),
     ]
 
 def _last_col_letter(col_count: int) -> str:

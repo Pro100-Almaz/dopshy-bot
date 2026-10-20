@@ -13,6 +13,7 @@ from chat.openai_client import client
 EMPTY_TRIAL_DATA = {
     "child_name": None,
     "child_birth_year": None,
+    "audience": None,
     "experience": None,
     "school_shift": None,
     "preferred_date": None,

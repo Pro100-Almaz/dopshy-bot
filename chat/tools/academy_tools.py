@@ -12,7 +12,8 @@ START_TRIAL_TOOL = {
             "НЕ пытайся СОБРАТЬ дату/время/личную информацию в свободном тексте ДО вызова функции. "
             "Ты должен сперва только узнать намерение "
             "и вызывать эту функцию если есть намерение записаться на пробный урок/занятие. "
-            "НЕ вызывай эту функцию для взрослых, персональных, индивидуальных, one-on-one "
+            "Запись во взрослую группу (18+) — такая же запись на пробное, вызывай функцию. "
+            "НЕ вызывай эту функцию для персональных, индивидуальных, one-on-one "
             "тренировок или консультации по цене — по таким вопросам нужно отвечать текстом "
             "и направлять к администратору. "
             "НЕ вызывай эту функцию, если пользователь хочет ИЗМЕНИТЬ, ОТМЕНИТЬ уже существующую запись — "
@@ -58,6 +59,9 @@ SELECT_TRIAL_INTENT_LLM = {
                         "trial_status",
                         "trial_cancel",
                         "human_help",
+                        "decline_distance",
+                        "decline_later",
+                        "decline",
                         "unclear",
                         "other",
                     ],
@@ -114,6 +118,21 @@ EXTRACT_TRIAL_DATA_LLM = {
                         "estimated birth year using the current year. Null unless explicit."
                     ),
                 },
+                "audience": {
+                    "type": ["string", "null"],
+                    "enum": ["child", "adult", None],
+                    "description": (
+                        "Which group the signup is for. 'adult' when the student is 18 or older: "
+                        "the user asks for the adult group ('ересектер тобы', 'ересектерге', "
+                        "'взрослая группа', 'для взрослых'), signs up themselves as an adult, or "
+                        "gives their own age of 18+ ('Мен 25 жастамын', 'мне 30 лет'). 'child' when "
+                        "a child is being signed up ('балам', 'сын', 'дочь'), the children's group "
+                        "is named ('балалар тобы', 'детская группа') or the student is 5-17. "
+                        "A parent stating their own age while signing up a child is 'child'. "
+                        "A reply to the assistant's group list ('1. ... балалар тобы', '2. ... "
+                        "ересектер тобы'): '1' -> 'child', '2' -> 'adult'. Null when unclear."
+                    ),
+                },
                 "experience": {
                     "type": ["string", "null"],
                     "enum": ["Beginner", "Intermediate", "Advanced", None],
@@ -124,10 +143,13 @@ EXTRACT_TRIAL_DATA_LLM = {
                 },
                 "school_shift": {
                     "type": ["string", "null"],
-                    "enum": ["morning", "afternoon", None],
+                    "enum": ["morning", "afternoon", "kindergarten", None],
                     "description": (
                         "Child's school shift, not desired training time. "
-                        "morning means studies in the morning; afternoon means studies in the afternoon."
+                        "morning means studies in the morning (первая смена, бірінші ауысым); "
+                        "afternoon means studies in the afternoon (вторая смена, екінші ауысым, "
+                        "түстен кейін оқиды, учится после обеда); kindergarten means the child "
+                        "goes to kindergarten, not school (балабақшаға барады, ходит в садик)."
                     ),
                 },
                 "preferred_date": {
@@ -158,6 +180,7 @@ EXTRACT_TRIAL_DATA_LLM = {
             "required": [
                 "child_name",
                 "child_birth_year",
+                "audience",
                 "experience",
                 "school_shift",
                 "preferred_date",

@@ -31,7 +31,7 @@ def flow(monkeypatch):
     monkeypatch.setattr(llm_trial_flow, "today_almaty", lambda: date(2026, 8, 20))
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot: dict(state["draft"]))
-    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name: [])
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
     monkeypatch.setattr(llm_trial_flow.trial_logic, "get_eligible_trial_slots", lambda *a, **k: [_SLOT])
 
     def fake_update(bot_name, trial_id, fields):

@@ -96,7 +96,7 @@ def normalize_user_payload(body: dict, *, creating: bool) -> tuple[dict | None, 
         value = patch["school_shift"]
         if value in (None, ""):
             patch["school_shift"] = None
-        elif value not in {"morning", "afternoon"}:
-            return None, "school_shift must be morning or afternoon."
+        elif value not in {"morning", "afternoon", "kindergarten"}:
+            return None, "school_shift must be morning, afternoon or kindergarten."
 
     return patch, None

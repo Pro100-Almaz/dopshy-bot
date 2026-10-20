@@ -50,6 +50,7 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
         phone=phone,
         client_token=str(uuid.uuid4()),
         language=lang,
+        group_type=academy_repo.bot_group_type(bot_name),
     )
     if not result.get("ok"):
         return result
@@ -138,6 +139,11 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
 
 
 def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dict:
+    """Cancel a draft or trial and wipe the chat — and, on a cancel the client
+    asked for, the saved answers of an earlier abandoned signup too."""
+    trial = academy_repo.get_trial(trial_id) or {}
+    if trial.get("phone"):
+        academy_repo.delete_trial_summary(trial["phone"], bot_name)
     result = postgres.cancel_booking_trial(
         bot_name,
         trial_id,
@@ -149,6 +155,15 @@ def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dic
     clear_history(chat_id)
     refresh_all_trials()
     return result
+
+
+def abandon_draft(bot_name: str, chat_id: str, draft: dict) -> None:
+    """A draft nobody answered for TRIAL_DRAFT_KEEP_SECONDS: cancel it, wipe
+    the chat, keep its answers as a summary for the client's next signup."""
+    answers = {field: draft.get(field) for field in academy_repo.SUMMARY_FIELDS}
+    cancel_trial(bot_name, chat_id, draft["id"], "abandoned_120m")
+    if any(answers.get(field) not in (None, "") for field in academy_repo.SUMMARY_FIELDS[1:]):
+        academy_repo.save_trial_summary(draft["phone"], bot_name, answers)
 
 
 def get_active_trials(bot_name: str, phone: str) -> dict:
@@ -192,6 +207,10 @@ def replace_confirmed_trial_with_draft(
     }
     patch = {key: value for key, value in fields.items() if key in allowed and value not in (None, "")}
     base.update(patch)
+    # The new draft stays in the same curriculum and group (children's/adult).
+    base["group_type"] = existing.get("group_type") or academy_repo.bot_group_type(bot_name)
+    if existing.get("audience"):
+        base["audience"] = existing["audience"]
 
     cancelled = postgres.cancel_booking_trial(
         bot_name,

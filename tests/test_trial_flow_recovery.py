@@ -109,18 +109,22 @@ def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
 
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
 
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
+
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_boxing", "Балама сынақ сабағы керек", [], "kk",
     )
 
     assert saved["child_name"] is None
-    assert reply == BOXING_T["ask_name"]["kk"]
+    # A new signup: "the trial is free", then the age (boxing asks it first).
+    assert reply == f"{BOXING_T['trial_free_intro']['kk']}\n\n{BOXING_T['ask_birth_year']['kk']}"
 
 
 def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(days=14)}
+    # Past the 30-minute answer window, not yet abandoned (120 minutes).
+    stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=60)}
     saved = {}
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: dict(stale))
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
@@ -131,12 +135,14 @@ def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatc
 
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
 
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
+
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_boxing", "сынақ сабағына жазылғым келеді", [], "kk",
     )
 
     assert saved["child_name"] is None
-    assert reply == BOXING_T["ask_name"]["kk"]
+    assert reply == BOXING_T["ask_birth_year"]["kk"]
 
 
 def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypatch):

@@ -84,15 +84,42 @@ def _text(text: str) -> IncomingWhatsAppMessage:
     )
 
 
-@pytest.mark.parametrize("lang, expected", [("kk", _KK), ("ru", _RU)])
-def test_unclear_intent_gets_admin_line(academy, monkeypatch, lang, expected):
+@pytest.mark.parametrize("lang", ["kk", "ru"])
+def test_first_unclear_message_gets_one_clarifying_question(academy, monkeypatch, lang):
     academy["intent"] = ("unclear", lang)
     monkeypatch.setattr(message_handler, "get_ai_response",
                         lambda **k: pytest.fail("LLM must not be called for unclear"))
 
     message_handler.handle_incoming_message(_text("ммм қалай анау"))
 
+    assert academy["sent"] == [message_handler._ACADEMY_CLARIFY_REPLY[lang]]
+
+
+@pytest.mark.parametrize("lang, expected", [("kk", _KK), ("ru", _RU)])
+def test_unclear_again_after_clarifying_gets_admin_line(academy, monkeypatch, lang, expected):
+    academy["intent"] = ("unclear", lang)
+    history = [{"role": "user", "content": "ммм"},
+               {"role": "assistant", "content": message_handler._ACADEMY_CLARIFY_REPLY[lang]}]
+    monkeypatch.setattr(message_handler, "get_history", lambda chat_id: history)
+    monkeypatch.setattr(message_handler, "get_ai_response",
+                        lambda **k: pytest.fail("LLM must not be called for unclear"))
+
+    message_handler.handle_incoming_message(_text("анау ше"))
+
     assert academy["sent"] == [expected]
+
+
+def test_unclear_mid_signup_re_asks_the_pending_question():
+    reply = message_handler._academy_unclear_reply([], "kk", "Балаңыздың есімі кім?")
+
+    assert reply == f"{message_handler._ACADEMY_CLARIFY_LEAD['kk']}\n\nБалаңыздың есімі кім?"
+
+
+def test_unclear_mid_signup_after_clarifying_goes_to_admin():
+    history = [{"role": "assistant",
+                "content": f"{message_handler._ACADEMY_CLARIFY_LEAD['kk']}\n\nБалаңыздың есімі кім?"}]
+
+    assert message_handler._academy_unclear_reply(history, "kk", "Балаңыздың есімі кім?") == _KK
 
 
 def test_llm_reply_with_foreign_number_is_replaced(academy):
