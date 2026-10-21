@@ -107,19 +107,44 @@ def test_voucher_docs_get_their_own_scope():
         assert "academy_voucher" not in str(retriever._scope_filter(bot))
 
 
-def test_intent_context_loads_voucher_doc_only_for_football_voucher(tmp_path, monkeypatch):
+def test_intent_context_loads_each_academys_voucher_doc_only_for_voucher(tmp_path, monkeypatch):
     (tmp_path / "academy_football_voucher_transfer_steps.md").write_text(
         "voucher steps", encoding="utf-8"
+    )
+    (tmp_path / "academy_boxing_voucher_queue_steps.md").write_text(
+        "queue steps", encoding="utf-8"
     )
     monkeypatch.setattr(retriever.config, "DOCUMENTS_PATH", str(tmp_path))
 
     assert retriever.intent_context("dopsy_fs_school", "question_voucher") == (
         "[academy_football_voucher_transfer_steps.md]\nvoucher steps"
     )
-    assert retriever.intent_context("dopsy_boxing", "question_voucher") is None
+    assert retriever.intent_context("dopsy_boxing", "question_voucher") == (
+        "[academy_boxing_voucher_queue_steps.md]\nqueue steps"
+    )
     assert retriever.intent_context("dopsy_fs_school", "question_price") is None
+    assert retriever.intent_context("dopsy_boxing", "question_price") is None
 
 
-def test_voucher_doc_exists_in_documents():
-    name = retriever._INTENT_DOCS[("dopsy_fs_school", "question_voucher")]
-    assert (Path(__file__).parent.parent / "documents" / name).is_file()
+def test_boxing_full_context_skips_voucher_doc(tmp_path, monkeypatch):
+    (tmp_path / "academy_boxing_faq.md").write_text("faq", encoding="utf-8")
+    (tmp_path / "academy_boxing_voucher_queue_steps.md").write_text(
+        "queue steps", encoding="utf-8"
+    )
+    monkeypatch.setattr(retriever.config, "DOCUMENTS_PATH", str(tmp_path))
+
+    assert retriever.retrieve_context("q", bot_name="dopsy_boxing") == "[academy_boxing_faq.md]\nfaq"
+
+
+def test_voucher_docs_exist_in_documents():
+    for name in retriever._INTENT_DOCS.values():
+        assert (Path(__file__).parent.parent / "documents" / name).is_file()
+
+
+def test_boxing_voucher_doc_names_portal_provider_and_trainer():
+    name = retriever._INTENT_DOCS[("dopsy_boxing", "question_voucher")]
+    text = (Path(__file__).parent.parent / "documents" / name).read_text(encoding="utf-8")
+    assert "Local Academy" in text
+    assert "Тимур Бейсенов" in text
+    assert "Kezek" in text
+    assert "Boxy Academy" not in text

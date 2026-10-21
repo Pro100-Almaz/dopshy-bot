@@ -36,9 +36,10 @@ _FULL_CONTEXT_PREFIXES: dict[str, tuple[str, ...]] = {
 
 def _full_context_docs(bot_name: str) -> list[tuple[str, str]]:
     prefixes = _FULL_CONTEXT_PREFIXES[bot_name]
+    # Voucher guides are left out: they come only via intent_context.
     files = sorted(
         p for p in Path(config.DOCUMENTS_PATH).glob("*.md")
-        if p.name.lower().startswith(prefixes)
+        if p.name.lower().startswith(prefixes) and "voucher" not in p.name.lower()
     )
     return [(p.name, p.read_text(encoding="utf-8").strip()) for p in files]
 
@@ -48,6 +49,7 @@ def _full_context_docs(bot_name: str) -> list[tuple[str, str]]:
 # top-k slots of unrelated questions, and cost tokens only when actually needed.
 _INTENT_DOCS: dict[tuple[str, str], str] = {
     ("dopsy_fs_school", "question_voucher"): "academy_football_voucher_transfer_steps.md",
+    ("dopsy_boxing", "question_voucher"): "academy_boxing_voucher_queue_steps.md",
 }
 
 

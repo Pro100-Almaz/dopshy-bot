@@ -213,6 +213,11 @@ T = {
         "ru": "Готово, вы записаны на пробное занятие! 🎉 Будем рады вас видеть!\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}",
         "kk": "Дайын, сынақ сабағына жазылдыңыз! 🎉 Сізді күтеміз!\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есіміңіз: {name}",
     },
+    # Instead of repeating a numbered list the last message already showed.
+    "choose_from_above": {
+        "ru": "Выберите, пожалуйста, номер из списка выше.",
+        "kk": "Жоғарыдағы тізімнен нөмірін таңдаңызшы.",
+    },
 }
 
 # Warmer wording for the boxing bot. Keys missing here fall back to T, and the
@@ -491,21 +496,44 @@ _NO_RE = _build_word_re(_NO)
 # "да", which is why those go through _YES_RE/_NO_RE above instead.
 _CANCEL_STEMS = ("отмен", "откаж", "передумал", "бас тарт")
 
+# Words that may come with a yes/no without changing it («иә, бәрі дұрыс»,
+# «нет, спасибо»). Any other word makes the message more than a yes/no.
+_CONFIRM_FILLER = {
+    "бәрі", "рахмет", "жақсы", "әрине", "өтінемін",
+    "все", "всё", "верно", "правильно", "спасибо", "хорошо", "конечно", "пожалуйста", "давай",
+}
+# Kazakh yes/no question particles: «жұма күнге басқа уақыттар жоқ па?».
+_QUESTION_PARTICLE_RE = re.compile(r"\b(?:ма|ме|ба|бе|па|пе)\b", re.IGNORECASE)
+
 
 def _confirm_decision(text: str) -> str | None:
-    """Return 'yes'/'no'/None from free text.
+    """Return 'yes'/'no'/'cancel'/None from free text.
 
-    Short confirm words are matched on a word boundary so "да" doesn't fire
-    on "дать" (giving a false "yes" to an unrelated question containing the
-    word "give"/"дать" was a real production incident). Cancel stems are
-    matched as substrings on purpose — see _CANCEL_STEMS.
+    Only a plain answer counts: a question («…жоқ па?») or a message with
+    other words in it («нет, давайте в 17:00») is None and goes to the
+    router. Matching whole words keeps "да" from firing on "дать" (a real
+    production incident). Cancel stems are matched as substrings on purpose
+    (see _CANCEL_STEMS) and mean "cancel": the client asked to drop the
+    signup, not just said the details are wrong.
     """
     lower = text.lower().strip()
+    if "?" in lower or _QUESTION_PARTICLE_RE.search(lower):
+        return None
+    if any(stem in lower for stem in _CANCEL_STEMS):
+        return "cancel"
+    words = re.findall(r"\w+", lower)
+    if not words or any(w not in _YES | _NO | _CONFIRM_FILLER for w in words):
+        return None
     if _YES_RE and _YES_RE.search(lower):
         return "yes"
-    if (_NO_RE and _NO_RE.search(lower)) or any(stem in lower for stem in _CANCEL_STEMS):
+    if _NO_RE and _NO_RE.search(lower):
         return "no"
     return None
+
+
+def confirm_decision(text: str) -> str | None:
+    """Public alias of _confirm_decision for the message handler's pre-router check."""
+    return _confirm_decision(text)
 
 
 _GREETINGS = {
@@ -1121,6 +1149,48 @@ def _shift_label(value: str | None, lang: str) -> str:
     return SHIFT_LABELS.get(lang, SHIFT_LABELS["ru"]).get(value, value or "")
 
 
+def _trainer_suffix(slot: dict) -> str:
+    trainer = (slot.get("trainer") or "").strip()
+    return f" — {trainer}" if trainer else ""
+
+
+def _trainer_named(text: str | None, slots: list[dict]) -> str | None:
+    """The trainer of `slots` the message names — by any part of the name,
+    with a Kazakh ending too («Тимурдың уақыттары»)."""
+    words = re.findall(r"\w+", (text or "").lower())
+    for trainer in sorted({s["trainer"] for s in slots if s.get("trainer")}):
+        parts = [p for p in re.findall(r"\w+", trainer.lower()) if len(p) >= 4]
+        if any(word.startswith(part) for part in parts for word in words):
+            return trainer
+    return None
+
+
+def _only_trainer(slots: list[dict], text: str | None) -> list[dict]:
+    """`slots` narrowed to the trainer the message names, if it names one."""
+    trainer = _trainer_named(text, slots)
+    return [s for s in slots if s.get("trainer") == trainer] if trainer else slots
+
+
+def _slot_trainer(draft: dict, slots: list[dict]) -> str | None:
+    """Trainer of the draft's chosen class, read from the slots at hand."""
+    group_id = draft.get("group_id")
+    return next((s.get("trainer") for s in slots
+                 if group_id is not None and int(s["group_id"]) == int(group_id)), None)
+
+
+def _with_trainer(body: str, trainer: str | None, lang: str) -> str:
+    """Add the trainer under the ⏰ line of a confirmation."""
+    if not trainer:
+        return body
+    lines = body.split("\n")
+    at = next((i for i, line in enumerate(lines) if line.startswith("⏰")), None)
+    if at is None:
+        return body
+    label = "Тренер" if lang == "ru" else "Жаттықтырушы"
+    lines.insert(at + 1, f"👨‍🏫 {label}: {trainer}")
+    return "\n".join(lines)
+
+
 def _slot_lines(slots: list[dict], lang: str) -> str:
     lines = []
     for i, slot in enumerate(slots, 1):
@@ -1132,7 +1202,7 @@ def _slot_lines(slots: list[dict], lang: str) -> str:
         localized_levels = [labels.get(level, level) for level in levels]
         level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
         lines.append(
-            f"{i}. {group}{level_text}\n"
+            f"{i}. {group}{level_text}{_trainer_suffix(slot)}\n"
             f"   {_fmt_date(slot['date'], lang)} | "
             f"{str(slot['time_start'])[:5]}–{str(slot['time_end'])[:5]}"
         )
@@ -1226,6 +1296,7 @@ def _group_lines_for_day(slots: list[dict], lang: str) -> str:
         level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
         lines.append(
             f"{i}. {group} {str(slot['time_start'])[:5]}–{str(slot['time_end'])[:5]}{level_text}"
+            f"{_trainer_suffix(slot)}"
         )
     return "\n".join(lines)
 
@@ -1270,7 +1341,7 @@ def _no_groups_with_age_options(
     )
 
 
-def _confirmation(draft: dict, lang: str) -> str:
+def _confirmation(draft: dict, lang: str, trainer: str | None = None) -> str:
     body = _loc(
         lang,
         "confirm",
@@ -1282,7 +1353,7 @@ def _confirmation(draft: dict, lang: str) -> str:
         experience=_level_label(draft.get("experience"), lang),
         school_shift=_shift_label(draft.get("school_shift"), lang),
     )
-    return body + _yes_no_hint(lang)
+    return _with_trainer(body, trainer, lang) + _yes_no_hint(lang)
 
 
 def _yes_no_hint(lang: str) -> str:
@@ -1297,7 +1368,7 @@ def _adult_slot_lines(slots: list[dict], lang: str) -> str:
     (time_end is NOT NULL) and is never shown."""
     ordered = sorted(slots, key=lambda s: (str(s["date"]), _hhmm(s["time_start"])))
     return "\n".join(
-        f"{i}. {_fmt_date(s['date'], lang)} — {_hhmm(s['time_start'])}"
+        f"{i}. {_fmt_date(s['date'], lang)} — {_hhmm(s['time_start'])}{_trainer_suffix(s)}"
         for i, s in enumerate(ordered, 1)
     )
 
@@ -1337,7 +1408,7 @@ def _narrow_adult(
     return None, body
 
 
-def _adult_confirmation(draft: dict, lang: str) -> str:
+def _adult_confirmation(draft: dict, lang: str, trainer: str | None = None) -> str:
     body = _loc(
         lang,
         "confirm_adult",
@@ -1345,7 +1416,25 @@ def _adult_confirmation(draft: dict, lang: str) -> str:
         start=str(draft["start_time"])[:5],
         name=draft.get("child_name", ""),
     )
-    return body + _yes_no_hint(lang)
+    return _with_trainer(body, trainer, lang) + _yes_no_hint(lang)
+
+
+def _numbered_list(text: str | None) -> bool:
+    return bool(text and re.search(r"^\s*1\. ", text, re.MULTILINE))
+
+
+def _last_bot_message(history: list | None) -> str:
+    return next((m.get("content") or "" for m in reversed(history or [])
+                 if m.get("role") == "assistant"), "")
+
+
+def shorten_repeated_list(text: str | None, history: list | None, lang: str) -> str | None:
+    """A numbered list the client was shown in the last bot message becomes a
+    short "choose from the list above" — the same list again would only bury
+    the answer to what they just asked."""
+    if _numbered_list(text) and text.strip() in _last_bot_message(history):
+        return _loc(lang, "choose_from_above")
+    return text
 
 
 class LlmTrialFlowHandler:
@@ -1375,9 +1464,13 @@ class LlmTrialFlowHandler:
         """Process one user message through the LLM trial flow."""
         self._new_draft = False
         self._restored_note = ""
+        # A trainer named here («Тимурдың уақыттары») narrows the class list.
+        self._user_text = user_text
         token = _current_actor.set(_signup_actor_in(history, user_text))
         try:
-            reply = self._handle(chat_id, sender_phone, bot_name, user_text, history, lang)
+            reply = shorten_repeated_list(
+                self._handle(chat_id, sender_phone, bot_name, user_text, history, lang), history, lang,
+            )
         finally:
             _current_actor.reset(token)
         # A new signup opens with "the trial is free", then the first question.
@@ -1411,7 +1504,13 @@ class LlmTrialFlowHandler:
                 logger.info("[TRIAL] YES → confirm id=%d", draft["id"])
                 return self._confirm(chat_id, bot_name, draft, lang)
             if decision == "no":
-                logger.info("[TRIAL] NO → cancel id=%d", draft["id"])
+                # A bare "no" to "is everything right?" — the answers are kept
+                # so a new signup doesn't ask them all again.
+                logger.info("[TRIAL] NO → cancel id=%d, answers kept", draft["id"])
+                trial_service.abandon_draft(bot_name, chat_id, draft, "user_declined_gated_trial")
+                return _loc(lang, "declined")
+            if decision == "cancel":
+                logger.info("[TRIAL] CANCEL → cancel id=%d", draft["id"])
                 trial_service.cancel_trial(bot_name, chat_id, draft["id"], "user_declined_gated_trial")
                 return _loc(lang, "declined")
 
@@ -1569,22 +1668,24 @@ class LlmTrialFlowHandler:
                 return _loc(lang, "has_active_trial")
             return result.get("message") or _confirmation(academy_repo.get_trial(draft["id"]), lang)
         trial = result["data"]["trial"]
+        group = academy_repo.get_group_by_id(int(trial["group_id"])) if trial.get("group_id") else None
+        trainer = (group or {}).get("trainer")
         if trial.get("audience") == "adult":
-            return _loc(
+            return _with_trainer(_loc(
                 lang,
                 "confirmed_adult",
                 date=_fmt_date(trial["trial_day"], lang),
                 start=str(trial["start_time"])[:5],
                 name=trial.get("child_name", ""),
-            )
-        return _loc(
+            ), trainer, lang)
+        return _with_trainer(_loc(
             lang,
             "confirmed",
             date=_fmt_date(trial["trial_day"], lang),
             start=str(trial["start_time"])[:5],
             end=str(trial["end_time"])[:5],
             name=trial.get("child_name", ""),
-        )
+        ), trainer, lang)
 
     def _restore_answers(self, bot_name: str, sender_phone: str, draft: dict, lang: str) -> dict:
         """Prefill a new draft with the answers of the client's abandoned one."""
@@ -1641,7 +1742,7 @@ class LlmTrialFlowHandler:
         result = trial_service.assign_slot(bot_name, draft["id"], slot)
         if not result["ok"]:
             return result.get("message") or _loc(lang, "no_groups")
-        return _confirmation(result["data"]["trial"], lang)
+        return _confirmation(result["data"]["trial"], lang, slot.get("trainer"))
 
     # ══════════════════════════════════════════════════════════════════════
     #  Core Evaluation
@@ -1682,7 +1783,7 @@ class LlmTrialFlowHandler:
 
         if draft.get("group_id"):
             if _chosen_slot_still_fits(draft, slots):
-                return _confirmation(draft, lang)
+                return _confirmation(draft, lang, _slot_trainer(draft, slots))
             result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
             if not result["ok"]:
                 return result.get("message") or _loc(lang, "no_groups")
@@ -1699,25 +1800,25 @@ class LlmTrialFlowHandler:
             return _loc(lang, "no_groups_call_admin")
         if draft.get("group_id"):
             if _chosen_slot_still_fits(draft, slots):
-                return self._adult_next_step(draft, lang)
+                return self._adult_next_step(draft, lang, _slot_trainer(draft, slots))
             result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
             if not result["ok"]:
                 return result.get("message") or _loc(lang, "no_groups")
             draft = result["data"]["trial"]
 
-        picked, text = _narrow_adult(slots, draft, lang)
+        picked, text = _narrow_adult(_only_trainer(slots, getattr(self, "_user_text", None)), draft, lang)
         if not picked:
             return text
         result = trial_service.assign_slot(bot_name, draft["id"], picked)
         if not result["ok"]:
             return result.get("message") or _loc(lang, "no_groups")
-        return self._adult_next_step(result["data"]["trial"], lang)
+        return self._adult_next_step(result["data"]["trial"], lang, picked.get("trainer"))
 
     @staticmethod
-    def _adult_next_step(draft: dict, lang: str) -> str:
+    def _adult_next_step(draft: dict, lang: str, trainer: str | None = None) -> str:
         if not _is_plausible_child_name(draft.get("child_name")):
             return _ask_missing(lang, "child_name", "self")
-        return _adult_confirmation(draft, lang)
+        return _adult_confirmation(draft, lang, trainer)
 
     @staticmethod
     def _bookable_slots(bot_name: str, draft: dict, lang: str) -> tuple[list[dict], str | None]:
@@ -1739,17 +1840,20 @@ class LlmTrialFlowHandler:
         self, chat_id: str, bot_name: str, draft: dict, slots: list[dict], lang: str,
     ) -> str:
         """Assign the single class the parent's date/time points to, or list the options."""
-        picked, text = _narrow(slots, draft, lang)
+        picked, text = _narrow(_only_trainer(slots, getattr(self, "_user_text", None)), draft, lang)
         if picked:
             return self._assign_slot_and_confirm(chat_id, bot_name, draft, picked, lang)
         return text
 
     @_bot_scoped
-    def pending_prompt(self, bot_name: str, draft: dict | None, lang: str) -> str | None:
+    def pending_prompt(
+        self, bot_name: str, draft: dict | None, lang: str, user_text: str | None = None,
+    ) -> str | None:
         """The question the flow is waiting on, worked out from the draft.
 
         Read-only — nothing is assigned or cleared — so it can be shown after
-        a side answer and handed to the intent router.
+        a side answer and handed to the intent router. A trainer named in
+        `user_text` narrows the class list to that trainer's classes.
         """
         if not draft:
             return None
@@ -1761,8 +1865,9 @@ class LlmTrialFlowHandler:
             if not slots:
                 return None
             if draft.get("group_id") and _chosen_slot_still_fits(draft, slots):
-                return self._adult_next_step(draft, lang)
-            _, text = _narrow_adult(slots, draft, lang, pick=False, note_unavailable=False)
+                return self._adult_next_step(draft, lang, _slot_trainer(draft, slots))
+            _, text = _narrow_adult(_only_trainer(slots, user_text), draft, lang,
+                                    pick=False, note_unavailable=False)
             return text
         missing = _missing_prerequisite(_draft_to_data(draft))
         if missing:
@@ -1771,8 +1876,50 @@ class LlmTrialFlowHandler:
         if not slots:
             return None
         if draft.get("group_id") and _chosen_slot_still_fits(draft, slots):
-            return _confirmation(draft, lang)
+            return _confirmation(draft, lang, _slot_trainer(draft, slots))
         # The "not available" note answered the message that asked for that
         # date; repeating it under every later side answer would nag.
-        _, text = _narrow(slots, draft, lang, pick=False, note_unavailable=False)
+        _, text = _narrow(_only_trainer(slots, user_text), draft, lang, pick=False, note_unavailable=False)
         return f"{note}\n\n{text}" if note else text
+
+    @_bot_scoped
+    def names_trainer(self, bot_name: str, draft: dict | None, user_text: str) -> bool:
+        """The message names one of the trainers of the classes this signup
+        can choose from — the flow then answers with that trainer's list."""
+        if not draft:
+            return False
+        if _stored_audience(draft) == "adult":
+            slots = trial_logic.get_adult_trial_slots(bot_name)
+        elif _missing_prerequisite(_draft_to_data(draft)):
+            return False
+        else:
+            slots, _ = self._bookable_slots(bot_name, draft, "ru")
+        return _trainer_named(user_text, slots) is not None
+
+    @_bot_scoped
+    def fitting_slots_context(self, bot_name: str, draft: dict | None) -> str | None:
+        """The classes this signup can actually be booked into, for the LLM to
+        answer day/time questions mid-signup — instead of the general schedule,
+        which mixes every trainer and age group. None until the flow knows
+        enough to filter (age, level, school shift)."""
+        if not draft:
+            return None
+        if _stored_audience(draft) == "adult":
+            slots = trial_logic.get_adult_trial_slots(bot_name)
+        elif _missing_prerequisite(_draft_to_data(draft)):
+            return None
+        else:
+            slots, _ = self._bookable_slots(bot_name, draft, "ru")
+        if not slots:
+            return None
+        ordered = sorted(slots, key=lambda s: (str(s["date"]), _hhmm(s["time_start"])))
+        lines = [
+            f"  {_fmt_date(s['date'], 'ru')} {_hhmm(s['time_start'])}–{_hhmm(s['time_end'])}"
+            f" — {s.get('group_name') or 'группа'}{_trainer_suffix(s)}"
+            for s in ordered
+        ]
+        return (
+            "Занятия, на которые можно записать этого клиента (возраст, уровень и смена уже учтены). "
+            "На вопросы о днях и времени пробного отвечай ТОЛЬКО по этому списку — "
+            "других подходящих вариантов нет:\n" + "\n".join(lines)
+        )

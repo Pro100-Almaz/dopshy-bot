@@ -157,11 +157,12 @@ def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dic
     return result
 
 
-def abandon_draft(bot_name: str, chat_id: str, draft: dict) -> None:
-    """A draft nobody answered for TRIAL_DRAFT_KEEP_SECONDS: cancel it, wipe
-    the chat, keep its answers as a summary for the client's next signup."""
+def abandon_draft(bot_name: str, chat_id: str, draft: dict, reason: str = "abandoned_120m") -> None:
+    """Cancel a draft (by default one nobody answered for
+    TRIAL_DRAFT_KEEP_SECONDS), wipe the chat, keep its answers as a summary
+    for the client's next signup."""
     answers = {field: draft.get(field) for field in academy_repo.SUMMARY_FIELDS}
-    cancel_trial(bot_name, chat_id, draft["id"], "abandoned_120m")
+    cancel_trial(bot_name, chat_id, draft["id"], reason)
     if any(answers.get(field) not in (None, "") for field in academy_repo.SUMMARY_FIELDS[1:]):
         academy_repo.save_trial_summary(draft["phone"], bot_name, answers)
 

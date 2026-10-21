@@ -21,6 +21,8 @@ from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_abandoned, is_draft_in_progress
 from handlers.llm_trial_flow import is_greeting as is_trial_greeting
 from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
+from handlers.llm_trial_flow import confirm_decision as confirm_trial_decision
+from handlers.llm_trial_flow import shorten_repeated_list
 from handlers.llm_trial_flow import is_bot_identity_question
 from handlers.llm_trial_flow import is_factual_question as is_trial_factual_question
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
@@ -255,11 +257,11 @@ _DECLINE_REPLIES = {
 }
 _DECLINE_CANCELS = {"decline_distance", "decline"}
 
-# question_adult_training is not here: the adult group's schedule is answered
-# by RAG/LLM (documents/academy_boxing_faq.md, sp_3).
+# question_adult_training and question_child_training are not here: questions
+# about the groups (schedule, trainers, ages) are answered by RAG/LLM
+# (documents/academy_*_faq.md). These are the ones only the admin can answer.
 _ACADEMY_INFO_INTENTS = {
     "question_personal_training",
-    "question_child_training",
     "question_payment",
     "question_invoice",
     "question_discounts",
@@ -283,24 +285,6 @@ def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
         return (
             f"По {subject} стоимость и свободное время уточняет администратор: "
             f"{phone}."
-        )
-
-    if intent == "question_child_training":
-        if lang == "kk":
-            return (
-                "Балалар топтары бар. Нақты топ жасына, дайындық деңгейіне және мектеп "
-                "ауысымына қарай таңдалады. Сынақ сабағына жазғыңыз келсе, жазыңыз: "
-                "«сынақ сабаққа жазу»."
-            )
-        ages = trial.child_age_range(bot_name)
-        if ages and is_boxing:
-            # From 18 the boxing student goes to the adult group.
-            ages = (ages[0], min(ages[1], 17))
-        age_text = f"{ages[0]}–{ages[1]} лет" if ages else ("4–17 лет" if is_boxing else "5–15 лет")
-        return (
-            f"Для детей есть группы {age_text}. Точная группа зависит от возраста, уровня "
-            "подготовки и школьной смены. Если хотите записать на пробное, напишите: "
-            "«запишите на пробное»."
         )
 
     if intent == "question_payment":
@@ -738,10 +722,11 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             trial_draft = _active_trial_draft(sender_id, bot_name)
             draft_lang = (trial_draft or {}).get("language") or "kk"
 
-            # (a.5) Pre-LLM confirmation short-circuit (same as the arena): a
-            # plain yes/no on a draft with a chosen class confirms or cancels it
-            # even if the router would misclassify a bare "да".
-            if trial_draft and trial_draft.get("group_id") and _confirm_intent(user_text) in ("yes", "no"):
+            # (a.5) Pre-LLM confirmation short-circuit: a plain yes/no on a
+            # draft with a chosen class confirms or cancels it even if the
+            # router would misclassify a bare "да". Stricter than the arena's
+            # _confirm_intent: a question like «…жоқ па?» goes to the router.
+            if trial_draft and trial_draft.get("group_id") and confirm_trial_decision(user_text):
                 logger.info("[TRIAL] Pre-LLM confirm short-circuit for draft id=%s", trial_draft["id"])
                 handle_reply = LlmTrialFlowHandler().handle(
                     chat_id, sender_id, bot_name, user_text, history, draft_lang
@@ -780,9 +765,16 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
-            free = trial.get_trial_daytime(bot_config["name"], None)
-            availability_ctx = trial.format_availability_context(free)
-            logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
+            # Mid-signup the LLM sees only the classes this client fits, so a
+            # "any other time on Friday?" isn't answered from every group's times.
+            fitting_ctx = LlmTrialFlowHandler().fitting_slots_context(bot_name, trial_draft)
+            availability_ctx = fitting_ctx
+            if availability_ctx:
+                logger.info("[TRIAL] Injecting this signup's fitting classes into LLM call")
+            else:
+                free = trial.get_trial_daytime(bot_config["name"], None)
+                availability_ctx = trial.format_availability_context(free)
+                logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
             pending = LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang)
@@ -793,6 +785,25 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             )
             logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
                         trial_intent, trial_lang)
+
+            if trial_draft:
+                flow = LlmTrialFlowHandler()
+                # «Тимурдың уақыттары?» while choosing a class: that trainer's
+                # numbered classes are the answer — no LLM prose listing them too.
+                if (trial_intent in ("question_schedule", "other")
+                        and flow.names_trainer(bot_name, trial_draft, user_text)):
+                    handle_reply = flow.pending_prompt(bot_name, trial_draft, draft_lang, user_text)
+                    if handle_reply:
+                        logger.info("[TRIAL] Trainer named mid-signup — listing that trainer's classes")
+                        append_message(chat_id, "user", user_text)
+                        append_message(chat_id, "assistant", handle_reply)
+                        send_text_message(channel, sender_id, handle_reply)
+                        return
+                # The step shown after a side answer: narrowed to a named
+                # trainer, and not the same list the last message already had.
+                pending = shorten_repeated_list(
+                    flow.pending_prompt(bot_name, trial_draft, draft_lang, user_text), history, draft_lang,
+                )
 
             if trial_intent in _DECLINE_REPLIES:
                 if trial_draft and trial_intent in _DECLINE_CANCELS:
@@ -851,8 +862,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 # with the real schedule regardless of whether a signup is in
                 # progress. Only handled here when a weekday was actually named
                 # — otherwise this falls through to RAG/LLM exactly as before.
+                # Mid-signup, once the client's classes are known, the LLM
+                # answers from those instead (fitting_ctx).
                 weekdays = trial.parse_weekdays(user_text)
-                if weekdays:
+                if weekdays and not fitting_ctx:
                     classes = trial.list_classes_by_weekday(bot_config["name"], weekdays)
                     handle_reply = _with_pending(trial.format_weekday_schedule(classes, trial_lang), pending)
                     append_message(chat_id, "user", user_text)

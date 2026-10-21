@@ -57,7 +57,9 @@ def academy(monkeypatch):
         lambda self, chat_id, phone, bot, text, history, lang: state["handled"].append((text, lang)) or "FLOW",
     )
     monkeypatch.setattr(LlmTrialFlowHandler, "pending_prompt",
-                        lambda self, bot, draft, lang: "PENDING" if draft else None)
+                        lambda self, bot, draft, lang, user_text=None: "PENDING" if draft else None)
+    monkeypatch.setattr(LlmTrialFlowHandler, "names_trainer", lambda self, bot, draft, text: False)
+    monkeypatch.setattr(LlmTrialFlowHandler, "fitting_slots_context", lambda self, bot, draft: None)
     return state
 
 
