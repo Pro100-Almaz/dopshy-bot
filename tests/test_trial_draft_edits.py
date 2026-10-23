@@ -41,7 +41,8 @@ def flow(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot: dict(state["draft"]))
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info",
-                        lambda bot_name: [{"group_name": "Ерлан", "trainer": "Ерлан"}])
+                        lambda bot_name, audience=None:
+                        [] if audience == "adult" else [{"group_name": "Ерлан", "trainer": "Ерлан"}])
 
     def eligible(bot_name, year, shift, experience=None, **kw):
         return _SLOTS if shift == "morning" else []

@@ -57,7 +57,9 @@ def academy(monkeypatch):
         lambda self, chat_id, phone, bot, text, history, lang: state["handled"].append((text, lang)) or "FLOW",
     )
     monkeypatch.setattr(LlmTrialFlowHandler, "pending_prompt",
-                        lambda self, bot, draft, lang: "PENDING" if draft else None)
+                        lambda self, bot, draft, lang, user_text=None: "PENDING" if draft else None)
+    monkeypatch.setattr(LlmTrialFlowHandler, "names_trainer", lambda self, bot, draft, text: False)
+    monkeypatch.setattr(LlmTrialFlowHandler, "fitting_slots_context", lambda self, bot, draft: None)
     return state
 
 
@@ -169,9 +171,9 @@ def test_legacy_llm_flow_session_row_is_dropped(monkeypatch):
     assert deleted == ["chat-1"]
 
 
-@pytest.mark.parametrize(("age_minutes", "active"), [(5, True), (19, True), (21, False), (60 * 24 * 14, False)])
+@pytest.mark.parametrize(("age_minutes", "active"), [(5, True), (29, True), (31, False), (60 * 24 * 14, False)])
 def test_only_a_recently_touched_draft_counts_as_in_progress(monkeypatch, age_minutes, active):
-    monkeypatch.setattr(message_handler.config, "BOOKING_SESSION_TTL", 1200)
+    monkeypatch.setattr(message_handler.config, "TRIAL_IN_PROGRESS_SECONDS", 1800)
     draft = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=age_minutes)}
     monkeypatch.setattr(message_handler.academy_repo, "get_existing_trial_draft", lambda *a: draft)
 

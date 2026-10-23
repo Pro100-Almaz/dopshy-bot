@@ -35,9 +35,47 @@ def test_confirm_decision_ignores_da_inside_other_words():
 
 
 def test_confirm_decision_recognizes_cancel_stems():
-    assert _confirm_decision("хочу отменить") == "no"
-    assert _confirm_decision("хочу отменить все") == "no"
+    assert _confirm_decision("хочу отменить") == "cancel"
+    assert _confirm_decision("хочу отменить все") == "cancel"
+    assert _confirm_decision("бас тартамын") == "cancel"
     assert _confirm_decision("нет") == "no"
+
+
+def test_confirm_decision_only_reads_plain_answers():
+    assert _confirm_decision("Иә, бәрі дұрыс") == "yes"
+    assert _confirm_decision("жоқ, рахмет") == "no"
+    # A question that contains «жоқ» is not a "no" (production incident).
+    assert _confirm_decision("жұма күнге басқа уақыттар жоқ па?") is None
+    assert _confirm_decision("жұма күнге басқа уақыттар жоқ па") is None
+    assert _confirm_decision("нет, давайте в 17:00") is None
+    assert _confirm_decision("да?") is None
+
+
+def test_plain_no_keeps_the_answers_for_the_next_signup(monkeypatch):
+    _with_draft(monkeypatch, _CHOSEN_DRAFT)
+    abandoned = {}
+    monkeypatch.setattr(
+        llm_trial_flow.trial_service, "abandon_draft",
+        lambda bot_name, chat_id, draft, reason: abandoned.update(trial_id=draft["id"], reason=reason),
+    )
+    monkeypatch.setattr(llm_trial_flow.trial_service, "cancel_trial",
+                        lambda *a: pytest.fail("a plain no must keep the answers"))
+
+    LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_boxing", "жоқ", [], "kk")
+
+    assert abandoned == {"trial_id": 11, "reason": "user_declined_gated_trial"}
+
+
+def test_fitting_slots_context_lists_only_this_childs_classes(monkeypatch):
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "get_eligible_trial_slots", lambda *a, **k: [{
+        "group_id": 7, "group_name": "Бокс 8-16", "date": "2026-10-23",
+        "time_start": "10:00", "time_end": "11:00", "level": [],
+    }])
+
+    ctx = LlmTrialFlowHandler().fitting_slots_context("dopsy_boxing", _CHOSEN_DRAFT)
+
+    assert "Пт 23.10.2026 10:00–11:00 — Бокс 8-16" in ctx
+    assert LlmTrialFlowHandler().fitting_slots_context("dopsy_boxing", {"id": 11}) is None
 
 
 def _with_draft(monkeypatch, draft, extracted=None):
@@ -109,18 +147,22 @@ def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
 
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
 
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
+
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_boxing", "Балама сынақ сабағы керек", [], "kk",
     )
 
     assert saved["child_name"] is None
-    assert reply == BOXING_T["ask_name"]["kk"]
+    # A new signup: "the trial is free", then the age (boxing asks it first).
+    assert reply == f"{BOXING_T['trial_free_intro']['kk']}\n\n{BOXING_T['ask_birth_year']['kk']}"
 
 
 def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(days=14)}
+    # Past the 30-minute answer window, not yet abandoned (120 minutes).
+    stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=60)}
     saved = {}
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: dict(stale))
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
@@ -131,12 +173,14 @@ def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatc
 
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
 
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
+
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_boxing", "сынақ сабағына жазылғым келеді", [], "kk",
     )
 
     assert saved["child_name"] is None
-    assert reply == BOXING_T["ask_name"]["kk"]
+    assert reply == BOXING_T["ask_birth_year"]["kk"]
 
 
 def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypatch):
@@ -152,3 +196,50 @@ def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypa
     assert "У вас нет активной записи" in reply
     assert "не подходит" not in reply
     assert BOXING_T["ask_birth_year"]["ru"] not in reply
+
+
+_ADULT_SLOTS = [
+    {"group_id": 1, "date": "2026-10-24", "time_start": "12:00", "time_end": "13:00",
+     "trainer": "Бейсенов Тимур", "training_day": 5},
+    {"group_id": 2, "date": "2026-10-23", "time_start": "20:00", "time_end": "21:30",
+     "trainer": "Махмуд Мади", "training_day": 4},
+]
+
+
+def test_trainer_is_found_by_first_name_with_a_kazakh_ending():
+    assert llm_trial_flow._trainer_named("именно Тимурдың уақыттарын бере аласыз ба?", _ADULT_SLOTS) \
+        == "Бейсенов Тимур"
+    assert llm_trial_flow._trainer_named("сенбі ыңғайлы", _ADULT_SLOTS) is None
+
+
+def test_adult_list_shows_trainers_and_narrows_to_a_named_one(monkeypatch):
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "get_adult_trial_slots", lambda bot: list(_ADULT_SLOTS))
+    draft = {"id": 5, "audience": "adult"}
+    handler = LlmTrialFlowHandler()
+
+    full = handler.pending_prompt("dopsy_boxing", draft, "kk")
+    only_timur = handler.pending_prompt("dopsy_boxing", draft, "kk", "Тимурдың уақыттары?")
+
+    assert "— Бейсенов Тимур" in full and "— Махмуд Мади" in full
+    assert "1. Сб 24.10.2026 — 12:00 — Бейсенов Тимур" in only_timur
+    assert "Махмуд" not in only_timur
+    assert handler.names_trainer("dopsy_boxing", draft, "Тимурдың уақыттары?")
+
+
+def test_confirmation_shows_the_trainer():
+    text = llm_trial_flow._confirmation(_CHOSEN_DRAFT, "kk", "Бейсенов Тимур")
+    lines = text.split("\n")
+    assert lines[lines.index(next(l for l in lines if l.startswith("⏰"))) + 1] == \
+        "👨‍🏫 Жаттықтырушы: Бейсенов Тимур"
+    assert "Жаттықтырушы" not in llm_trial_flow._confirmation(_CHOSEN_DRAFT, "kk")
+
+
+def test_a_list_the_last_message_showed_is_not_repeated():
+    shown = "Ересектер тобының жаттығулары:\n1. Сб 24.10.2026 — 12:00\n\nҚай күні?"
+    history = [{"role": "assistant", "content": f"Сынақ сабағы тегін 🥊\n\n{shown}"}]
+
+    assert llm_trial_flow.shorten_repeated_list(shown, history, "kk") == T["choose_from_above"]["kk"]
+    assert llm_trial_flow.shorten_repeated_list(shown, [], "kk") == shown
+    # Not a numbered list (e.g. the name question) — asked again in full.
+    assert llm_trial_flow.shorten_repeated_list("Есіміңіз кім?", [
+        {"role": "assistant", "content": "Есіміңіз кім?"}], "kk") == "Есіміңіз кім?"

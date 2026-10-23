@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 from integrations.repo import academy_repo
-from utils import closest_weekday_date, is_past_booking_time, parse_weekdays
+from utils import closest_weekday_date, is_past_booking_time, parse_weekdays, today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,9 @@ def get_trial_daytime(
     if days is None:
         days = [int(i) for i in range(7)]
 
-    all_group_info = academy_repo.get_groups_info(bot_name=bot_name)
+    # Children's classes only: the result feeds the child signup and the
+    # "children's schedule" context given to the LLM.
+    all_group_info = academy_repo.get_groups_info(bot_name=bot_name, audience="child")
     result = []
     for info in all_group_info:
         if info["training_day"] not in days or _is_ignored_day(info):
@@ -67,6 +69,7 @@ def get_trial_daytime(
             continue
         if school_shift == "afternoon" and end > time(12, 0):
             continue
+        # A kindergarten child ("kindergarten") has no school hours to avoid.
 
         if info["training_day"] in days:
             result.append({
@@ -199,21 +202,56 @@ def get_birth_year_trial_slots(
     return result
 
 
+def child_age_range(bot_name: str, today: date | None = None) -> tuple[int, int] | None:
+    """(youngest, oldest) age the active children's groups take, from their
+    birth years — None when no children's group lists any."""
+    years = {
+        int(year)
+        for info in academy_repo.get_groups_info(bot_name=bot_name, audience="child")
+        for year in (info.get("birth_years") or [])
+    }
+    if not years:
+        return None
+    current = (today or today_almaty()).year
+    return current - max(years), current - min(years)
+
+
+def get_adult_trial_slots(bot_name: str) -> list[dict]:
+    """Slots of the adult groups that still have room.
+
+    No birth year, level or school shift: any adult can join.
+    """
+    result = []
+    for info in academy_repo.get_groups_info(bot_name=bot_name, audience="adult"):
+        max_cap = info.get("max_cap")
+        curr_cap = info.get("curr_cap") or 0
+        if max_cap is not None and int(curr_cap) >= int(max_cap):
+            continue
+        result.append({
+            **info,
+            "date": _next_class_date(info["training_day"], info["time_start"]),
+        })
+    return result
+
+
 def is_trial_slot_eligible(bot_name: str, trial: dict) -> bool:
     """Return whether the trial's selected slot still matches its intake data."""
-    required = (
-        "group_id", "trial_day", "start_time", "end_time",
-        "child_birth_year", "school_shift",
-    )
+    adult = trial.get("audience") == "adult"
+    required = ("group_id", "trial_day", "start_time", "end_time")
+    if not adult:
+        required += ("child_birth_year", "school_shift")
     if any(trial.get(key) in (None, "") for key in required):
         return False
 
-    slots = get_eligible_trial_slots(
-        bot_name,
-        int(trial["child_birth_year"]),
-        trial["school_shift"],
-        experience=trial.get("experience"),
-    )
+    if adult:
+        slots = get_adult_trial_slots(bot_name)
+    else:
+        slots = get_eligible_trial_slots(
+            bot_name,
+            int(trial["child_birth_year"]),
+            trial["school_shift"],
+            experience=trial.get("experience"),
+        )
     for slot in slots:
         if int(slot["group_id"]) != int(trial["group_id"]):
             continue

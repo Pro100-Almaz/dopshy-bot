@@ -32,10 +32,12 @@ SHIFT_LABELS = {
     "ru": {
         "morning": "утренняя",
         "afternoon": "дневная",
+        "kindergarten": "детский сад",
     },
     "kk": {
         "morning": "таңғы",
         "afternoon": "түскі",
+        "kindergarten": "балабақша",
     },
 }
 
@@ -72,11 +74,26 @@ def _fmt_shift(value, lang: str) -> str:
     return SHIFT_LABELS.get(lang, SHIFT_LABELS["ru"]).get(value, value or "?")
 
 
+def _is_adult(trial: dict) -> bool:
+    return trial.get("audience") == "adult"
+
+
+def _time_text(trial: dict) -> str | None:
+    """«17:00-18:00»; the adult group shows its start only — its end time is
+    technical (time_end is NOT NULL) and is never announced."""
+    start, end = trial.get("start_time"), trial.get("end_time")
+    if not start or (not end and not _is_adult(trial)):
+        return None
+    if _is_adult(trial):
+        return str(start)[:5]
+    return f"{str(start)[:5]}-{str(end)[:5]}"
+
+
 def _trial_line(trial: dict, idx: int | None = None, lang: str = "ru") -> str:
     prefix = f"{idx}. " if idx is not None else ""
     return (
         f"{prefix}{_fmt_date(trial.get('trial_day'), lang)} "
-        f"{str(trial.get('start_time') or '?')[:5]}-{str(trial.get('end_time') or '?')[:5]} | "
+        f"{_time_text(trial) or '?'} | "
         f"{trial.get('child_name') or '?'}"
     )
 
@@ -91,6 +108,7 @@ def _trial_details(trial: dict, idx: int | None = None, lang: str = "ru") -> str
             "birth_year": "Год рождения",
             "level": "Уровень",
             "shift": "Школьная смена",
+            "adult_group": "Взрослая группа",
         },
         "kk": {
             "date": "Күні",
@@ -99,13 +117,17 @@ def _trial_details(trial: dict, idx: int | None = None, lang: str = "ru") -> str
             "birth_year": "Туған жылы",
             "level": "Деңгейі",
             "shift": "Мектеп ауысымы",
+            "adult_group": "Ересектер тобы",
         },
     }[lang]
-    time_text = (
-        f"{str(trial.get('start_time'))[:5]}-{str(trial.get('end_time'))[:5]}"
-        if trial.get("start_time") and trial.get("end_time")
-        else "?"
-    )
+    time_text = _time_text(trial) or "?"
+    if _is_adult(trial):
+        return "\n".join([
+            f"{prefix}{labels['adult_group']}",
+            f"{labels['date']}: {_fmt_date(trial.get('trial_day'), lang)}",
+            f"{labels['time']}: {time_text}",
+            f"{labels['name']}: {trial.get('child_name') or '?'}",
+        ])
     lines = [
         f"{prefix}{labels['date']}: {_fmt_date(trial.get('trial_day'), lang)}",
         f"{labels['time']}: {time_text}",
@@ -150,12 +172,14 @@ def _draft_summary(trial: dict, idx: int | None = None, lang: str = "ru") -> str
         "experience": _fmt_level(trial.get("experience"), lang) if trial.get("experience") else None,
         "school_shift": _fmt_shift(trial.get("school_shift"), lang) if trial.get("school_shift") else None,
         "slot": (
-            f"{_fmt_date(trial.get('trial_day'), lang)} "
-            f"{str(trial.get('start_time'))[:5]}-{str(trial.get('end_time'))[:5]}"
-            if trial.get("trial_day") and trial.get("start_time") and trial.get("end_time")
+            f"{_fmt_date(trial.get('trial_day'), lang)} {_time_text(trial)}"
+            if trial.get("trial_day") and _time_text(trial)
             else None
         ),
     }
+    if _is_adult(trial):
+        # An adult is never asked for a birth year, level or school shift.
+        values = {key: values[key] for key in ("child_name", "slot")}
     filled = [
         f"{labels['item'][key]}: {value}"
         for key, value in values.items()
@@ -173,6 +197,9 @@ def _draft_summary(trial: dict, idx: int | None = None, lang: str = "ru") -> str
     )
 
 
+_SHIFTS = ("morning", "afternoon", "kindergarten")
+
+
 def _active_trials(bot_name: str, sender_phone: str) -> list[dict]:
     return trial_service.get_active_trials(bot_name, sender_phone)["data"]["trials"]
 
@@ -181,12 +208,10 @@ def _normalize_edit_patch(diff: dict, extracted: dict) -> dict:
     merged = {**(diff or {}), **{k: v for k, v in (extracted or {}).items() if v not in (None, "")}}
     if "shift" in merged and "school_shift" not in merged:
         merged["school_shift"] = merged["shift"]
-    if merged.get("school_shift") not in (None, "", "morning", "afternoon"):
-        value = str(merged["school_shift"]).strip().lower()
-        if "утрен" in value or "утром" in value or "таң" in value:
-            merged["school_shift"] = "morning"
-        elif "дневн" in value or "днем" in value or "түск" in value:
-            merged["school_shift"] = "afternoon"
+    if merged.get("school_shift") not in (None, "", *_SHIFTS):
+        # Imported here: llm_trial_flow imports this module (via trial_session).
+        from handlers.llm_trial_flow import shift_from_text
+        merged["school_shift"] = shift_from_text(str(merged["school_shift"])) or merged["school_shift"]
     if merged.get("experience") not in (None, "", "Beginner", "Intermediate", "Advanced"):
         value = str(merged["experience"]).strip().lower()
         if "начина" in value or "нович" in value or "бастап" in value:
@@ -208,7 +233,7 @@ def _normalize_edit_patch(diff: dict, extracted: dict) -> dict:
         "preferred_time_end",
     }
     patch = {key: value for key, value in merged.items() if key in allowed and value not in (None, "")}
-    if patch.get("school_shift") not in (None, "morning", "afternoon"):
+    if patch.get("school_shift") not in (None, *_SHIFTS):
         patch.pop("school_shift", None)
     if patch.get("experience") not in (None, "Beginner", "Intermediate", "Advanced"):
         patch.pop("experience", None)

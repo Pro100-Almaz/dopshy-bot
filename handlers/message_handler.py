@@ -18,13 +18,16 @@ from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_in_progress
+from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_abandoned, is_draft_in_progress
 from handlers.llm_trial_flow import is_greeting as is_trial_greeting
 from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
+from handlers.llm_trial_flow import confirm_decision as confirm_trial_decision
+from handlers.llm_trial_flow import shorten_repeated_list
 from handlers.llm_trial_flow import is_bot_identity_question
 from handlers.llm_trial_flow import is_factual_question as is_trial_factual_question
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
+from integrations import trial_service
 from integrations.repo.academy_repo import get_existing_trial_draft
 from integrations.repo.bot_pause_repo import is_bot_paused
 from integrations.repo.existing_client_repo import is_existing_academy_client
@@ -190,6 +193,30 @@ _ACADEMY_UNCLEAR_REPLY = {
     "ru": "Подождите, пожалуйста, с вами свяжется администратор школы.",
 }
 
+# An unclear message first gets one clarifying question; only if the next one
+# is unclear too does the client go to the admin (_ACADEMY_UNCLEAR_REPLY).
+# Mid-signup the clarification is a lead-in to the question being waited on.
+_ACADEMY_CLARIFY_REPLY = {
+    "kk": "Нақтылап жіберіңізші: сынақ сабағына жазылғыңыз келе ме, әлде кесте, баға немесе басқа сұрағыңыз бар ма?",
+    "ru": "Уточните, пожалуйста: вы хотите записаться на пробное занятие или у вас вопрос о расписании, цене или о чём-то другом?",
+}
+_ACADEMY_CLARIFY_LEAD = {
+    "kk": "Түсінбей қалдым, нақтылап жіберіңізші.",
+    "ru": "Извините, не совсем понятно — уточните, пожалуйста.",
+}
+
+
+def _academy_unclear_reply(history: list, lang: str, pending: str | None) -> str:
+    """One clarifying question, then the admin line if the bot just asked one."""
+    last_bot = next((m.get("content") or "" for m in reversed(history or [])
+                     if m.get("role") == "assistant"), "")
+    clarifications = (*_ACADEMY_CLARIFY_REPLY.values(), *_ACADEMY_CLARIFY_LEAD.values())
+    if last_bot.startswith(clarifications):
+        return _ACADEMY_UNCLEAR_REPLY.get(lang, _ACADEMY_UNCLEAR_REPLY["kk"])
+    if pending:
+        return f"{_ACADEMY_CLARIFY_LEAD.get(lang, _ACADEMY_CLARIFY_LEAD['kk'])}\n\n{pending}"
+    return _ACADEMY_CLARIFY_REPLY.get(lang, _ACADEMY_CLARIFY_REPLY["kk"])
+
 _PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
 
 
@@ -210,10 +237,31 @@ def _has_foreign_phone(text: str, bot_name: str) -> bool:
     return False
 
 
+# The client declines: a short polite reply, no reason asked, no new invite.
+# Distance / a plain no cancel the draft; "later" keeps it to come back to.
+_DECLINE_REPLIES = {
+    "decline_distance": {
+        "kk": "Түсінемін, орналасқан жеріміз сіздерге ыңғайсыз болуы мүмкін. "
+              "Егер кейін ыңғайлы болса, сізді қуана күтеміз!",
+        "ru": "Понимаю, наше расположение может быть вам неудобно. "
+              "Если в будущем будет удобно — будем рады вас видеть!",
+    },
+    "decline_later": {
+        "kk": "Жақсы, асықпаңыз. Ыңғайлы кезде жазыңыз — қуана күтеміз!",
+        "ru": "Хорошо, не торопитесь. Напишите, когда будет удобно — будем рады!",
+    },
+    "decline": {
+        "kk": "Түсінікті. Егер кейін қаласаңыз, жазыңыз — қуана күтеміз!",
+        "ru": "Понятно. Если передумаете — пишите, будем рады!",
+    },
+}
+_DECLINE_CANCELS = {"decline_distance", "decline"}
+
+# question_adult_training and question_child_training are not here: questions
+# about the groups (schedule, trainers, ages) are answered by RAG/LLM
+# (documents/academy_*_faq.md). These are the ones only the admin can answer.
 _ACADEMY_INFO_INTENTS = {
     "question_personal_training",
-    "question_adult_training",
-    "question_child_training",
     "question_payment",
     "question_invoice",
     "question_discounts",
@@ -227,30 +275,16 @@ def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
     is_boxing = bot_name == "dopsy_boxing"
     phone = ACADEMY_ADMIN_PHONES[bot_name]
 
-    if intent in {"question_personal_training", "question_adult_training"}:
+    if intent == "question_personal_training":
         if lang == "kk":
             return (
-                "Жеке немесе ересектерге арналған жаттығулар бойынша баға мен бос уақытты "
+                "Жеке жаттығулар бойынша баға мен бос уақытты "
                 f"әкімші нақтылайды: {phone}."
             )
-        subject = "персональным и взрослым тренировкам" if is_boxing else "индивидуальным условиям"
+        subject = "персональным тренировкам" if is_boxing else "индивидуальным условиям"
         return (
             f"По {subject} стоимость и свободное время уточняет администратор: "
             f"{phone}."
-        )
-
-    if intent == "question_child_training":
-        if lang == "kk":
-            return (
-                "Балалар топтары бар. Нақты топ жасына, дайындық деңгейіне және мектеп "
-                "ауысымына қарай таңдалады. Сынақ сабағына жазғыңыз келсе, жазыңыз: "
-                "«сынақ сабаққа жазу»."
-            )
-        age_text = "7–16 лет" if is_boxing else "5–15 лет"
-        return (
-            f"Для детей есть группы {age_text}. Точная группа зависит от возраста, уровня "
-            "подготовки и школьной смены. Если хотите записать на пробное, напишите: "
-            "«запишите на пробное»."
         )
 
     if intent == "question_payment":
@@ -287,6 +321,17 @@ def _active_trial_draft(sender_id: str, bot_name: str) -> dict | None:
     """The trial draft of a signup still in progress, or None (see is_draft_in_progress)."""
     draft = academy_repo.get_existing_trial_draft(sender_id, bot_name)
     return draft if draft and is_draft_in_progress(draft) else None
+
+
+def _abandon_stale_trial_draft(chat_id: str, sender_id: str, bot_name: str) -> bool:
+    """Cancel a draft untouched for TRIAL_DRAFT_KEEP_SECONDS, keeping its
+    answers as a summary. True when one was abandoned (the chat is wiped)."""
+    draft = academy_repo.get_existing_trial_draft(sender_id, bot_name)
+    if not draft or not is_draft_abandoned(draft):
+        return False
+    logger.info("[TRIAL] Draft id=%d abandoned — keeping answers as a summary", draft["id"])
+    trial_service.abandon_draft(bot_name, chat_id, draft)
+    return True
 
 
 def _dispatch_in_trial_signup(
@@ -447,6 +492,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 refresh_all_bookings()
             else:
                 draft = get_existing_trial_draft(sender_id, bot_config["name"])
+                academy_repo.delete_trial_summary(sender_id, bot_config["name"])
                 if draft:
                     cancel_booking_trial(bot_config["name"], draft["id"])
                     refresh_all_trials()
@@ -671,13 +717,16 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             # A signup in progress is a draft row — like the arena, the LLM
             # flow keeps no session of its own.
+            if _abandon_stale_trial_draft(chat_id, sender_id, bot_name):
+                history = []
             trial_draft = _active_trial_draft(sender_id, bot_name)
             draft_lang = (trial_draft or {}).get("language") or "kk"
 
-            # (a.5) Pre-LLM confirmation short-circuit (same as the arena): a
-            # plain yes/no on a draft with a chosen class confirms or cancels it
-            # even if the router would misclassify a bare "да".
-            if trial_draft and trial_draft.get("group_id") and _confirm_intent(user_text) in ("yes", "no"):
+            # (a.5) Pre-LLM confirmation short-circuit: a plain yes/no on a
+            # draft with a chosen class confirms or cancels it even if the
+            # router would misclassify a bare "да". Stricter than the arena's
+            # _confirm_intent: a question like «…жоқ па?» goes to the router.
+            if trial_draft and trial_draft.get("group_id") and confirm_trial_decision(user_text):
                 logger.info("[TRIAL] Pre-LLM confirm short-circuit for draft id=%s", trial_draft["id"])
                 handle_reply = LlmTrialFlowHandler().handle(
                     chat_id, sender_id, bot_name, user_text, history, draft_lang
@@ -716,9 +765,16 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
-            free = trial.get_trial_daytime(bot_config["name"], None)
-            availability_ctx = trial.format_availability_context(free)
-            logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
+            # Mid-signup the LLM sees only the classes this client fits, so a
+            # "any other time on Friday?" isn't answered from every group's times.
+            fitting_ctx = LlmTrialFlowHandler().fitting_slots_context(bot_name, trial_draft)
+            availability_ctx = fitting_ctx
+            if availability_ctx:
+                logger.info("[TRIAL] Injecting this signup's fitting classes into LLM call")
+            else:
+                free = trial.get_trial_daytime(bot_config["name"], None)
+                availability_ctx = trial.format_availability_context(free)
+                logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
 
             pending = LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang)
@@ -729,6 +785,35 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             )
             logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
                         trial_intent, trial_lang)
+
+            if trial_draft:
+                flow = LlmTrialFlowHandler()
+                # «Тимурдың уақыттары?» while choosing a class: that trainer's
+                # numbered classes are the answer — no LLM prose listing them too.
+                if (trial_intent in ("question_schedule", "other")
+                        and flow.names_trainer(bot_name, trial_draft, user_text)):
+                    handle_reply = flow.pending_prompt(bot_name, trial_draft, draft_lang, user_text)
+                    if handle_reply:
+                        logger.info("[TRIAL] Trainer named mid-signup — listing that trainer's classes")
+                        append_message(chat_id, "user", user_text)
+                        append_message(chat_id, "assistant", handle_reply)
+                        send_text_message(channel, sender_id, handle_reply)
+                        return
+                # The step shown after a side answer: narrowed to a named
+                # trainer, and not the same list the last message already had.
+                pending = shorten_repeated_list(
+                    flow.pending_prompt(bot_name, trial_draft, draft_lang, user_text), history, draft_lang,
+                )
+
+            if trial_intent in _DECLINE_REPLIES:
+                if trial_draft and trial_intent in _DECLINE_CANCELS:
+                    trial_service.cancel_trial(bot_name, chat_id, trial_draft["id"], "client_declined")
+                replies = _DECLINE_REPLIES[trial_intent]
+                handle_reply = replies.get(trial_lang, replies["kk"])
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
 
             if trial_draft:
                 # "2." or "17:00" carries no language — keep the signup's own.
@@ -777,8 +862,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 # with the real schedule regardless of whether a signup is in
                 # progress. Only handled here when a weekday was actually named
                 # — otherwise this falls through to RAG/LLM exactly as before.
+                # Mid-signup, once the client's classes are known, the LLM
+                # answers from those instead (fitting_ctx).
                 weekdays = trial.parse_weekdays(user_text)
-                if weekdays:
+                if weekdays and not fitting_ctx:
                     classes = trial.list_classes_by_weekday(bot_config["name"], weekdays)
                     handle_reply = _with_pending(trial.format_weekday_schedule(classes, trial_lang), pending)
                     append_message(chat_id, "user", user_text)
@@ -835,11 +922,10 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 if voucher_doc:
                     context = voucher_doc
 
-            # Meaning unclear: hand over to the admin rather than let the LLM guess.
+            # Meaning unclear: ask once, then hand over to the admin — never let
+            # the LLM guess.
             if trial_intent == "unclear":
-                handle_reply = _with_pending(
-                    _ACADEMY_UNCLEAR_REPLY.get(trial_lang, _ACADEMY_UNCLEAR_REPLY["kk"]), pending,
-                )
+                handle_reply = _academy_unclear_reply(history, trial_lang, pending)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)

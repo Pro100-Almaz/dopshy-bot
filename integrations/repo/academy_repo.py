@@ -61,6 +61,7 @@ def create_or_update_group(
     age_max: int | None = None,
     shift: str | None = None,
     trainer: str | None = None,
+    audience: str | None = None,
 ) -> int:
     if levels is None and level is not None:
         levels = [level] if isinstance(level, str) else level
@@ -69,8 +70,8 @@ def create_or_update_group(
             cur.execute(
                 """
                 INSERT INTO academy_groups
-                    (group_name, group_type, max_cap, is_active, birth_years, location, level, age_min, age_max, shift, trainer)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (group_name, group_type, max_cap, is_active, birth_years, location, level, age_min, age_max, shift, trainer, audience)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'child'))
                 ON CONFLICT (group_name, group_type)
                 DO UPDATE SET
                     max_cap = EXCLUDED.max_cap,
@@ -81,10 +82,12 @@ def create_or_update_group(
                     age_min = COALESCE(EXCLUDED.age_min, academy_groups.age_min),
                     age_max = COALESCE(EXCLUDED.age_max, academy_groups.age_max),
                     shift = COALESCE(EXCLUDED.shift, academy_groups.shift),
-                    trainer = COALESCE(EXCLUDED.trainer, academy_groups.trainer)
+                    trainer = COALESCE(EXCLUDED.trainer, academy_groups.trainer),
+                    audience = COALESCE(%s, academy_groups.audience)
                 RETURNING id
                 """,
-                (group_name, group_type, max_cap, is_active, birth_years, location, levels, age_min, age_max, shift, trainer),
+                (group_name, group_type, max_cap, is_active, birth_years, location, levels, age_min, age_max, shift, trainer,
+                 audience, audience),
             )
 
             row = cur.fetchone()
@@ -101,6 +104,7 @@ def on_manual_group_edit(
         shift: str | None = None,
         is_active: bool | None = None,
         trainer: str | None = None,
+        audience: str | None = None,
 ) -> dict:
     fields = []
     values = []
@@ -137,6 +141,9 @@ def on_manual_group_edit(
     if trainer is not None:
         fields.append("trainer = %s")
         values.append(trainer)
+    if audience is not None:
+        fields.append("audience = %s")
+        values.append(audience)
 
     if not fields:
         return {
@@ -355,13 +362,18 @@ def replace_group_schedules(group_id: int, schedules: list[dict]) -> list[dict] 
             return rows
 
 
-def get_groups_info(bot_name: str):
+def bot_group_type(bot_name: str) -> str:
+    return "boxing" if bot_name == "dopsy_boxing" else "football"
+
+
+def get_groups_info(bot_name: str, audience: str | None = None):
     """Every active training slot for this bot's curriculum.
 
     group_name/max_cap/curr_cap ride along so the LLM trial flow can name a
     class and reject a full one without a second round-trip per candidate.
+    `audience` ('child' / 'adult') narrows to that kind of group; None = all.
     """
-    group_type = "boxing" if bot_name == "dopsy_boxing" else "football"
+    group_type = bot_group_type(bot_name)
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -373,13 +385,14 @@ def get_groups_info(bot_name: str):
                 FROM academy_group_schedules s
                 JOIN academy_groups g ON g.id = s.group_id
                 WHERE g.group_type = %s AND g.is_active = TRUE
-                """, (group_type,)
+                  AND (%s::text IS NULL OR g.audience = %s)
+                """, (group_type, audience, audience)
             )
             return [dict(row) for row in cur.fetchall()]
 
 
 def get_existing_trial_draft(phone: str, bot_name: str) -> dict | None:
-    group_type = "boxing" if bot_name == "dopsy_boxing" else "football"
+    group_type = bot_group_type(bot_name)
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -389,14 +402,62 @@ def get_existing_trial_draft(phone: str, bot_name: str) -> dict | None:
                 LEFT JOIN academy_groups g ON g.id = t.group_id
                 WHERE t.phone = ANY(%s)
                   AND t.state = 'draft'
-                  AND (t.group_id IS NULL OR g.group_type = %s)
+                  AND (t.group_type = %s
+                       -- Drafts created before group_type was filled in.
+                       OR (t.group_type IS NULL AND (t.group_id IS NULL OR g.group_type = %s)))
                 ORDER BY t.updated_at DESC, t.id DESC
                 LIMIT 1
                 """,
-                (phone_variants(phone), group_type),
+                (phone_variants(phone), group_type, group_type),
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+SUMMARY_FIELDS = ("audience", "child_name", "child_birth_year", "experience", "school_shift")
+
+
+def save_trial_summary(phone: str, bot_name: str, answers: dict) -> None:
+    """Keep the answers of an abandoned signup (replaces the previous ones)."""
+    values = [answers.get(field) for field in SUMMARY_FIELDS]
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO academy_trial_summaries
+                    (phone, group_type, audience, child_name, child_birth_year, experience, school_shift)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (phone, group_type) DO UPDATE SET
+                    audience = EXCLUDED.audience,
+                    child_name = EXCLUDED.child_name,
+                    child_birth_year = EXCLUDED.child_birth_year,
+                    experience = EXCLUDED.experience,
+                    school_shift = EXCLUDED.school_shift,
+                    saved_at = NOW()
+                """,
+                (normalize_phone(phone), bot_group_type(bot_name), *values),
+            )
+
+
+def get_trial_summary(phone: str, bot_name: str) -> dict | None:
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM academy_trial_summaries WHERE phone = ANY(%s) AND group_type = %s "
+                "ORDER BY saved_at DESC LIMIT 1",
+                (phone_variants(phone), bot_group_type(bot_name)),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def delete_trial_summary(phone: str, bot_name: str) -> None:
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM academy_trial_summaries WHERE phone = ANY(%s) AND group_type = %s",
+                (phone_variants(phone), bot_group_type(bot_name)),
+            )
 
 
 def get_groups_for_refresh(group_type: str) -> list[dict]:
@@ -405,7 +466,7 @@ def get_groups_for_refresh(group_type: str) -> list[dict]:
             cur.execute(
                 """
                 SELECT g.id, g.group_name, g.max_cap, g.curr_cap, g.birth_years, g.location, g.level,
-                       g.age_min, g.age_max, g.shift, g.trainer, g.is_active,
+                       g.age_min, g.age_max, g.shift, g.trainer, g.is_active, g.audience,
                        s.id AS schedule_id, s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -427,7 +488,7 @@ def get_all_groups_for_frontend() -> list[dict]:
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
                        g.birth_years, g.location, g.level, g.age_min, g.age_max,
-                       g.shift, g.trainer, g.is_active,
+                       g.shift, g.trainer, g.is_active, g.audience,
                        s.id AS schedule_id, s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -445,7 +506,7 @@ def get_groups_by_type_for_frontend(group_type: str) -> list[dict]:
                 """
                 SELECT g.id, g.group_name, g.group_type, g.max_cap, g.curr_cap,
                        g.birth_years, g.location, g.level, g.age_min, g.age_max,
-                       g.shift, g.trainer, g.is_active,
+                       g.shift, g.trainer, g.is_active, g.audience,
                        s.id AS schedule_id, s.training_day, s.time_start AS time_start, s.time_end AS time_end, s.field
                 FROM academy_groups g
                 LEFT JOIN academy_group_schedules s
@@ -567,7 +628,8 @@ def get_trials_by_type(group_type: str):
                        t.state,
                        t.notes,
                        t.attended,
-                       t.subscribed
+                       t.subscribed,
+                       t.audience
                 FROM academy_trials t
                          JOIN academy_groups g ON t.group_id = g.id
                 WHERE NOT t.is_test
@@ -938,6 +1000,7 @@ _TRIAL_WITH_USER_SELECT = """
            t.school_shift,
            t.preferred_time_start,
            t.preferred_time_end,
+           t.audience,
            u.id AS user_id,
            u.child_name AS user_child_name,
            u.child_birth_year AS user_child_birth_year,

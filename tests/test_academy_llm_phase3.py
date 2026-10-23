@@ -51,6 +51,7 @@ def test_extract_trial_details_parses_all_supported_fields(monkeypatch):
     payload = {
         "child_name": "Али",
         "child_birth_year": 2016,
+        "audience": "child",
         "experience": "Beginner",
         "school_shift": "morning",
         "preferred_date": "2026-08-21",
