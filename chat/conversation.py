@@ -120,6 +120,8 @@ def clear_history(chat_id: str) -> None:
         _cache[chat_id] = []
         _loaded.add(chat_id)
         _save_to_db(chat_id, [])
+    from integrations import platform_prefill
+    platform_prefill.release_offer(chat_id)
 
 
 def invalidate(chat_id: str) -> None:

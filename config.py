@@ -110,6 +110,21 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 X_SERVICE_TOKEN: str = os.getenv("X_SERVICE_TOKEN", "")
 
 # ---------------------------------------------------------------------------
+# Platform booking handoff (bot -> backend -> landing booking form)
+# ---------------------------------------------------------------------------
+# While the user books in chat, the bot may offer a prefilled link to the
+# platform's booking page. The backend stores the collected data and returns a
+# short-lived link (POST {PLATFORM_API_URL}/bot/prefill). Off unless enabled.
+PLATFORM_HANDOFF_ENABLED: bool = os.getenv("PLATFORM_HANDOFF_ENABLED", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+# Backend API base including the /api prefix, e.g. https://api.dopsy.kz/api
+PLATFORM_API_URL: str = os.getenv("PLATFORM_API_URL", "").rstrip("/")
+# Sent as X-API-Key. Must equal the backend's BOT_PREFILL_API_KEY (or its
+# MANAGER_API_KEY when that is unset).
+BOT_PREFILL_API_KEY: str = os.getenv("BOT_PREFILL_API_KEY", "")
+PLATFORM_PREFILL_TIMEOUT: float = float(os.getenv("PLATFORM_PREFILL_TIMEOUT", "3"))
+
+# ---------------------------------------------------------------------------
 # Agent-test console
 # ---------------------------------------------------------------------------
 # Synthetic senders live in the national block 700 000 XXXX, so a console phone

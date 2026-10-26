@@ -23,6 +23,7 @@ from datetime import date, timedelta
 import config
 from handlers.payment.pricing import calculate_full_booking_price, fmt_price
 from handlers.sessions.base_session import BasePromptBuilder, BaseStepHandler
+from integrations import platform_prefill
 from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations.repo import booking_repo, postgres
@@ -387,6 +388,28 @@ class BookingStepHandler(BaseStepHandler):
         self.save_session(chat_id, "step_confirm", params)
         return self.builder.format_summary(params)
 
+    def _platform_link_note(self, chat_id: str, params: dict, lang: str) -> str:
+        """One-time offer of a prefilled website booking link, or "" (disabled, already
+        offered, or the backend is unavailable). Sets `handoff_offered` on `params`, so the
+        caller must persist the session afterwards."""
+        if params.get("handoff_offered") or not platform_prefill.is_enabled():
+            return ""
+        params["handoff_offered"] = True
+        url = platform_prefill.create_prefill_link(
+            params.get("sender_phone", ""),
+            customer_name=params.get("customer_name"),
+            field=params.get("field"),
+            date=params.get("date"),
+            time_start=params.get("time_start"),
+            time_end=params.get("time_end"),
+            lang=lang,
+            conversation_id=chat_id,
+        )
+        if not url:
+            return ""
+        logger.info("[BOOKING:handoff] prefill link offered to %s", chat_id)
+        return "\n\n" + platform_prefill.note(lang, url, has_date=True, has_time=True)
+
     def handle_step_time(self, chat_id: str, user_text: str, params: dict) -> str:
         helper_response = self.step_time_helper(user_text, params)
         if not helper_response["ok"]:
@@ -440,14 +463,18 @@ class BookingStepHandler(BaseStepHandler):
                 _BOT_NAME, params["booking_id"], time_start=time_start, time_end=time_end,
                 field=f["id"], format=f["format"],
             )
+            note = self._platform_link_note(chat_id, params, lang)
             self.save_session(chat_id, "step_name", params)
-            return self.builder.data_localization(lang, "field_free_advance", id=f["id"], fmt=f["format"])
+            return self.builder.data_localization(lang, "field_free_advance", id=f["id"], fmt=f["format"]) + note
 
         logger.info(self.LOGGER_MESSAGES["step_time_advance"],
                     [f["id"] for f in free_fields])
         postgres.update_draft(self.builder.bot_name, params["booking_id"], time_start=time_start, time_end=time_end)
+        # ask_field returns a WhatsApp interactive-buttons JSON payload, so the note must go
+        # into its body text; appending to the returned string would break the JSON.
+        note = self._platform_link_note(chat_id, params, lang)
         self.save_session(chat_id, "step_field", params)
-        return self.builder.ask_field(free_fields, lang)
+        return self.builder.ask_field(free_fields, lang, note)
 
     def handle_step_field(self, chat_id: str, user_text: str, params: dict) -> str:
         lang = params.get("lang", "ru")
