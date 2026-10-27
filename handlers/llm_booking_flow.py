@@ -26,7 +26,7 @@ import logging
 import re
 import uuid
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
 from chat.conversation import clear_history
@@ -40,6 +40,7 @@ from handlers.base_classes.base_helper import BaseHelper
 from integrations import apipay_client, apipay_service
 from integrations import booking as booking_logic
 from integrations import booking_service
+from integrations import platform_prefill
 from integrations import test_context
 from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.booking import floor_time_to_30_minutes
@@ -376,7 +377,7 @@ class LlmBookingFlowHandler:
                 )
 
             self.draft_handler.update_draft_in_db(draft["id"], merged)
-            return self._evaluate_and_respond(merged)
+            return self._with_platform_link(self._evaluate_and_respond(merged), merged, chat_id, phone, user_message)
 
         # Create a new draft with whatever data was extracted
         client_token = str(uuid.uuid4())
@@ -404,7 +405,47 @@ class LlmBookingFlowHandler:
             "lang": lang,
         }
 
-        return self._evaluate_and_respond(data)
+        return self._with_platform_link(self._evaluate_and_respond(data), data, chat_id, phone, user_message)
+
+    def _with_platform_link(self, reply: str, data: dict, chat_id: str, phone: str,
+                            user_message: str = "") -> str:
+        """Offer a prefilled website booking link once per chat, in front of the first
+        booking reply (typing a time range on a phone is the hard part). Never raises and
+        never changes the reply on failure."""
+        try:
+            if not platform_prefill.is_enabled() or data.get("customer_name"):
+                return reply  # off, or the user is already at the confirm step
+            date_str, ts, te = data.get("date"), data.get("time_start"), data.get("time_end")
+            has_time = bool(ts and te)
+            if date_str and has_time:
+                week_start, week_end = booking_logic.get_week_range()
+                extend = timedelta(days=1) if ts > te else timedelta(0)
+                booked = booking_logic.get_all_booked(week_start, week_end + extend)
+                candidates = [f for f in config.BOOKING_FIELDS
+                              if (not data.get("field") or f["id"] == int(data["field"]))
+                              and (not data.get("format") or f["format"] == data["format"])]
+                if not any(booking_logic.check_range_free(booked, date_str, ts, te, f["id"]) for f in candidates):
+                    return reply  # slot is taken: nothing worth prefilling
+            if not platform_prefill.claim_offer(chat_id):
+                return reply
+            lang = data.get("lang", "ru")
+            url = platform_prefill.create_prefill_link(
+                phone, field=data.get("field"), date=date_str,
+                time_start=ts if has_time else None, time_end=te if has_time else None,
+                lang=lang, conversation_id=chat_id,
+            )
+            if not url:
+                platform_prefill.retry_later(chat_id)
+                return reply
+            logger.info("[LLM_FLOW] prefill link offered to %s", chat_id)
+            text = platform_prefill.note(
+                lang, url, has_date=bool(date_str), has_time=has_time,
+                availability=platform_prefill.asks_availability(user_message),
+            )
+            return platform_prefill.prepend_note(reply, text)
+        except Exception:  # noqa: BLE001
+            logger.exception("[LLM_FLOW] platform link failed — continuing without it")
+            return reply
 
     @staticmethod
     def _resolve_field_id(format_str: str, data: dict) -> int | None:
