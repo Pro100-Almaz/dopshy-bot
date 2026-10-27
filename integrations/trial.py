@@ -41,6 +41,11 @@ def _open_date(d: date, closed: dict) -> date:
     return d
 
 
+def _is_ignored_day(info: dict) -> bool:
+    """True when the group takes no trials on this schedule row's weekday."""
+    return info["training_day"] in (info.get("ignore_days") or [])
+
+
 def _parse_time(t: str) -> time:
     return datetime.strptime(t, "%H:%M").time()
 
@@ -79,7 +84,7 @@ def get_trial_daytime(
     closed = _closed_dates(bot_name)
     result = []
     for info in all_group_info:
-        if info["training_day"] not in days:
+        if info["training_day"] not in days or _is_ignored_day(info):
             continue
 
         start = info["time_start"]
@@ -136,6 +141,8 @@ def get_eligible_trial_slots(
 
     closed = _closed_dates(bot_name)
     for info in _trial_groups(bot_name, "child"):
+        if _is_ignored_day(info):
+            continue
         birth_years = info.get("birth_years") or []
         if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
             continue
@@ -175,6 +182,8 @@ def get_birth_year_trial_slots(
     result = []
     closed = _closed_dates(bot_name)
     for info in _trial_groups(bot_name, "child"):
+        if _is_ignored_day(info):
+            continue
         birth_years = info.get("birth_years") or []
         if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
             continue
