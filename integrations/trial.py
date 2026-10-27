@@ -12,11 +12,34 @@ _WEEKDAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _WEEKDAY_KK = ["Дс", "Сс", "Ср", "Бс", "Жм", "Сб", "Жс"]
 _LEVEL_LABELS_RU = {"Beginner": "Начальный", "Intermediate": "Средний", "Advanced": "Продвинутый"}
 _LEVEL_LABELS_KK = {"Beginner": "Бастапқы", "Intermediate": "Орта", "Advanced": "Жоғары"}
-_LEVEL_FALLBACKS = {
-    "Advanced": ["Intermediate", "Beginner"],
-    "Intermediate": ["Beginner"],
-    "Beginner": [],
-}
+# Weekdays (Mon=0) a bot never offers for a trial, though its groups train then.
+_NO_TRIAL_WEEKDAYS = {"dopsy_fs_school": {4, 5}}  # Friday, Saturday
+
+
+def _trial_groups(bot_name: str, audience: str) -> list[dict]:
+    """Groups a trial can be booked into: get_groups_info minus no-trial weekdays."""
+    blocked = _NO_TRIAL_WEEKDAYS.get(bot_name, set())
+    return [
+        info for info in academy_repo.get_groups_info(bot_name=bot_name, audience=audience)
+        if int(info["training_day"]) not in blocked
+    ]
+
+def _closed_dates(bot_name: str) -> dict:
+    """{date: note} of upcoming days without training. Fails open: without
+    the table (migration not applied yet) every day stays open."""
+    try:
+        return academy_repo.get_closed_dates(bot_name)
+    except Exception as err:
+        logger.warning("[TRIAL] Closed dates unavailable for %s: %s", bot_name, err)
+        return {}
+
+
+def _open_date(d: date, closed: dict) -> date:
+    """`d`, or the same weekday of the first week the academy trains then."""
+    while d in closed:
+        d += timedelta(days=7)
+    return d
+
 
 def _is_ignored_day(info: dict) -> bool:
     """True when the group takes no trials on this schedule row's weekday."""
@@ -57,7 +80,8 @@ def get_trial_daytime(
 
     # Children's classes only: the result feeds the child signup and the
     # "children's schedule" context given to the LLM.
-    all_group_info = academy_repo.get_groups_info(bot_name=bot_name, audience="child")
+    all_group_info = _trial_groups(bot_name, "child")
+    closed = _closed_dates(bot_name)
     result = []
     for info in all_group_info:
         if info["training_day"] not in days or _is_ignored_day(info):
@@ -75,7 +99,7 @@ def get_trial_daytime(
             result.append({
                 "group_id": info["group_id"],
                 "group_name": info.get("group_name"),
-                "date": _get_closest_date(info["training_day"]),
+                "date": _open_date(_get_closest_date(info["training_day"]), closed),
                 "time_start": start,
                 "time_end": end,
             })
@@ -90,11 +114,14 @@ def list_classes_by_weekday(bot_name: str, weekdays: list[int]) -> list[dict]:
     get_eligible_trial_slots this ignores age/experience/shift/capacity and
     keeps level/trainer so the reply can name them.
     """
-    result = [
-        {**info, "date": _get_closest_date(info["training_day"])}
-        for info in academy_repo.get_groups_info(bot_name=bot_name)
-        if info["training_day"] in weekdays
-    ]
+    closed = _closed_dates(bot_name)
+    result = []
+    for info in academy_repo.get_groups_info(bot_name=bot_name):
+        if info["training_day"] not in weekdays:
+            continue
+        d = _get_closest_date(info["training_day"])
+        # A holiday stays in the answer, marked: the client asked about that day.
+        result.append({**info, "date": d, "closed": d in closed, "closed_note": closed.get(d)})
     return sorted(result, key=lambda s: (s["date"], s["time_start"]))
 
 
@@ -103,7 +130,6 @@ def get_eligible_trial_slots(
     child_birth_year: int,
     school_shift: str,
     experience: str | None = None,
-    allow_lower_level: bool = False,
 ) -> list[dict]:
     """Return schedule slots from groups eligible for the child.
 
@@ -112,10 +138,9 @@ def get_eligible_trial_slots(
     """
     result = []
     allowed_levels = [experience] if experience else []
-    if allow_lower_level and experience:
-        allowed_levels.extend(_LEVEL_FALLBACKS.get(experience, []))
 
-    for info in academy_repo.get_groups_info(bot_name=bot_name):
+    closed = _closed_dates(bot_name)
+    for info in _trial_groups(bot_name, "child"):
         if _is_ignored_day(info):
             continue
         birth_years = info.get("birth_years") or []
@@ -132,7 +157,7 @@ def get_eligible_trial_slots(
             levels = [levels]
         if allowed_levels and levels and not set(levels).intersection(allowed_levels):
             continue
-        if allowed_levels and not allow_lower_level and not levels:
+        if allowed_levels and not levels:
             continue
 
         start = info["time_start"]
@@ -144,37 +169,9 @@ def get_eligible_trial_slots(
 
         result.append({
             **info,
-            "date": _next_class_date(info["training_day"], start),
+            "date": _open_date(_next_class_date(info["training_day"], start), closed),
         })
     return result
-
-
-def get_fallback_trial_slots(
-    bot_name: str,
-    child_birth_year: int,
-    school_shift: str,
-    experience: str,
-) -> list[dict]:
-    """Return lower-level slots, preserving hard age/type/capacity/shift rules."""
-    exact = get_eligible_trial_slots(
-        bot_name, child_birth_year, school_shift, experience=experience,
-        allow_lower_level=False,
-    )
-    if exact:
-        return []
-
-    fallback_levels = _LEVEL_FALLBACKS.get(experience, [])
-    if not fallback_levels:
-        return []
-
-    slots = get_eligible_trial_slots(
-        bot_name, child_birth_year, school_shift, experience=experience,
-        allow_lower_level=True,
-    )
-    return [
-        s for s in slots
-        if set(s.get("level") or []).intersection(fallback_levels)
-    ]
 
 
 def get_birth_year_trial_slots(
@@ -183,7 +180,8 @@ def get_birth_year_trial_slots(
 ) -> list[dict]:
     """Return available schedule slots filtered only by academy type and birth year."""
     result = []
-    for info in academy_repo.get_groups_info(bot_name=bot_name):
+    closed = _closed_dates(bot_name)
+    for info in _trial_groups(bot_name, "child"):
         if _is_ignored_day(info):
             continue
         birth_years = info.get("birth_years") or []
@@ -197,7 +195,7 @@ def get_birth_year_trial_slots(
 
         result.append({
             **info,
-            "date": _next_class_date(info["training_day"], info["time_start"]),
+            "date": _open_date(_next_class_date(info["training_day"], info["time_start"]), closed),
         })
     return result
 
@@ -222,14 +220,15 @@ def get_adult_trial_slots(bot_name: str) -> list[dict]:
     No birth year, level or school shift: any adult can join.
     """
     result = []
-    for info in academy_repo.get_groups_info(bot_name=bot_name, audience="adult"):
+    closed = _closed_dates(bot_name)
+    for info in _trial_groups(bot_name, "adult"):
         max_cap = info.get("max_cap")
         curr_cap = info.get("curr_cap") or 0
         if max_cap is not None and int(curr_cap) >= int(max_cap):
             continue
         result.append({
             **info,
-            "date": _next_class_date(info["training_day"], info["time_start"]),
+            "date": _open_date(_next_class_date(info["training_day"], info["time_start"]), closed),
         })
     return result
 
@@ -283,6 +282,18 @@ def match_preferred_slot(slots: list[dict], draft: dict) -> dict | None:
         return slot
     return None
 
+def format_closed_dates_context(bot_name: str) -> str:
+    """The upcoming days without training, for the LLM (academy_rules 23)."""
+    closed = _closed_dates(bot_name)
+    if not closed:
+        return ""
+    lines = ["Дни без тренировок (праздники, отмены) — в эти дни занятий нет:"]
+    for d in sorted(closed):
+        note = f" — {closed[d]}" if closed[d] else ""
+        lines.append(f"- {_WEEKDAY_RU[d.weekday()]} {d.strftime('%d.%m.%Y')}{note}")
+    return "\n".join(lines)
+
+
 def format_availability_context(free_windows: list[dict]) -> str:
     if not free_windows:
         return "Свободных слотов на ближайшие 7 дней нет."
@@ -329,6 +340,11 @@ def format_weekday_schedule(classes: list[dict], lang: str = "ru") -> str:
     lines = []
     for d in sorted(by_date):
         lines.append(f"{weekday_names[d.weekday()]} {d.strftime('%d.%m.%Y')}:")
+        if any(c.get("closed") for c in by_date[d]):
+            note = next((c["closed_note"] for c in by_date[d] if c.get("closed_note")), None)
+            closed = "Тренировок нет" if lang != "kk" else "Жаттығу болмайды"
+            lines.append(f"  ❌ {closed}" + (f" ({note})" if note else ""))
+            continue
         for c in sorted(by_date[d], key=lambda x: x["time_start"]):
             levels = c.get("level") or []
             if isinstance(levels, str):

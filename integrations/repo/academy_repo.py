@@ -5,7 +5,7 @@ import psycopg2.extras
 import psycopg2.pool
 
 from integrations.repo.postgres import _conn
-from integrations.repo.utils import normalize_phone, phone_variants
+from integrations.repo.utils import normalize_phone, phone_variants, same_child_name
 from utils import today_almaty
 
 '''
@@ -366,6 +366,20 @@ def bot_group_type(bot_name: str) -> str:
     return "boxing" if bot_name == "dopsy_boxing" else "football"
 
 
+def get_closed_dates(bot_name: str) -> dict:
+    """{date: note} of this bot's upcoming days without training
+    (academy_closed_dates; a row without group_type closes both academies)."""
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT closed_on, note FROM academy_closed_dates
+                WHERE closed_on >= %s AND (group_type IS NULL OR group_type = %s)
+                """, (today_almaty(), bot_group_type(bot_name))
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+
 def get_groups_info(bot_name: str, audience: str | None = None):
     """Every active training slot for this bot's curriculum.
 
@@ -412,52 +426,6 @@ def get_existing_trial_draft(phone: str, bot_name: str) -> dict | None:
             )
             row = cur.fetchone()
             return dict(row) if row else None
-
-
-SUMMARY_FIELDS = ("audience", "child_name", "child_birth_year", "experience", "school_shift")
-
-
-def save_trial_summary(phone: str, bot_name: str, answers: dict) -> None:
-    """Keep the answers of an abandoned signup (replaces the previous ones)."""
-    values = [answers.get(field) for field in SUMMARY_FIELDS]
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO academy_trial_summaries
-                    (phone, group_type, audience, child_name, child_birth_year, experience, school_shift)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (phone, group_type) DO UPDATE SET
-                    audience = EXCLUDED.audience,
-                    child_name = EXCLUDED.child_name,
-                    child_birth_year = EXCLUDED.child_birth_year,
-                    experience = EXCLUDED.experience,
-                    school_shift = EXCLUDED.school_shift,
-                    saved_at = NOW()
-                """,
-                (normalize_phone(phone), bot_group_type(bot_name), *values),
-            )
-
-
-def get_trial_summary(phone: str, bot_name: str) -> dict | None:
-    with _conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM academy_trial_summaries WHERE phone = ANY(%s) AND group_type = %s "
-                "ORDER BY saved_at DESC LIMIT 1",
-                (phone_variants(phone), bot_group_type(bot_name)),
-            )
-            row = cur.fetchone()
-            return dict(row) if row else None
-
-
-def delete_trial_summary(phone: str, bot_name: str) -> None:
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM academy_trial_summaries WHERE phone = ANY(%s) AND group_type = %s",
-                (phone_variants(phone), bot_group_type(bot_name)),
-            )
 
 
 def get_groups_for_refresh(group_type: str) -> list[dict]:
@@ -1660,7 +1628,9 @@ def cancel_all_trials(trial_ids: list) -> None:
             )
 
 
-def check_trial_limits(bot_name: str, phone: str) -> bool:
+def check_trial_limits(bot_name: str, phone: str, child_name: str | None = None) -> bool:
+    """True while the phone may take another trial. With child_name, only that
+    child's trials count — siblings share a phone but each has their own quota."""
     group_type = "boxing" if bot_name == 'dopsy_boxing' else "football"
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1679,15 +1649,21 @@ def check_trial_limits(bot_name: str, phone: str) -> bool:
                           AND ag.group_type = %s
                           AND at.state = 'confirmed'
                           AND at.attended IS TRUE
+                          AND (%s::text IS NULL OR lower(btrim(at.child_name)) = lower(btrim(%s)))
                         GROUP BY limit_row.quantity
-                        """, (group_type, phone_variants(phone), group_type))
+                        """, (group_type, phone_variants(phone), group_type, child_name, child_name))
 
             row = cur.fetchone()
             return bool(row["can_take_trial"]) if row else True
 
 
-def has_active_trial(bot_name: str, phone: str) -> bool:
+def has_active_trial(bot_name: str, phone: str, child_name: str | None = None) -> bool:
     """True when the phone already holds a trial booking that has not happened yet.
+
+    With child_name, only that child's booking counts: a parent signing up a
+    second child from the same phone must not be blocked by the first one's.
+    The name is compared with same_child_name, so «Әлихан» after «Алихан» is
+    the same child and doesn't get a second booking.
 
     Only UPCOMING trials block a new signup. Without the date bound this
     returned True for any confirmed row ever written, so a client whose trial
@@ -1703,14 +1679,15 @@ def has_active_trial(bot_name: str, phone: str) -> bool:
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                        SELECT EXISTS (SELECT 1
-                                       FROM academy_trials at
-                                                JOIN academy_groups ag ON ag.id = at.group_id
-                                       WHERE at.phone = ANY(%s)
-                                         AND ag.group_type = %s
-                                         AND at.state = 'confirmed'
-                                         AND at.trial_day >= %s)
+                        SELECT at.child_name
+                        FROM academy_trials at
+                                 JOIN academy_groups ag ON ag.id = at.group_id
+                        WHERE at.phone = ANY(%s)
+                          AND ag.group_type = %s
+                          AND at.state = 'confirmed'
+                          AND at.trial_day >= %s
                         """, (phone_variants(phone), group_type, today_almaty()))
-
-            has_confirmed_trial = cur.fetchone()
-            return has_confirmed_trial['exists']
+            names = [row["child_name"] for row in cur.fetchall()]
+    if child_name is None:
+        return bool(names)
+    return any(same_child_name(child_name, name) for name in names)

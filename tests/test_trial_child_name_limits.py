@@ -42,7 +42,7 @@ def test_too_long_name_is_not_saved_and_client_is_told_why(monkeypatch):
         "chat-1", "77072479672", "dopsy_fs_school", _LONG_NAME, [], "ru",
     )
 
-    assert saved["child_name"] is None
+    assert not saved.get("child_name")
     assert reply == (
         f"Имя слишком длинное — не больше {CHILD_NAME_MAX_LEN} символов. "
         "Напишите, пожалуйста, короче."
@@ -66,57 +66,11 @@ def _stub_intake(monkeypatch, draft_fields, extracted=None):
         return {"ok": True, "data": {"trial": {**draft, **fields}}}
 
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake", fake_update)
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name=None, audience=None: [])
     return saved
 
 
-# ---------------------------------------------------------------------------
-# Other intake restrictions
-# ---------------------------------------------------------------------------
-
-from datetime import date  # noqa: E402
-
-from handlers.llm_trial_flow import (  # noqa: E402
-    CHILD_MAX_AGE,
-    CHILD_MIN_AGE,
-    _birth_year_rejection,
-)
 from integrations import trial_service  # noqa: E402
-
-_TODAY = date(2026, 9, 23)
-
-
-def test_birth_year_rejection_reasons():
-    assert _birth_year_rejection(2016, _TODAY) is None
-    assert _birth_year_rejection(2026 - CHILD_MIN_AGE, _TODAY) is None
-    assert _birth_year_rejection(2026 - CHILD_MAX_AGE, _TODAY) is None
-    assert _birth_year_rejection(2027, _TODAY) == "in_future"
-    assert _birth_year_rejection(2025, _TODAY) == "too_young"
-    assert _birth_year_rejection(1995, _TODAY) == "too_old"
-    assert _birth_year_rejection("двадцать", _TODAY) == "not_a_year"
-
-
-def test_implausible_birth_year_is_not_saved_and_client_is_told_why(monkeypatch, caplog):
-    saved = _stub_intake(monkeypatch, {"child_name": "Али"}, {"child_birth_year": 1995})
-
-    with caplog.at_level(logging.INFO, logger="handlers.llm_trial_flow"):
-        reply = LlmTrialFlowHandler().handle(
-            "chat-1", "77072479672", "dopsy_fs_school", "1995", [], "ru",
-        )
-
-    assert saved["child_birth_year"] is None
-    assert "child_birth_year rejected: reason=too_old" in caplog.text
-    assert reply.startswith("Год рождения 1995 не подходит")
-
-
-def test_unrecognized_answer_is_logged(monkeypatch, caplog):
-    _stub_intake(monkeypatch, {"child_name": "Али", "child_birth_year": 2016})
-
-    with caplog.at_level(logging.INFO, logger="handlers.llm_trial_flow"):
-        LlmTrialFlowHandler().handle(
-            "chat-1", "77072479672", "dopsy_fs_school", "не знаю", [], "ru",
-        )
-
-    assert "experience rejected: reason=unrecognized value='не знаю'" in caplog.text
 
 
 def test_update_intake_refuses_values_longer_than_the_column(monkeypatch, caplog):

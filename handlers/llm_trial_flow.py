@@ -31,7 +31,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 
 import config
-from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES
+from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES, academy_location, academy_what_to_bring
 from handlers.academy_extractor import extract_trial_details
 from handlers.sessions.trial_session import _MY_TRIAL_KW
 from integrations import trial_service
@@ -43,7 +43,13 @@ logger = logging.getLogger(__name__)
 
 
 T = {
+    # Questions come in three forms: the plain key while it is not known who
+    # signs up, "_self" for the client themselves, "_other" for a child.
     "ask_name": {
+        "ru": "Укажите имя того, кто будет заниматься.",
+        "kk": "Сабаққа қатысатын адамның есімін жазыңыз.",
+    },
+    "ask_name_other": {
         "ru": "Укажите имя ребенка.",
         "kk": "Балаңыздың есімін жазыңыз.",
     },
@@ -51,17 +57,15 @@ T = {
         "ru": "Укажите ваше имя.",
         "kk": "Атыңызды жазыңыз.",
     },
-    "birth_year_invalid": {
-        "ru": "Год рождения {year} не подходит — принимаем детей от {min_age} до {max_age} лет. "
-              "Укажите год рождения ребенка. Например: *2016*.",
-        "kk": "{year} туған жылы сәйкес емес — {min_age} мен {max_age} жас аралығындағы балаларды қабылдаймыз. "
-              "Балаңыздың туған жылын жазыңыз. Мысалы: *2016*.",
-    },
     "name_too_long": {
         "ru": "Имя слишком длинное — не больше {max_len} символов. Напишите, пожалуйста, короче.",
         "kk": "Есім тым ұзын — {max_len} таңбадан аспауы керек. Қысқарақ жазыңыз.",
     },
     "ask_birth_year": {
+        "ru": "Укажите год рождения того, кто будет заниматься. Например: *2016*.",
+        "kk": "Қатысушының туған жылын жазыңыз. Мысалы: *2016*.",
+    },
+    "ask_birth_year_other": {
         "ru": "Укажите год рождения ребенка. Например: *2016*.",
         "kk": "Балаңыздың туған жылын жазыңыз. Мысалы: *2016*.",
     },
@@ -69,54 +73,35 @@ T = {
         "ru": "Выберите уровень подготовки:\n1. Начинающий\n2. Средний\n3. Продвинутый",
         "kk": "Дайындық деңгейін таңдаңыз:\n1. Бастапқы\n2. Орта\n3. Жоғары",
     },
-    "ask_school_shift": {
-        "ru": "Какая школьная смена у ребенка?\n1. Утренняя\n2. Дневная\n3. Ходит в детский сад",
-        "kk": "Балаңыз қай ауысымда оқиды?\n1. Таңғы\n2. Түскі\n3. Балабақшаға барады",
-    },
-    "confirm_self": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Ваше имя: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
-        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есіміңіз: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nРастайсыз ба?",
-    },
-    "confirmed_self": {
-        "ru": "Вы записаны на пробный урок, будем вас ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Ваше имя: {name}",
-        "kk": "Жазылым сәтті аяқталды, сізді күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Есіміңіз: {name}",
-    },
-    "ask_birth_year_self": {
-        "ru": "Укажите ваш возраст или год рождения. Например: *2010*.",
-        "kk": "Жасыңызды немесе туған жылыңызды жазыңыз. Мысалы: *2010*.",
-    },
     "ask_experience_self": {
         "ru": "Выберите ваш уровень подготовки:\n1. Начинающий\n2. Средний\n3. Продвинутый",
         "kk": "Дайындық деңгейіңізді таңдаңыз:\n1. Бастапқы\n2. Орта\n3. Жоғары",
     },
+    "ask_experience_other": {
+        "ru": "Выберите уровень подготовки ребенка:\n1. Начинающий\n2. Средний\n3. Продвинутый",
+        "kk": "Балаңыздың дайындық деңгейін таңдаңыз:\n1. Бастапқы\n2. Орта\n3. Жоғары",
+    },
+    "ask_school_shift": {
+        "ru": "Какая школьная смена?\n1. Утренняя\n2. Дневная\n3. Ходит в детский сад",
+        "kk": "Мектепте қай ауысымда оқиды?\n1. Таңғы\n2. Түскі\n3. Балабақшаға барады",
+    },
     "ask_school_shift_self": {
-        "ru": "В какую смену вы учитесь?\n1. Утренняя\n2. Дневная",
-        "kk": "Қай ауысымда оқисыз?\n1. Таңғы\n2. Түскі",
+        "ru": "В какую смену вы учитесь?\n1. Утренняя\n2. Дневная\n3. Хожу в детский сад",
+        "kk": "Мектепте қай ауысымда оқисыз?\n1. Таңғы\n2. Түскі\n3. Балабақшаға барамын",
     },
-    # One clarification of an unclear level answer («бұрын қатысқанмын»);
-    # the numbering matches ask_experience, so «2» still means Intermediate.
-    "experience_clarify": {
-        "ru": "Уточните, пожалуйста, сколько ребёнок занимался:\n1. Не занимался\n2. До года\n3. Больше года",
-        "kk": "Нақтылап жіберіңізші, бала қанша уақыт айналысты:\n1. Айналыспаған\n2. Бір жылға дейін\n3. Бір жылдан көп",
+    "ask_school_shift_other": {
+        "ru": "Какая школьная смена у ребенка?\n1. Утренняя\n2. Дневная\n3. Ходит в детский сад",
+        "kk": "Балаңыз қай ауысымда оқиды?\n1. Таңғы\n2. Түскі\n3. Балабақшаға барады",
     },
-    "experience_clarify_self": {
-        "ru": "Уточните, пожалуйста, сколько вы занимались:\n1. Не занимался(-ась)\n2. До года\n3. Больше года",
-        "kk": "Нақтылап жіберіңізші, қанша уақыт айналыстыңыз:\n1. Айналыспағанмын\n2. Бір жылға дейін\n3. Бір жылдан көп",
-    },
-    "beginner_note": {
-        "ru": "Ничего страшного — начинающих мы тоже берём.",
-        "kk": "Ештеңе етпейді — жаңадан бастаушыларды да қабылдаймыз.",
+    "ask_birth_year_self": {
+        "ru": "Укажите ваш возраст или год рождения. Например: *2010*.",
+        "kk": "Жасыңызды немесе туған жылыңызды жазыңыз. Мысалы: *2010*.",
     },
     # Put in front of the first reply of a new signup. Empty: the football
     # bot's material doesn't say its trial is free.
     "trial_free_intro": {
         "ru": "",
         "kk": "",
-    },
-    # A new signup prefilled from an abandoned one (academy_trial_summaries).
-    "restored_answers": {
-        "ru": "Я сохранил ваши прошлые ответы: {details}. Если что-то изменилось — напишите.",
-        "kk": "Алдыңғы жауаптарыңызды сақтап қойдым: {details}. Бірдеңе өзгерсе — жазыңыз.",
     },
     "no_groups": {
         "ru": "Подходящих групп сейчас не нашлось. Администратор поможет подобрать вариант вручную.",
@@ -127,28 +112,16 @@ T = {
         "kk": "Қазір сәйкес топ табылмады. Әкімшіге +7 700 555 6006 нөміріне қоңырау шалыңыз.",
     },
     "preferred_unavailable": {
-        "ru": "Указанное время не подходит для группы ребенка. Выберите один из доступных вариантов:",
-        "kk": "Көрсетілген уақыт балаңызға сәйкес топқа келмейді. Қолжетімді нұсқалардың бірін таңдаңыз:",
-    },
-    "fallback_shown": {
-        "ru": "Подходящей группы уровня {requested} сейчас нет. По возрасту и времени подходят группы уровнем ниже:",
-        "kk": "Қазір {requested} деңгейіне сәйкес топ жоқ. Жасы мен уақыты бойынша бір деңгей төмен топтар сәйкес келеді:",
-    },
-    "choose_slot": {
-        "ru": "Выберите группу на {date}:",
-        "kk": "{date} күніне топты таңдаңыз:",
-    },
-    "choose_day": {
-        "ru": "На какой день хотите записаться на пробное занятие?",
-        "kk": "Сынақ сабағына қай күнге жазылғыңыз келеді?",
+        "ru": "Указанное время не подходит для этой группы. Выберите один из доступных вариантов:",
+        "kk": "Көрсетілген уақыт бұл топқа келмейді. Қолжетімді нұсқалардың бірін таңдаңыз:",
     },
     "confirm": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
-        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nРастайсыз ба?",
+        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
+        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nРастайсыз ба?",
     },
     "confirmed": {
-        "ru": "Вы записаны на пробный урок, будем вас ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}",
-        "kk": "Жазылым сәтті аяқталды, сізді күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {name}",
+        "ru": "Запись на пробный урок оформлена, будем ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}",
+        "kk": "Жазылым сәтті аяқталды, күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}",
     },
     "declined": {
         "ru": "Запись отменена. Если захотите снова, просто напишите.",
@@ -181,37 +154,43 @@ T = {
     # Asked before any signup question on a bot that has an adult group.
     # The numbering must stay in sync with _AUDIENCE_CHOICES.
     "choose_audience": {
-        "ru": "Выберите нужную группу:\n1. Детская группа {min_age}–{max_age} лет\n2. Взрослая группа от 18 лет",
-        "kk": "Керек топты таңдаңыз:\n1. {min_age}-{max_age} жас балалар тобы\n2. 18 жастан бастап ересектер тобы",
+        "ru": "К какой группе хотели бы записать?\n1. Детская группа ({child_min}–{child_max} лет)\n"
+              "2. Взрослая группа ({adult_min}–{adult_max} лет)",
+        "kk": "Қай топқа жазғыңыз келеді?\n1. Балалар тобы ({child_min}–{child_max} жас)\n"
+              "2. Ересектер тобы ({adult_min}–{adult_max} жас)",
     },
-    # An age between the children's groups and the adult group (e.g. 17).
+    # The same question to a client signing up themselves («хочу записаться»).
+    "choose_audience_self": {
+        "ru": "К какой группе хотели бы записаться?\n1. Детская группа ({child_min}–{child_max} лет)\n"
+              "2. Взрослая группа ({adult_min}–{adult_max} лет)",
+        "kk": "Қай топқа жазылғыңыз келеді?\n1. Балалар тобы ({child_min}–{child_max} жас)\n"
+              "2. Ересектер тобы ({adult_min}–{adult_max} жас)",
+    },
+    # An age outside the chosen group's range: the signup ends here.
     "age_no_group": {
-        "ru": "К сожалению, для возраста {age} лет группы нет: детские группы — {min_age}–{max_age} лет, "
-              "взрослая — от 18 лет. Администратор подскажет вариант: {phone}.",
-        "kk": "Өкінішке қарай, {age} жасқа арналған топ жоқ: балалар тобы — {min_age}-{max_age} жас, "
-              "ересектер тобы — 18 жастан. Әкімші нұсқа ұсынады: {phone}.",
+        "ru": "К сожалению, для возраста {age} лет группы нет: {ranges}. Администратор подскажет вариант: {phone}.",
+        "kk": "Өкінішке қарай, {age} жасқа арналған топ жоқ: {ranges}. Әкімші нұсқа ұсынады: {phone}.",
     },
-    "adult_schedule": {
-        "ru": "Тренировки взрослой группы:\n{lines}\n\nВ какой день вам удобно прийти на пробное занятие?",
-        "kk": "Ересектер тобының жаттығулары:\n{lines}\n\nСынақ сабағына қай күні келу сізге ыңғайлы?",
+    "choose_class": {
+        "ru": "Выберите тренировку и напишите её номер:\n\n{lines}",
+        "kk": "Жаттығуды таңдап, нөмірін жазыңыз:\n\n{lines}",
     },
     "adult_unavailable": {
         "ru": "В это время тренировки взрослой группы нет.",
         "kk": "Бұл уақытта ересектер тобының жаттығуы жоқ.",
     },
-    "adult_no_other_times": {
-        "ru": "Других тренировок у взрослой группы сейчас нет — только время ниже. "
-              "Если оно не подходит, администратор подскажет варианты: {phone}.",
-        "kk": "Ересектер тобының басқа жаттығу уақыты қазір жоқ — тек төмендегі уақыттар. "
-              "Егер келмесе, әкімші басқа нұсқаны айтып береді: {phone}.",
-    },
     "confirm_adult": {
-        "ru": "📋 Детали записи:\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}\n\nВсё верно? Подтверждаете запись?",
-        "kk": "📋 Жазылым деректері:\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есіміңіз: {name}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
+        "ru": "📋 Детали записи:\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}\n📆 Год рождения: {birth_year}\n\nВсё верно? Подтверждаете запись?",
+        "kk": "📋 Жазылым деректері:\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есімі: {name}\n📆 Туған жылы: {birth_year}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
     },
     "confirmed_adult": {
-        "ru": "Готово, вы записаны на пробное занятие! 🎉 Будем рады вас видеть!\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}",
-        "kk": "Дайын, сынақ сабағына жазылдыңыз! 🎉 Сізді күтеміз!\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есіміңіз: {name}",
+        "ru": "Готово, запись на пробное занятие оформлена! 🎉 Будем рады встрече!\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}",
+        "kk": "Дайын, сынақ сабағына жазылым рәсімделді! 🎉 Кездесуді күтеміз!\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есімі: {name}",
+    },
+    # After a side answer at the summary, instead of the whole summary again.
+    "confirm_or_questions": {
+        "ru": "Подтверждаете запись или остались вопросы?",
+        "kk": "Жазылымды растайсыз ба, әлде сұрақтарыңыз бар ма?",
     },
     # Instead of repeating a numbered list the last message already showed.
     "choose_from_above": {
@@ -226,6 +205,10 @@ T = {
 # parsers depend on them.
 BOXING_T = {
     "ask_name": {
+        "ru": "Подскажите, пожалуйста, как зовут того, кто будет заниматься?",
+        "kk": "Сабаққа кім қатысады, есімі кім, айтып жіберсеңіз?",
+    },
+    "ask_name_other": {
         "ru": "Подскажите, пожалуйста, как зовут ребёнка?",
         "kk": "Балаңыздың есімі кім, айтып жіберсеңіз?",
     },
@@ -233,51 +216,51 @@ BOXING_T = {
         "ru": "Подскажите, пожалуйста, как вас зовут?",
         "kk": "Есіміңіз кім, айтып жіберсеңіз?",
     },
-    "birth_year_invalid": {
-        "ru": "К сожалению, этот возраст нам не подходит ({year} год рождения). Мы принимаем детей от {min_age} до {max_age} лет. "
-              "Подскажите, пожалуйста, сколько лет ребёнку?",
-        "kk": "Өкінішке қарай, бұл жас сәйкес келмейді ({year} туған жыл). Біз {min_age} мен {max_age} жас аралығындағы балаларды қабылдаймыз. "
-              "Балаңыз неше жаста?",
-    },
     "name_too_long": {
         "ru": "Имя получилось немного длинным. Пожалуйста, напишите его покороче — до {max_len} символов.",
         "kk": "Есім сәл ұзын болып кетті. {max_len} таңбаға дейін қысқартып жазыңызшы.",
     },
     "ask_birth_year": {
+        "ru": "Подскажите, пожалуйста, сколько лет тому, кто будет заниматься? Можно написать и год рождения, например: 2016.",
+        "kk": "Қатысушы неше жаста? Туған жылын да жазуға болады, мысалы: 2016.",
+    },
+    "ask_birth_year_other": {
         "ru": "Подскажите, пожалуйста, сколько лет ребёнку? Можно написать и год рождения, например: 2016.",
         "kk": "Балаңыз неше жаста? Туған жылын да жазуға болады, мысалы: 2016.",
     },
     "ask_experience": {
+        "ru": "Какой уровень подготовки? Выберите, пожалуйста:\n1. Начинающий\n2. Средний\n3. Продвинутый\n\n"
+              "Если раньше не занимались боксом — смело выбирайте «Начинающий» 🥊",
+        "kk": "Дайындық деңгейі қандай? Таңдаңызшы:\n1. Бастапқы\n2. Орта\n3. Жоғары\n\n"
+              "Бұрын бокспен айналыспаған болса — «Бастапқы» деңгейін таңдаңыз 🥊",
+    },
+    "ask_experience_self": {
+        "ru": "Какой у вас уровень подготовки? Выберите, пожалуйста:\n1. Начинающий\n2. Средний\n3. Продвинутый\n\n"
+              "Если вы раньше не занимались боксом — смело выбирайте «Начинающий» 🥊",
+        "kk": "Дайындық деңгейіңіз қандай? Таңдаңызшы:\n1. Бастапқы\n2. Орта\n3. Жоғары\n\n"
+              "Бұрын бокспен айналыспаған болсаңыз — «Бастапқы» деңгейін таңдаңыз 🥊",
+    },
+    "ask_experience_other": {
         "ru": "Какой у ребёнка уровень подготовки? Выберите, пожалуйста:\n1. Начинающий\n2. Средний\n3. Продвинутый\n\n"
               "Если ребёнок раньше не занимался боксом — смело выбирайте «Начинающий» 🥊",
         "kk": "Балаңыздың дайындық деңгейі қандай? Таңдаңызшы:\n1. Бастапқы\n2. Орта\n3. Жоғары\n\n"
               "Егер бала бұрын бокспен айналыспаса — «Бастапқы» деңгейін таңдаңыз 🥊",
     },
     "ask_school_shift": {
+        "ru": "В какую смену учёба в школе? Так мы подберём удобное время.\n1. Утренняя\n2. Дневная\n3. Ходит в детский сад",
+        "kk": "Мектепте қай ауысымда оқиды? Ыңғайлы уақытты таңдау үшін керек.\n1. Таңғы\n2. Түскі\n3. Балабақшаға барады",
+    },
+    "ask_school_shift_self": {
+        "ru": "В какую смену вы учитесь в школе? Так мы подберём удобное время.\n1. Утренняя\n2. Дневная\n3. Хожу в детский сад",
+        "kk": "Мектепте қай ауысымда оқисыз? Ыңғайлы уақытты таңдау үшін керек.\n1. Таңғы\n2. Түскі\n3. Балабақшаға барамын",
+    },
+    "ask_school_shift_other": {
         "ru": "В какую смену ребёнок учится в школе? Так мы подберём удобное время.\n1. Утренняя\n2. Дневная\n3. Ходит в детский сад",
         "kk": "Балаңыз мектепте қай ауысымда оқиды? Ыңғайлы уақытты таңдау үшін керек.\n1. Таңғы\n2. Түскі\n3. Балабақшаға барады",
     },
-    "confirm_self": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Ваше имя: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
-        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есіміңіз: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
-    },
-    "confirmed_self": {
-        "ru": "Готово, вы записаны на пробное занятие! 🎉 Будем очень рады вас видеть!\n📅 {date}\n⏰ {start}–{end}\n👤 Ваше имя: {name}",
-        "kk": "Дайын, сынақ сабағына жазылдыңыз! 🎉 Сізді асыға күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Есіміңіз: {name}",
-    },
     "ask_birth_year_self": {
         "ru": "Подскажите, пожалуйста, сколько вам лет?",
-        "kk": "Жасыңыз нешеде?",
-    },
-    "ask_experience_self": {
-        "ru": "Какой у вас уровень подготовки? Выберите, пожалуйста:\n1. Начинающий\n2. Средний\n3. Продвинутый\n\n"
-              "Если раньше не занимались боксом — смело выбирайте «Начинающий» 🥊",
-        "kk": "Дайындық деңгейіңіз қандай? Таңдаңызшы:\n1. Бастапқы\n2. Орта\n3. Жоғары\n\n"
-              "Бұрын бокспен айналыспасаңыз — «Бастапқы» деңгейін таңдаңыз 🥊",
-    },
-    "ask_school_shift_self": {
-        "ru": "В какую смену вы учитесь? Так мы подберём удобное время.\n1. Утренняя\n2. Дневная",
-        "kk": "Мектепте қай ауысымда оқисыз? Ыңғайлы уақытты таңдау үшін керек.\n1. Таңғы\n2. Түскі",
+        "kk": "Жасыңыз нешеде? Туған жылыңызды да жазуға болады, мысалы: 2000.",
     },
     "trial_free_intro": {
         "ru": "Пробное занятие у нас бесплатное 🥊",
@@ -295,26 +278,14 @@ BOXING_T = {
         "ru": "К сожалению, в это время подходящей группы нет. Вот что можем предложить — выберите, пожалуйста, удобный вариант:",
         "kk": "Өкінішке қарай, бұл уақытта сәйкес топ жоқ. Мына нұсқалардың бірін таңдаңызшы:",
     },
-    "fallback_shown": {
-        "ru": "Группы уровня {requested} сейчас, к сожалению, нет. Зато по возрасту и времени подходят группы уровнем ниже:",
-        "kk": "Өкінішке қарай, қазір {requested} деңгейіндегі топ жоқ. Бірақ жасы мен уақыты бойынша бір деңгей төмен топтар сәйкес келеді:",
-    },
-    "choose_slot": {
-        "ru": "Вот группы на {date}. Выберите, пожалуйста, удобную:",
-        "kk": "{date} күнгі топтар. Ыңғайлысын таңдаңызшы:",
-    },
-    "choose_day": {
-        "ru": "На какой день вам удобно записаться на пробное занятие?",
-        "kk": "Сынақ сабағына қай күн сізге ыңғайлы?",
-    },
     "confirm": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
-        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
+        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
+        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
     },
     "confirmed": {
-        "ru": "Готово, вы записаны на пробное занятие! 🎉 Будем очень рады вас видеть!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя ребенка: {name}\n\n"
+        "ru": "Готово, запись на пробное занятие оформлена! 🎉 Будем очень рады встрече!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n\n"
               "Если появятся вопросы — пишите, мы всегда на связи.",
-        "kk": "Дайын, сынақ сабағына жазылдыңыз! 🎉 Сізді асыға күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Балаңыздың есімі: {name}\n\n"
+        "kk": "Дайын, сынақ сабағына жазылым рәсімделді! 🎉 Кездесуді асыға күтеміз!\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n\n"
               "Сұрақтарыңыз болса — жазыңыз, біз әрқашан байланыстамыз.",
     },
     "declined": {
@@ -333,11 +304,11 @@ BOXING_T = {
     },
     "has_active_trial": {
         "ru": (
-            "У вас уже есть запись на пробное занятие. "
+            "По этому номеру уже есть запись на пробное занятие. "
             "Если хотите уточнить дату или перенести её, напишите: «моя запись» или «перенести запись»."
         ),
         "kk": (
-            "Сізде сынақ сабағына жазылым бар. "
+            "Бұл нөмір бойынша сынақ сабағына жазылым бар. "
             "Күнін білгіңіз немесе ауыстырғыңыз келсе: «менің жазылымым» немесе «жазылымды ауыстыру» деп жазыңыз."
         ),
     },
@@ -357,8 +328,8 @@ _current_bot: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-# "self" while the client is signing up themselves — _loc then picks a key's
-# "_self" variant («Есіміңіз» rather than «Балаңыздың есімі») where one exists.
+# "self" while the client signs up themselves, "other" for a child, None while
+# unknown — _loc then picks a key's "_self" / "_other" variant where one exists.
 _current_actor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "trial_flow_actor", default=None,
 )
@@ -468,16 +439,17 @@ def shift_from_text(text: str | None) -> str | None:
         return "morning"
     return None
 
-# «бұрын қатыспаған», «с нуля» — a beginner. «бұрын қатысқанмын» says
-# there was training but not how much: asked once (experience_clarify).
+# «бұрын қатыспаған», «с нуля» — a beginner.
 _NEVER_TRAINED_RE = re.compile(
     r"қатыспаға|айналыспаға|қатыспады|айналыспады|нөлден|с нуля|не занимал|не ходил|никогда не",
     re.IGNORECASE,
 )
-_TRAINED_BEFORE_RE = re.compile(r"қатысқан|айналысқан|занимал|ходил", re.IGNORECASE)
-_CLARIFY_MARKERS = ("1. Айналыспаға", "1. Не занимал")
 
-_YES = {"да", "иә", "ия", "иа", "ok", "ок", "подтверждаю", "yes", "жарайды", "дұрыс", "дурыс", "растаймын"}
+_YES = {
+    "да", "ага", "угу", "ok", "ок", "окей", "okay", "yes", "подтверждаю", "подтверждаем", "согласен", "согласна",
+    "верно", "правильно", "конечно", "хорошо", "давай", "давайте", "записывайте",
+    "иә", "ия", "иа", "ие", "жарайды", "дұрыс", "дурыс", "растаймын", "растаймыз", "әрине", "жақсы", "келісемін",
+}
 _NO = {"нет", "жоқ", "жок", "no", "отмена", "бас тартамын", "бас тарту"}
 
 
@@ -574,10 +546,6 @@ _AGE_RE = re.compile(
     r"|\b(\d{1,2})\s*(?:лет|жас)(?:\s+мне|\s+маған)?\b",
     re.IGNORECASE,
 )
-_SELF_SIGNUP_RE = re.compile(
-    r"\b(?:мне|я\s+хочу|хочу\s+записаться|хочу\s+заниматься|маған|өзім|мен\s+қатысамын|жасым)\b",
-    re.IGNORECASE,
-)
 # A parent also says «мне/маған» ("маған баламды жаздыру керек"), so a child
 # mentioned in the same message overrides the self-signup markers above.
 # "сын" is matched by exact forms only — «сынақ» is Kazakh for "trial".
@@ -603,53 +571,30 @@ _NAME_TAIL_RE = re.compile(
 _KK_COPULA_RE = re.compile(r"^(\w{2,}?)(?:пын|бын|мын|пін|бін|мін)$", re.IGNORECASE)
 
 # ── Audience: children's group or the adult group ──
-# From this age the boxing student goes to the adult group.
-ADULT_MIN_AGE = 18
-# An age this high in a children's signup can be the parent's own («мне 35
-# лет, хочу записать сына»), never the child's.
-PARENT_MIN_AGE = 19
+# Ages of the children's and the adult group. An age outside the chosen
+# group's range ends the signup with the admin's number.
+CHILD_AGES = (3, 16)
+ADULT_AGES = (17, 60)
+ADULT_MIN_AGE = ADULT_AGES[0]
 _AUDIENCE_CHOICES = {"1": "child", "2": "adult"}
 # Asking for the adult group in words — wins over everything else.
 _ADULT_GROUP_RE = re.compile(
-    r"ересек\w*|взросл\w*|для\s+себя|өзім\s+үшін|өзіме|18\s*\+|старше\s+1[78]",
+    r"ересек\w*|взросл\w*|\bсебя\b|\bсам[аи]?\b|\bөзім\w*|18\s*\+|старше\s+1[78]",
     re.IGNORECASE,
 )
 _CHILD_GROUP_RE = re.compile(r"детск\w*|балалар\s+тоб\w*", re.IGNORECASE)
-# «25 жастамын», «мен 30 жаста», «мне 25 лет». A range («10-18 жас») is
-# stripped first — it describes a group, not a person.
-# «бұл уақыт маған келмейді», «не подходит», «другое время есть?» — the
-# offered schedule doesn't suit the client.
-_SCHEDULE_DOESNT_FIT_RE = re.compile(
-    r"келмейді|келмейд|ыңғайсыз|сәйкес емес|басқа уақыт|"
-    r"не подход|не устраива|неудобн|не получится|не смогу|друго[ей] врем",
-    re.IGNORECASE,
-)
 _PERSON_AGE_RE = re.compile(r"\b(\d{1,2})\s*(?:лет|года?|жас\w*)", re.IGNORECASE)
 _AGE_RANGE_RE = re.compile(r"\d{1,2}\s*[-–—]\s*\d{1,2}")
 
 
 def _loc(lang: str, key: str, **fmt) -> str:
     table = _BOT_TEXTS.get(_current_bot.get(), {})
-    if _current_actor.get() == "self" and f"{key}_self" in T:
-        key = f"{key}_self"
+    actor = _current_actor.get()
+    if actor in ("self", "other") and (f"{key}_{actor}" in table or f"{key}_{actor}" in T):
+        key = f"{key}_{actor}"
     entry = table.get(key) or T[key]
     text = entry.get(lang) or entry["ru"]
     return text.format(**fmt) if fmt else text
-
-
-def _birth_year_from_age(text: str, today: date | None = None) -> int | None:
-    today = today or today_almaty()
-    # _ages_in also reads «8 жаста» / «16 жастамын», which _AGE_RE misses.
-    for age in _ages_in(text):
-        # The children's range check is _birth_year_rejection's: an age just
-        # outside it (a 16- or 17-year-old) still reaches it, so the client is
-        # told why instead of being asked again. 18+ is left to
-        # _detect_audience — it may be a parent's own age («мне 35 лет,
-        # хочу записать сына»), never the child's birth year.
-        if 3 <= age < PARENT_MIN_AGE:
-            return today.year - age
-        _log_rejected("child_age", "implausible", age)
-    return None
 
 
 def _ages_in(text: str | None) -> list[int]:
@@ -698,17 +643,6 @@ def _audience_choice(text: str | None) -> str | None:
     return _AUDIENCE_CHOICES.get(low) or _detect_audience(low)
 
 
-def _audience_in_history(history: list) -> str | None:
-    """The group named in an earlier client message — «ересектерге бокс бар
-    ма?» followed by «жазылғым келеді». Newest message first."""
-    for message in reversed(history or []):
-        if message.get("role") == "user":
-            found = _detect_audience(message.get("content"))
-            if found:
-                return found
-    return None
-
-
 def _stored_audience(draft: dict) -> str | None:
     """The draft's group. A draft from before the group choice existed that
     already holds a child's birth year is a children's signup."""
@@ -719,35 +653,12 @@ def _stored_audience(draft: dict) -> str | None:
     return None
 
 
-def _waiting_field(draft: dict, audience: str | None) -> str | None:
-    """The question the flow is waiting on: the group, or a missing field.
-
-    An adult picks the class first and is asked the name after it, so the
-    name is only "being answered" once a class is chosen — before that a «3»
-    is a pick from the list, not a name.
-    """
-    if audience is None:
-        return "audience"
-    if audience == "adult":
-        if draft.get("group_id") and not _is_plausible_child_name(draft.get("child_name")):
-            return "child_name"
-        return None
-    return _missing_prerequisite(_draft_to_data(draft))
-
-
 # «балам емес, өзім қатысамын», «не для ребёнка» — a child named only to say
 # it is not one.
 _NOT_A_CHILD_RE = re.compile(
     r"\b(?:бала\w*|ұлым\w*|қызым\w*)\s+емес\b|\bне\s+(?:для\s+)?(?:реб[её]н\w*|сын\w*|доч\w*|дет\w*)",
     re.IGNORECASE,
 )
-
-
-def _signup_actor(text: str | None) -> str | None:
-    text = _NOT_A_CHILD_RE.sub(" ", text or "")
-    if _CHILD_SUBJECT_RE.search(text):
-        return None
-    return "self" if _SELF_SIGNUP_RE.search(text) else None
 
 
 def _strip_name_lead(text: str) -> str:
@@ -768,48 +679,6 @@ def _is_my_trial_query(text: str) -> bool:
     """
     lower = (text or "").lower()
     return any(kw in lower for kw in _MY_TRIAL_KW)
-
-
-def _signup_actor_in(history: list, user_text: str) -> str | None:
-    """_signup_actor over everything the client wrote — the flow keeps no
-    session to remember an earlier «мне 15 лет»."""
-    texts = [m.get("content") or "" for m in history or [] if m.get("role") == "user"]
-    return _signup_actor("\n".join([*texts, user_text or ""]))
-
-
-def _extract_user_data(
-    history: list,
-    user_text: str,
-    waiting_for: str | None = None,
-) -> tuple[dict, dict[str, tuple[str, object]]]:
-    """LLM extraction, plus a local parse of the one field being asked for.
-
-    The local parse is limited to `waiting_for`: run on every message it read
-    a list choice like "2" as a level or a shift.
-
-    Returns ``(extracted, rejected)`` — see _drop_invalid_fields.
-    """
-    extracted = extract_trial_details(history, user_text)
-    if not extracted.get("child_birth_year"):
-        extracted["child_birth_year"] = _birth_year_from_age(user_text)
-    rejected = _drop_invalid_fields(extracted)
-    if waiting_for and not extracted.get(waiting_for) and waiting_for not in rejected:
-        manual = _normalize_manual_value(waiting_for, user_text)
-        if manual is not None and waiting_for == "child_birth_year":
-            reason = _birth_year_rejection(manual)
-            if reason:
-                _log_rejected(waiting_for, reason, manual,
-                              allowed_age="{}-{}".format(*_child_age_limits()))
-                rejected[waiting_for] = (reason, manual)
-                manual = None
-        elif manual is None and waiting_for == "child_name":
-            # _is_plausible_child_name has already logged the reason.
-            rejected[waiting_for] = (_child_name_rejection(user_text) or "empty", user_text)
-        elif manual is None:
-            _log_rejected(waiting_for, "unrecognized", user_text)
-            rejected[waiting_for] = ("unrecognized", user_text)
-        extracted[waiting_for] = manual
-    return extracted, rejected
 
 
 _LATIN_TO_CYRILLIC = (
@@ -849,27 +718,11 @@ def _draft_idle(draft: dict) -> timedelta | None:
     return datetime.now(timezone.utc) - updated_at
 
 
-def is_draft_in_progress(draft: dict) -> bool:
-    """True while the client is still filling this draft in: a reply within
-    TRIAL_IN_PROGRESS_SECONDS answers the last question. Later the draft's
-    data is still reused, until it is abandoned (is_draft_abandoned)."""
-    idle = _draft_idle(draft)
-    return idle is None or idle <= timedelta(seconds=config.TRIAL_IN_PROGRESS_SECONDS)
-
-
 def is_draft_abandoned(draft: dict) -> bool:
     """True once nobody touched the draft for TRIAL_DRAFT_KEEP_SECONDS — it is
-    then cancelled and its answers kept as a summary (abandon_draft)."""
+    then cancelled (abandon_draft)."""
     idle = _draft_idle(draft)
     return idle is not None and idle > timedelta(seconds=config.TRIAL_DRAFT_KEEP_SECONDS)
-
-
-def _restored_details(answers: dict, lang: str) -> str:
-    parts = [answers.get("child_name")]
-    if answers.get("child_birth_year"):
-        parts.append(f"{answers['child_birth_year']} {'г.р.' if lang == 'ru' else 'ж.т.'}")
-    parts += [_level_label(answers.get("experience"), lang), _shift_label(answers.get("school_shift"), lang)]
-    return ", ".join(str(p) for p in parts if p)
 
 
 # States of the session the LLM flow used to keep. It keeps none now; a row
@@ -905,17 +758,6 @@ def _normalize_manual_value(field: str, text: str):
         return None
     if field == "school_shift":
         return _SHIFT_ALIASES.get(low) or shift_from_text(low)
-    if field == "child_birth_year":
-        parts = low.replace(",", " ").replace(".", " ").split()
-        years = [int(part) for part in parts if part.isdigit() and len(part) == 4]
-        if years:
-            return years[-1]
-        # A bare age in reply to «неше жаста?» — «8», «8 жас»; the range is
-        # _birth_year_rejection's to check.
-        ages = [int(part) for part in parts if part.isdigit() and len(part) <= 2]
-        if len(ages) == 1:
-            return today_almaty().year - ages[0]
-        return None
     if field == "child_name":
         name = _strip_name_lead(text)
         if not _is_plausible_child_name(name):
@@ -926,75 +768,40 @@ def _normalize_manual_value(field: str, text: str):
 
 # academy_trials.child_name is VARCHAR(30); a longer value fails the UPDATE.
 CHILD_NAME_MAX_LEN = trial_service.TRIAL_TEXT_LIMITS["child_name"]
-# Fallback age window, used only when the bot's children's groups list no
-# birth years (or no bot is in context). Otherwise _child_age_limits takes
-# the window from the groups.
-CHILD_MIN_AGE = 5
-CHILD_MAX_AGE = 18
 
 
-def _child_age_limits(today: date | None = None) -> tuple[int, int]:
-    """(youngest, oldest) child age this bot's children's groups take."""
-    bot_name = _current_bot.get()
-    found = trial_logic.child_age_range(bot_name, today) if bot_name else None
-    min_age, max_age = found or (CHILD_MIN_AGE, CHILD_MAX_AGE)
-    if bot_name and academy_repo.get_groups_info(bot_name=bot_name, audience="adult"):
-        max_age = min(max_age, ADULT_MIN_AGE - 1)
-    return min_age, max_age
+# «хочу записаться», «запишите меня», «жазылғым келеді» — the client signs up
+# themselves; «записать сына / друга», «баламды жазу» — someone else.
+_SIGNUP_SELF_RE = re.compile(r"записат[ьс]ся|запишусь|запиши(?:те)?\s+меня|меня\s+записать|жазыл\w*",
+                             re.IGNORECASE)
+_SIGNUP_OTHER_RE = re.compile(r"записать\b|запиши(?:те)?\b|жазу\b|жазғ\w*|жаздыр\w*", re.IGNORECASE)
 
 
-def _audience_prompt(lang: str) -> str:
-    min_age, max_age = _child_age_limits()
-    return _loc(lang, "choose_audience", min_age=min_age, max_age=max_age)
+def _signup_for_self(user_text: str | None, history: list | None = None) -> bool:
+    """False when the latest message that says who signs up names someone
+    else; True for the client themselves or when no message says."""
+    texts = [user_text] + [m.get("content") for m in reversed(history or []) if m.get("role") == "user"]
+    for text in texts:
+        low = (text or "").lower()
+        if _CHILD_SUBJECT_RE.search(_NOT_A_CHILD_RE.sub(" ", low)):
+            return False
+        if _SIGNUP_SELF_RE.search(low):
+            return True
+        if _SIGNUP_OTHER_RE.search(low):
+            return False
+    return True
+
+
+def _audience_prompt(lang: str, user_text: str | None = None, history: list | None = None) -> str:
+    key = "choose_audience_self" if _signup_for_self(user_text, history) else "choose_audience"
+    return _loc(lang, key, child_min=CHILD_AGES[0], child_max=CHILD_AGES[1],
+                adult_min=ADULT_AGES[0], adult_max=ADULT_AGES[1])
 
 
 def _log_rejected(field: str, reason: str, value, **context) -> None:
     """One log format for every intake value the flow refuses to store."""
     extra = "".join(f" {k}={v}" for k, v in context.items())
     logger.info("[TRIAL] %s rejected: reason=%s%s value=%r", field, reason, extra, value)
-
-
-def _birth_year_rejection(value, today: date | None = None) -> str | None:
-    """Return why `value` is not a usable child birth year, or None if it is."""
-    try:
-        year = int(value)
-    except (TypeError, ValueError):
-        return "not_a_year"
-    current = (today or today_almaty()).year
-    if year > current:
-        return "in_future"
-    min_age, max_age = _child_age_limits(today)
-    if current - year < min_age:
-        return "too_young"
-    if current - year > max_age:
-        return "too_old"
-    return None
-
-
-def _drop_invalid_fields(extracted: dict) -> dict[str, tuple[str, object]]:
-    """Null out extracted values that break a restriction.
-
-    Returns ``{field: (reason, rejected_value)}`` so the caller can tell the
-    client why the field is asked again.
-    """
-    rejected = {}
-    name = extracted.get("child_name")
-    if name:
-        reason = _child_name_rejection(name)
-        if reason:
-            _log_rejected("child_name", reason, name,
-                          len=len(name.strip()), max_len=CHILD_NAME_MAX_LEN)
-            rejected["child_name"] = (reason, name)
-            extracted["child_name"] = None
-    year = extracted.get("child_birth_year")
-    if year not in (None, ""):
-        reason = _birth_year_rejection(year)
-        if reason:
-            _log_rejected("child_birth_year", reason, year,
-                          allowed_age="{}-{}".format(*_child_age_limits()))
-            rejected["child_birth_year"] = (reason, year)
-            extracted["child_birth_year"] = None
-    return rejected
 
 
 def _child_name_rejection(text: str | None) -> str | None:
@@ -1011,6 +818,7 @@ def _child_name_rejection(text: str | None) -> str | None:
         "что это", "какой это", "кто ты", "что ты", "хочу", "запис",
         "пробн", "занят", "распис", "бот", "можно", "сколько",
         "емес", "қатыс", "өзім", "жасым", "деңгей",
+        "сынақ", "сабақ", "жазыл", "жаттығ", "тренир", "бокс", "футбол",
     )
     if any(fragment in lowered for fragment in blocked_fragments):
         return "blocked_phrase"
@@ -1039,8 +847,8 @@ def is_greeting(text: str) -> bool:
 
 
 def is_acknowledgement(text: str) -> bool:
-    normalized = " ".join((text or "").lower().replace("!", " ").replace(".", " ").split())
-    return normalized in _ACKNOWLEDGEMENTS
+    words = (text or "").lower().replace("!", " ").replace(".", " ").replace(",", " ").split()
+    return bool(words) and all(word in _ACKNOWLEDGEMENTS for word in words)  # «ок ок»
 
 
 def is_bot_identity_question(text: str) -> bool:
@@ -1105,40 +913,41 @@ def _draft_to_data(draft: dict) -> dict:
     }
 
 
-def _merge(base: dict, patch: dict) -> dict:
-    merged = dict(base)
-    for key, value in patch.items():
-        if value not in (None, ""):
-            merged[key] = value
-    return merged
-
-
-_INTAKE_ORDER = ("child_name", "child_birth_year", "experience", "school_shift")
-# Boxing asks the age first: it is what tells whether a group fits, so a
-# parent hears it before giving the rest. Football keeps its order.
-_BOT_INTAKE_ORDER = {
-    "dopsy_boxing": ("child_birth_year", "child_name", "experience", "school_shift"),
-}
-
-
-def _missing_prerequisite(data: dict) -> str | None:
-    for key in _BOT_INTAKE_ORDER.get(_current_bot.get(), _INTAKE_ORDER):
-        if data.get(key) in (None, ""):
-            return key
-    return None
-
-
-def _ask_missing(lang: str, field: str, signup_actor: str | None = None) -> str:
+def _ask_missing(lang: str, field: str, signup_actor: str | None = None, history: list | None = None) -> str:
+    """The question for `field`. With `history` the LLM phrases the question
+    for this chat; the numbered options stay as written (the parsers read
+    them), and the fixed text is the fallback."""
     if field == "audience":
         return _audience_prompt(lang)
-    if field == "child_name" and signup_actor == "self":
-        return _loc(lang, "ask_name_self")
-    return _loc(lang, {
-        "child_name": "ask_name",
-        "child_birth_year": "ask_birth_year",
-        "experience": "ask_experience",
-        "school_shift": "ask_school_shift",
-    }[field])
+    # The "_self" / "_other" / neutral form of the question for this signup.
+    token = _current_actor.set(signup_actor)
+    try:
+        text = _loc(lang, {
+            "child_name": "ask_name",
+            "child_birth_year": "ask_birth_year",
+            "experience": "ask_experience",
+            "school_shift": "ask_school_shift",
+        }[field])
+        return _phrased(lang, text, history)
+    finally:
+        _current_actor.reset(token)
+
+
+def _phrased(lang: str, text: str, history: list | None) -> str:
+    """`text`'s question line phrased by the LLM for this chat, with its
+    numbered options kept as written; `text` itself without history or on
+    failure."""
+    if not history:
+        return text
+    question, *rest = text.split("\n")
+    options = [line for line in rest if re.match(r"\d+\.", line)]
+    try:
+        from chat import llm
+        phrased = llm.get_question_reply(lang, question, history, _current_actor.get())
+    except Exception:
+        logger.exception("trial question phrasing failed")
+        return text
+    return "\n".join([phrased, *options]) if phrased else text
 
 
 def _level_label(value: str | None, lang: str) -> str:
@@ -1221,86 +1030,6 @@ def _hhmm(value) -> str | None:
     return str(value)[:5] if value not in (None, "") else None
 
 
-def _chosen_slot_still_fits(draft: dict, slots: list[dict]) -> bool:
-    """The draft's chosen class is still on offer and the parent hasn't since
-    asked for a different date/time (e.g. picked another option from a list)."""
-    day, start = _iso_date(draft.get("trial_day")), _hhmm(draft.get("start_time"))
-    wanted_day, wanted_start = _iso_date(draft.get("preferred_date")), _hhmm(draft.get("preferred_time_start"))
-    if wanted_day not in (None, day) or wanted_start not in (None, start):
-        return False
-    return any(
-        int(s["group_id"]) == int(draft["group_id"])
-        and str(s["date"]) == day
-        and _hhmm(s["time_start"]) == start
-        for s in slots
-    )
-
-
-def _narrow(
-    slots: list[dict], draft: dict, lang: str, pick: bool = True, note_unavailable: bool = True,
-) -> tuple[dict | None, str]:
-    """Narrow `slots` by the parent's date/time (preferred_*).
-
-    date + time → that class; date only → that day's classes; time only → the
-    days with a class at that time; nothing → the list of days. Returns
-    ``(slot, "")`` when exactly one class matches what the parent asked for
-    (and `pick` is set), otherwise ``(None, options_text)``. A date/time that
-    matches nothing is dropped with a "not available" note.
-    """
-    wanted_day = _iso_date(draft.get("preferred_date"))
-    wanted_start = _hhmm(draft.get("preferred_time_start"))
-    unavailable = False
-
-    # A date already behind us is a leftover (an old draft or old history),
-    # not something the parent is asking for now — drop it silently.
-    if wanted_day and wanted_day < today_almaty().isoformat():
-        wanted_day = None
-    if wanted_day and wanted_day not in {str(s["date"]) for s in slots}:
-        unavailable, wanted_day = True, None
-    on_day = [s for s in slots if not wanted_day or str(s["date"]) == wanted_day]
-    matches = [s for s in on_day if not wanted_start or _hhmm(s["time_start"]) == wanted_start]
-    if not matches:
-        unavailable, wanted_start, matches = True, None, on_day
-
-    if pick and len(matches) == 1 and (wanted_day or wanted_start) and not unavailable:
-        return matches[0], ""
-
-    days = sorted({str(s["date"]) for s in matches})
-    if len(days) == 1:
-        body = (f"{_loc(lang, 'choose_slot', date=_fmt_date(days[0], lang))}"
-                f"\n\n{_group_lines_for_day(matches, lang)}")
-    else:
-        body = f"{_loc(lang, 'choose_day')}\n\n{_day_lines(days, lang)}"
-    if unavailable and note_unavailable:
-        return None, f"{_loc(lang, 'preferred_unavailable')}\n\n{body}"
-    return None, body
-
-
-def _day_lines(dates: list, lang: str) -> str:
-    return "\n".join(f"{i}. {_fmt_date(d, lang)}" for i, d in enumerate(dates, 1))
-
-
-def _group_lines_for_day(slots: list[dict], lang: str) -> str:
-    """Like _slot_lines, but the date is already fixed and known — every slot
-    here landed on the same day the user just picked, so repeating it on
-    every line would be pure clutter.
-    """
-    lines = []
-    labels = LEVEL_LABELS.get(lang, LEVEL_LABELS["ru"])
-    for i, slot in enumerate(slots, 1):
-        group = slot.get("group_name") or f"Group #{slot.get('group_id')}"
-        levels = slot.get("level") or []
-        if isinstance(levels, str):
-            levels = [levels]
-        localized_levels = [labels.get(level, level) for level in levels]
-        level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
-        lines.append(
-            f"{i}. {group} {str(slot['time_start'])[:5]}–{str(slot['time_end'])[:5]}{level_text}"
-            f"{_trainer_suffix(slot)}"
-        )
-    return "\n".join(lines)
-
-
 def _age_group_lines(slots: list[dict], lang: str) -> str:
     seen = set()
     unique = []
@@ -1353,59 +1082,13 @@ def _confirmation(draft: dict, lang: str, trainer: str | None = None) -> str:
         experience=_level_label(draft.get("experience"), lang),
         school_shift=_shift_label(draft.get("school_shift"), lang),
     )
-    return _with_trainer(body, trainer, lang) + _yes_no_hint(lang)
+    return _with_trainer(body, trainer, lang) + _change_hint(lang)
 
 
-def _yes_no_hint(lang: str) -> str:
-    # The boxing bot writes plain text, no *bold*.
-    if _current_bot.get() == "dopsy_boxing":
-        return "\n\nОтветьте «да» или «нет»." if lang == "ru" else "\n\n«Иә» немесе «жоқ» деп жауап беріңіз."
-    return "\n\nОтветьте *да* или *нет*." if lang == "ru" else "\n\n*Иә* немесе *жоқ* деп жауап беріңіз."
-
-
-def _adult_slot_lines(slots: list[dict], lang: str) -> str:
-    """«1. Сс 20.10.2026 — 19:15». The adult group's end time is technical
-    (time_end is NOT NULL) and is never shown."""
-    ordered = sorted(slots, key=lambda s: (str(s["date"]), _hhmm(s["time_start"])))
-    return "\n".join(
-        f"{i}. {_fmt_date(s['date'], lang)} — {_hhmm(s['time_start'])}{_trainer_suffix(s)}"
-        for i, s in enumerate(ordered, 1)
-    )
-
-
-def _narrow_adult(
-    slots: list[dict], draft: dict, lang: str, pick: bool = True, note_unavailable: bool = True,
-) -> tuple[dict | None, str]:
-    """_narrow for the adult group: a handful of classes, so the whole
-    schedule is listed with times at once instead of days first.
-
-    A weekday whose class has already started today («сенбі» on Saturday
-    afternoon) means that weekday's next class.
-    """
-    wanted_day = _iso_date(draft.get("preferred_date"))
-    wanted_start = _hhmm(draft.get("preferred_time_start"))
-    if wanted_day and wanted_day < today_almaty().isoformat():
-        wanted_day = None
-
-    def on_wanted_day(slot: dict) -> bool:
-        day = _iso_date(slot["date"])
-        if day == wanted_day:
-            return True
-        return (wanted_day not in {_iso_date(s["date"]) for s in slots}
-                and date.fromisoformat(day).weekday() == date.fromisoformat(wanted_day).weekday())
-
-    matches = [
-        s for s in slots
-        if (not wanted_day or on_wanted_day(s))
-        and (not wanted_start or _hhmm(s["time_start"]) == wanted_start)
-    ]
-    asked = bool(wanted_day or wanted_start)
-    if pick and asked and len(matches) == 1:
-        return matches[0], ""
-    body = _loc(lang, "adult_schedule", lines=_adult_slot_lines(matches or slots, lang))
-    if asked and not matches and note_unavailable:
-        return None, f"{_loc(lang, 'adult_unavailable')}\n\n{body}"
-    return None, body
+def _change_hint(lang: str) -> str:
+    """Under a summary: «да» confirms, a change is applied, anything else cancels."""
+    return "\n\nЕсли нужно что-то изменить, подскажите." if lang == "ru" else \
+        "\n\nБір нәрсені өзгерту керек болса, айтыңыз."
 
 
 def _adult_confirmation(draft: dict, lang: str, trainer: str | None = None) -> str:
@@ -1415,8 +1098,9 @@ def _adult_confirmation(draft: dict, lang: str, trainer: str | None = None) -> s
         date=_fmt_date(draft["trial_day"], lang),
         start=str(draft["start_time"])[:5],
         name=draft.get("child_name", ""),
+        birth_year=draft.get("child_birth_year", ""),
     )
-    return _with_trainer(body, trainer, lang) + _yes_no_hint(lang)
+    return _with_trainer(body, trainer, lang) + _change_hint(lang)
 
 
 def _numbered_list(text: str | None) -> bool:
@@ -1437,14 +1121,102 @@ def shorten_repeated_list(text: str | None, history: list | None, lang: str) -> 
     return text
 
 
+# ── Signup steps ──
+# Child: name → age → experience → school shift → class → confirm.
+# Adult: name → age → class → confirm. A step is "missing" while its draft
+# column is empty; the first missing one is asked.
+_CHILD_STEPS = ("child_name", "child_birth_year", "experience", "school_shift")
+_ADULT_STEPS = ("child_name", "child_birth_year")
+_LEVELS = ("Beginner", "Intermediate", "Advanced")
+_SHIFTS = ("morning", "afternoon", "kindergarten")
+_YEAR_RE = re.compile(r"\b(19[4-9]\d|20[0-4]\d)\b")
+_AGE_OR_YEAR_RE = re.compile(r"\d+\s*(?:лет|года?|г\.?р\.?|жас\w*|ж\.?т\.?)?", re.IGNORECASE)
+# A pick from a numbered list: «2», «2.», «№2», «2-ші».
+_PICK_RE = re.compile(r"^\s*(?:№\s*)?(\d{1,2})\s*(?:[.)]|-?(?:ші|шы|ой|ий|й|я))?\s*$", re.IGNORECASE)
+# «ему оказывается 15», «балам 9»: a bare number about a person, at the summary, is an age.
+_AGE_SUBJECT_RE = re.compile(
+    r"\b(?:ему|ей|мне|оған|маған|жасы\w*|балам\w*|ребён\w*|сын\w*|доч\w*|ұлым\w*|қызым\w*)\b", re.IGNORECASE,
+)
+# «поменяйте время», «басқа күн»: a change at the summary that names nothing new.
+_CHANGE_RE = re.compile(r"измен|помен|друг|перенес|басқа|өзгерт|ауыстыр", re.IGNORECASE)
+_LIST_LINE_RE = re.compile(r"^\s*(\d{1,2})\.\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _age_of(year) -> int:
+    return today_almaty().year - int(year)
+
+
+def _years_in_text(text: str | None, answering_age: bool) -> list[int]:
+    """Birth years the message states: «2016», «8 лет» / «8 жаста», or a bare
+    «8» given in reply to the age question."""
+    years = [int(y) for y in _YEAR_RE.findall(text or "")]
+    ages = _ages_in(text)
+    if not years and not ages and answering_age:
+        bare = re.findall(r"\b\d{1,2}\b", text or "")
+        ages = [int(bare[0])] if len(bare) == 1 else []
+    return years + [today_almaty().year - age for age in ages]
+
+
+def _class_line(slot: dict, lang: str, adult: bool) -> str:
+    """«Пн 27.10.2026 — 17:00–18:00 — Тренер». The adult group's end time is
+    technical (time_end is NOT NULL) and is never shown."""
+    time_text = _hhmm(slot["time_start"]) if adult else f"{_hhmm(slot['time_start'])}–{_hhmm(slot['time_end'])}"
+    return f"{_fmt_date(slot['date'], lang)} — {time_text}{_trainer_suffix(slot)}"
+
+
+def _class_list(slots: list[dict], lang: str, adult: bool) -> str:
+    lines = "\n".join(f"{i}. {_class_line(s, lang, adult)}" for i, s in enumerate(slots, 1))
+    return _loc(lang, "choose_class", lines=lines)
+
+
+def _picked_from_list(text: str | None, history: list | None, slots: list[dict], adult: bool) -> dict | None:
+    """The class a «2» picks: line 2 of the latest class list the client was
+    shown, so a list narrowed to one trainer keeps its own numbering."""
+    match = _PICK_RE.match(text or "")
+    if not match:
+        return None
+    number = int(match.group(1))
+    by_line = {_class_line(s, lang, adult): s for s in slots for lang in ("ru", "kk")}
+    for message in reversed(history or []):
+        if message.get("role") != "assistant":
+            continue
+        lines = {int(n): line for n, line in _LIST_LINE_RE.findall(message.get("content") or "")}
+        if any(line in by_line for line in lines.values()):
+            return by_line.get(lines.get(number))
+    return slots[number - 1] if 1 <= number <= len(slots) else None
+
+
+def _matching_classes(slots: list[dict], wanted_day: str | None, wanted_start: str | None) -> list[dict]:
+    """Classes on the day (or that weekday) and at the time the client named."""
+    if wanted_day and wanted_day < today_almaty().isoformat():
+        wanted_day = None
+    weekday = date.fromisoformat(wanted_day).weekday() if wanted_day else None
+    return [
+        s for s in slots
+        if (weekday is None or date.fromisoformat(_iso_date(s["date"])).weekday() == weekday)
+        and (not wanted_start or _hhmm(s["time_start"]) == wanted_start)
+    ]
+
+
+def _slot_on_offer(draft: dict, slots: list[dict]) -> bool:
+    """The draft's chosen class is still among `slots`."""
+    return any(
+        int(s["group_id"]) == int(draft["group_id"])
+        and _iso_date(s["date"]) == _iso_date(draft.get("trial_day"))
+        and _hhmm(s["time_start"]) == _hhmm(draft.get("start_time"))
+        for s in slots
+    )
+
+
 class LlmTrialFlowHandler:
     """
     LLM-driven trial-signup handler — the academy counterpart of
     LlmBookingFlowHandler.
 
     Main entry point: handle(). The draft row (phone + state='draft') is the
-    only flow state: every message is extracted, merged into the draft, and
-    the draft is evaluated again (_evaluate_and_respond).
+    only flow state: every message's answers are saved to the draft, then the
+    first missing step is asked (_evaluate_and_respond). A side question goes
+    through absorb(), so its answers are saved too.
     """
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1462,20 +1234,39 @@ class LlmTrialFlowHandler:
         lang: str,
     ) -> str:
         """Process one user message through the LLM trial flow."""
-        self._new_draft = False
-        self._restored_note = ""
-        # A trainer named here («Тимурдың уақыттары») narrows the class list.
-        self._user_text = user_text
-        token = _current_actor.set(_signup_actor_in(history, user_text))
+        self._new_draft = self._asks_about_trial = False
+        # The wording is about the child until the adult group is chosen.
+        token = _current_actor.set(None)
         try:
-            reply = shorten_repeated_list(
-                self._handle(chat_id, sender_phone, bot_name, user_text, history, lang), history, lang,
-            )
+            full = self._handle(chat_id, sender_phone, bot_name, user_text, history, lang)
+            reply = shorten_repeated_list(full, history, lang)
+            if reply != full:
+                # A bare "choose from the list" would ignore what the client
+                # just said — the LLM answers it in a word, then asks again.
+                reply = _phrased(lang, reply, [*(history or []), {"role": "user", "content": user_text}])
         finally:
             _current_actor.reset(token)
         # A new signup opens with "the trial is free", then the first question.
-        intro = _loc(lang, "trial_free_intro") if self._new_draft else ""
-        return "\n\n".join(part for part in (intro, self._restored_note, reply) if part)
+        # Only when the message is about the trial lesson or its price.
+        intro = _loc(lang, "trial_free_intro") if self._new_draft and self._asks_about_trial else ""
+        return f"{intro}\n\n{reply}" if intro else reply
+
+    @_bot_scoped
+    def absorb(
+        self,
+        chat_id: str,
+        sender_phone: str,
+        bot_name: str,
+        user_text: str,
+        history: list,
+        lang: str,
+    ) -> None:
+        """Save the signup answers a side question carries («8 жаста, бағасы
+        қанша?») so they are not asked again. Replies nothing — the question
+        is answered elsewhere."""
+        draft = academy_repo.get_existing_trial_draft(sender_phone, bot_name)
+        if draft:
+            self._save_answers(bot_name, draft, user_text, history, lang, answering=None)
 
     def _handle(
         self,
@@ -1497,28 +1288,19 @@ class LlmTrialFlowHandler:
             trial_service.abandon_draft(bot_name, chat_id, draft)
             draft, history = None, []
 
-        # ── 1. A draft with a chosen class: yes/no confirms or cancels it ──
-        if draft and draft.get("group_id") and not _waiting_field(draft, _stored_audience(draft)):
+        # ── 1. The summary: yes confirms, a change is applied, anything else cancels ──
+        at_summary = bool(draft) and self._next_step(bot_name, draft) == "confirm"
+        if at_summary:
             decision = _confirm_decision(user_text)
             if decision == "yes":
                 logger.info("[TRIAL] YES → confirm id=%d", draft["id"])
                 return self._confirm(chat_id, bot_name, draft, lang)
-            if decision == "no":
-                # A bare "no" to "is everything right?" — the answers are kept
-                # so a new signup doesn't ask them all again.
-                logger.info("[TRIAL] NO → cancel id=%d, answers kept", draft["id"])
-                trial_service.abandon_draft(bot_name, chat_id, draft, "user_declined_gated_trial")
-                return _loc(lang, "declined")
-            if decision == "cancel":
-                logger.info("[TRIAL] CANCEL → cancel id=%d", draft["id"])
-                trial_service.cancel_trial(bot_name, chat_id, draft["id"], "user_declined_gated_trial")
-                return _loc(lang, "declined")
+            if decision in ("no", "cancel"):
+                return self._decline(chat_id, bot_name, draft, lang)
 
-        # On the opening message — or when coming back to a stale draft —
-        # nothing has just been asked, so no field is "being answered": a
-        # sentence like «балама сынақ сабағы керек» must not be parsed as the
-        # child's name.
-        asked_before = bool(draft) and is_draft_in_progress(draft)
+        # The step this message answers. The opening message answers none: a
+        # sentence like «балама сынақ сабағы керек» must not become a name.
+        answering = self._next_step(bot_name, draft) if draft else None
         if not draft:
             result = trial_service.create_or_get_draft(bot_name, chat_id, sender_phone, lang)
             if not result["ok"]:
@@ -1527,124 +1309,285 @@ class LlmTrialFlowHandler:
                 return result.get("message") or _loc(lang, "no_groups")
             draft = result["data"]["trial"]
             self._new_draft = True
-            draft = self._restore_answers(bot_name, sender_phone, draft, lang)
 
-        if draft.get("child_name") and not _is_plausible_child_name(draft.get("child_name")):
-            result = trial_service.update_intake(bot_name, draft["id"], {"child_name": None, "language": lang})
+        interrupt = _session_interrupt_response(lang, user_text)
+        if interrupt:
+            return f"{interrupt}\n\n{self._evaluate_and_respond(chat_id, bot_name, draft, lang)}"
+
+        # ── 2. Save the answers ──
+        before = {key: draft.get(key) for key in (*_CHILD_STEPS, "group_id")}
+        draft, problem, wanted, error = self._save_answers(
+            bot_name, draft, user_text, history, lang, answering,
+        )
+        if error:
+            return error
+        if problem == "name_too_long":
+            return _loc(lang, "name_too_long", max_len=CHILD_NAME_MAX_LEN)
+        if isinstance(problem, int):
+            logger.info("[TRIAL] Age %d out of range — signup id=%d ends", problem, draft["id"])
+            trial_service.cancel_trial(bot_name, chat_id, draft["id"], "age_out_of_range")
+            return self._age_no_group(bot_name, problem, lang)
+        if at_summary:
+            # Another day, time or trainer, or «поменяйте время»: the class
+            # is picked again. A message that changes nothing cancels.
+            changed = any(draft.get(key) != value for key, value in before.items())
+            repick = (any(wanted) or _CHANGE_RE.search(user_text or "")
+                      or _trainer_named(user_text, self._class_slots(bot_name, draft)))
+            if not changed and not repick:
+                return self._decline(chat_id, bot_name, draft, lang)
+            if repick and draft.get("group_id"):
+                result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
+                if not result["ok"]:
+                    return result.get("message") or _loc(lang, "no_groups")
+                draft = result["data"]["trial"]
+
+        # ── 3. Next step ──
+        return self._evaluate_and_respond(
+            chat_id, bot_name, draft, lang,
+            user_text=user_text, history=history, wanted=wanted, picking=answering == "slot",
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Answers
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _save_answers(
+        self, bot_name: str, draft: dict, user_text: str, history: list, lang: str, answering: str | None,
+    ) -> tuple[dict, str | int | None, tuple, str | None]:
+        """Read the message's answers into the draft.
+
+        Returns ``(draft, problem, wanted, error)``: problem is the age that
+        fits no group (int) or "name_too_long", wanted the (date, time) the
+        client named, error a reply when the save failed.
+        """
+        fields, problem, wanted = self._answers(bot_name, draft, user_text, history, answering)
+        if not fields:
+            return draft, problem, wanted, None
+        # A new age, level or shift can make the chosen class unfit.
+        if draft.get("group_id") and set(fields) & {"child_birth_year", "experience", "school_shift"}:
+            fields.update(_CLEARED_SLOT)
+        logger.info("[TRIAL] Saving for id=%d: %s", draft["id"], fields)
+        result = trial_service.update_intake(bot_name, draft["id"], {**fields, "language": lang})
+        if not result["ok"]:
+            return draft, None, wanted, result.get("message") or _loc(lang, "no_groups")
+        return result["data"]["trial"], problem, wanted, None
+
+    def _answers(
+        self, bot_name: str, draft: dict, user_text: str, history: list, answering: str | None,
+    ) -> tuple[dict, str | int | None, tuple]:
+        """The draft fields the message gives, plus (problem, wanted).
+
+        The step being answered is read from the message itself («8», «2»).
+        Anything else is taken only when the message plainly states it, and a
+        field already filled changes only to a value the message states.
+        """
+        extracted = extract_trial_details(history, user_text)
+        self._asks_about_trial = bool(extracted.get("asks_about_trial_or_price"))
+        wanted =(_iso_date(extracted.get("preferred_date")), _hhmm(extracted.get("preferred_time_start")))
+        fields, problem = {}, None
+
+        audience = _stored_audience(draft)
+        if not self._offers_adult_group(bot_name):
+            audience = "child"
+        elif audience is None:
+            audience = (_audience_choice(user_text) if answering == "audience" else _detect_audience(user_text)) \
+                or (extracted.get("audience") if extracted.get("audience") in ("child", "adult") else None)
+        if audience and audience != draft.get("audience"):
+            fields["audience"] = audience
+        # Who signs up — the latest statement wins.
+        if extracted.get("signup_for") in ("self", "other") and extracted["signup_for"] != draft.get("signup_for"):
+            fields["signup_for"] = extracted["signup_for"]
+        if audience is None:
+            return fields, None, wanted
+
+        # Name — the extractor's, so a remark like «не меня а сына» is never
+        # saved as one. The raw text is only checked for length.
+        name = None
+        bare_text = _AGE_OR_YEAR_RE.sub(" ", user_text or "").strip(" ,.;-")
+        if (answering == "child_name" and bare_text
+                and _normalize_manual_value("child_name", bare_text) is None
+                and _child_name_rejection(_strip_name_lead(bare_text)) == "too_long"):
+            problem = "name_too_long"
+        candidate = extracted.get("child_name")
+        if (not name and candidate and not re.search(r"\d", candidate)
+                and _is_plausible_child_name(candidate)
+                and (answering == "child_name" or not _is_trainer_name(bot_name, candidate))
+                and (not draft.get("child_name") or candidate.lower() in (user_text or "").lower())):
+            name = candidate
+        if name and name != draft.get("child_name"):
+            fields["child_name"] = name
+
+        # Age, kept as a birth year. Outside the group's range it is the
+        # parent's own («мне 35, хочу записать сына») — unless it answers
+        # the age question or corrects the summary.
+        low, high = ADULT_AGES if audience == "adult" else CHILD_AGES
+        answering_age = answering == "child_birth_year" or (
+            answering == "confirm" and bool(_AGE_SUBJECT_RE.search(user_text or "")))
+        years = _years_in_text(user_text, answering_age)
+        fitting = [y for y in years if low <= _age_of(y) <= high]
+        year = fitting[-1] if fitting else None
+        if year is None and years and answering in ("child_birth_year", "confirm"):
+            age = _age_of(years[-1])
+            if (audience == "child" and ADULT_AGES[0] <= age <= ADULT_AGES[1]
+                    and self._offers_adult_group(bot_name)):
+                # Too old for the children — the same signup moves on to the
+                # adult group, keeping what was already given.
+                fields["audience"] = audience = "adult"
+                year = years[-1]
+            else:
+                problem = age
+        if year is None and not draft.get("child_birth_year"):
+            try:
+                guess = int(extracted.get("child_birth_year") or 0)
+            except (TypeError, ValueError):
+                guess = 0
+            if guess and low <= _age_of(guess) <= high:
+                year = guess
+        if year and year != draft.get("child_birth_year"):
+            fields["child_birth_year"] = year
+
+        # Level and school shift (children only)
+        if audience == "child":
+            for field, allowed in (("experience", _LEVELS), ("school_shift", _SHIFTS)):
+                stated = _normalize_manual_value(field, user_text)
+                value = stated if answering == field else None
+                # «поменяйте смену на утреннюю»: a change the message itself states.
+                guess = extracted.get(field) if extracted.get(field) in allowed else None
+                if value is None and guess and (not draft.get(field) or guess == stated):
+                    value = guess
+                if value and value != draft.get(field):
+                    fields[field] = value
+        return fields, problem, wanted
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  Steps
+    # ══════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _decline(chat_id: str, bot_name: str, draft: dict, lang: str) -> str:
+        logger.info("[TRIAL] Summary declined → cancel id=%d", draft["id"])
+        trial_service.cancel_trial(bot_name, chat_id, draft["id"], "user_declined_gated_trial")
+        return _loc(lang, "declined")
+
+    def _audience(self, bot_name: str, draft: dict) -> str | None:
+        audience = _stored_audience(draft)
+        if audience is None and not self._offers_adult_group(bot_name):
+            return "child"
+        return audience
+
+    def _signup_actor(self, bot_name: str, draft: dict, user_text: str | None = None,
+                      history: list | None = None) -> str | None:
+        """"self" when the client signs up themselves, in either group — the
+        draft's signup_for, saved from the extractor. Not known yet: the adult
+        group is the client's own unless the chat names someone else."""
+        if draft.get("signup_for") in ("self", "other"):
+            return draft["signup_for"]
+        if self._audience(bot_name, draft) == "adult" and _signup_for_self(user_text, history):
+            return "self"
+        return None
+
+    def _next_step(self, bot_name: str, draft: dict) -> str:
+        """"audience", a missing field, "slot" or "confirm"."""
+        audience = self._audience(bot_name, draft)
+        if audience is None:
+            return "audience"
+        data = _draft_to_data(draft)
+        for field in _ADULT_STEPS if audience == "adult" else _CHILD_STEPS:
+            if data.get(field) in (None, ""):
+                return field
+        return "confirm" if draft.get("group_id") else "slot"
+
+    @_bot_scoped
+    def _evaluate_and_respond(
+        self,
+        chat_id: str,
+        bot_name: str,
+        draft: dict,
+        lang: str,
+        signup_actor: str | None = None,
+        user_text: str | None = None,
+        history: list | None = None,
+        wanted: tuple | None = None,
+        picking: bool = False,
+    ) -> str:
+        """The reply for the draft's first missing step.
+
+        At the class step a «2» from the list (`picking`) or a day/time the
+        client named (`wanted`; by default the draft's preferred_*, which an
+        edit of a confirmed trial carries) that fits one class picks it;
+        otherwise the list is shown, narrowed to a trainer the message names.
+        """
+        if wanted is None:
+            wanted = (_iso_date(draft.get("preferred_date")), _hhmm(draft.get("preferred_time_start")))
+        step = self._next_step(bot_name, draft)
+        if step == "audience":
+            return _audience_prompt(lang, user_text, history)
+        adult = self._audience(bot_name, draft) == "adult"
+        signup_actor = self._signup_actor(bot_name, draft, user_text, history)
+        _current_actor.set(signup_actor)
+        if step not in ("slot", "confirm"):
+            return _ask_missing(lang, step, signup_actor, history)
+
+        slots, note = self._class_slots(bot_name, draft), None
+        if not slots:
+            return self._no_classes(bot_name, draft, lang, signup_actor)
+        if step == "confirm":
+            if _slot_on_offer(draft, slots):
+                return self._summary(draft, slots, lang, adult)
+            result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
             if not result["ok"]:
                 return result.get("message") or _loc(lang, "no_groups")
             draft = result["data"]["trial"]
 
-        # Only a bot with an adult group asks which group; elsewhere every
-        # signup is a children's one.
-        offers_adult = self._offers_adult_group(bot_name)
-        audience = _stored_audience(draft) if offers_adult else "child"
-        signup_actor = "self" if audience == "adult" else _signup_actor_in(history, user_text)
-        waiting_for = _waiting_field(draft, audience)
-        interrupt = _session_interrupt_response(lang, user_text, waiting_for, signup_actor)
-        if interrupt:
-            if waiting_for:
-                return interrupt
-            return f"{interrupt}\n\n{self._evaluate_and_respond(chat_id, bot_name, draft, lang, signup_actor)}"
-
-        # ── 2. Extract and merge into the draft ──
-        field_asked = waiting_for if asked_before and waiting_for != "audience" else None
-        extracted, rejected = _extract_user_data(history, user_text, field_asked)
-        if (extracted.get("child_name") and draft.get("child_name")
-                and _is_trainer_name(bot_name, extracted["child_name"])):
-            _log_rejected("child_name", "trainer_name", extracted["child_name"], trial_id=draft["id"])
-            extracted["child_name"] = None
-        logger.info("[TRIAL] Extracted for id=%d: %s", draft["id"], extracted)
-
-        data = _merge(_draft_to_data(draft), extracted)
-        if offers_adult:
-            detected = self._detect_audience_change(
-                user_text, history, extracted, rejected, audience,
-                waiting_for if asked_before else None,
-            )
-            if detected and detected != audience:
-                if audience:
-                    # The other group's answers and class don't carry over.
-                    logger.info("[TRIAL] Audience %s → %s for id=%d", audience, detected, draft["id"])
-                    base = {**_draft_to_data(draft), "child_name": None, "child_birth_year": None,
-                            "experience": None, "school_shift": None}
-                    data = {**_merge(base, extracted), **_CLEARED_SLOT}
-                audience = detected
-        if audience:
-            data["audience"] = audience
-        result = trial_service.update_intake(bot_name, draft["id"], {**data, "language": lang})
-        if not result["ok"]:
-            return result.get("message") or _loc(lang, "no_groups")
-        draft = result["data"]["trial"]
-
-        if audience is None:
-            return _audience_prompt(lang)
-        if audience == "adult":
-            signup_actor = "self"
-            _current_actor.set("self")
-            if (not draft.get("group_id") and _SCHEDULE_DOESNT_FIT_RE.search(user_text or "")
-                    and not (draft.get("preferred_date") or draft.get("preferred_time_start"))):
-                note = _loc(lang, "adult_no_other_times", phone=ACADEMY_ADMIN_PHONES.get(bot_name, ""))
-                return f"{note}\n\n{self._evaluate_adult(bot_name, draft, lang)}"
-
-        # A value the client gave but the flow refused gets its own message,
-        # so the client knows why the same field is asked again.
-        missing = _waiting_field(draft, audience)
-        reason, bad_value = rejected.get(missing, (None, None))
-        if missing == "child_name" and reason == "too_long":
-            logger.info("[TRIAL] Asking chat_id=%s for a shorter child_name (max %d chars)",
-                        chat_id, CHILD_NAME_MAX_LEN)
-            return _loc(lang, "name_too_long", max_len=CHILD_NAME_MAX_LEN)
-        # Only a parseable-but-out-of-range year gets this message; a message
-        # with no year in it at all is a non-answer, and the field is re-asked.
-        if missing == "child_birth_year" and reason in ("in_future", "too_young", "too_old"):
-            min_age, max_age = _child_age_limits()
-            if reason == "too_old" and offers_adult:
-                age = today_almaty().year - int(bad_value)
-                if age >= PARENT_MIN_AGE:
-                    # Still a children's signup, so an adult's year is the
-                    # parent's own — ask for the child's age again.
-                    return self._evaluate_and_respond(chat_id, bot_name, draft, lang, signup_actor)
-                if age >= ADULT_MIN_AGE:
-                    # «балам 18 жаста» — old enough for the adult group.
-                    logger.info("[TRIAL] Age %d → adult group for id=%d", age, draft["id"])
-                    result = trial_service.update_intake(bot_name, draft["id"], {
-                        "audience": "adult", "child_birth_year": None, "experience": None,
-                        "school_shift": None, "language": lang})
-                    if not result["ok"]:
-                        return result.get("message") or _loc(lang, "no_groups")
-                    return self._evaluate_adult(bot_name, result["data"]["trial"], lang)
-                # Older than the children's groups but under 18: no group fits.
-                logger.info("[TRIAL] No group for age %d (children %d-%d, adults %d+) chat_id=%s",
-                            age, min_age, max_age, ADULT_MIN_AGE, chat_id)
-                return _loc(lang, "age_no_group", age=age, min_age=min_age, max_age=max_age,
-                            phone=ACADEMY_ADMIN_PHONES.get(bot_name, ""))
-            logger.info("[TRIAL] Asking chat_id=%s for a valid child_birth_year (age %d-%d)",
-                        chat_id, min_age, max_age)
-            return _loc(lang, "birth_year_invalid", year=bad_value,
-                        min_age=min_age, max_age=max_age)
-
-        note = ""
-        if field_asked == "experience":
-            if missing == "experience" and reason == "unrecognized":
-                last_bot = next((m.get("content") or "" for m in reversed(history or [])
-                                 if m.get("role") == "assistant"), "")
-                if not any(marker in last_bot for marker in _CLARIFY_MARKERS):
-                    return _loc(lang, "experience_clarify")
-                # Clarified once already: don't ask a third time.
-                texts = " ".join(m.get("content") or "" for m in history or [] if m.get("role") == "user")
-                level = "Intermediate" if _TRAINED_BEFORE_RE.search(f"{texts} {user_text}") else "Beginner"
-                logger.info("[TRIAL] Level still unclear after clarifying → %s id=%d", level, draft["id"])
-                result = trial_service.update_intake(bot_name, draft["id"], {"experience": level, "language": lang})
-                if not result["ok"]:
-                    return result.get("message") or _loc(lang, "no_groups")
-                draft = result["data"]["trial"]
-            elif draft.get("experience") == "Beginner" and _NEVER_TRAINED_RE.search(user_text or ""):
-                note = _loc(lang, "beginner_note")
-
-        # ── 3. Evaluate ──
-        reply = self._evaluate_and_respond(chat_id, bot_name, draft, lang, signup_actor)
+        picked = _picked_from_list(user_text, history, slots, adult) if picking else None
+        shown = _only_trainer(slots, user_text)
+        if not picked and any(wanted):
+            matches = _matching_classes(shown, *wanted)
+            if len(matches) == 1:
+                picked = matches[0]
+            elif matches:
+                shown = matches
+            else:
+                note = _loc(lang, "adult_unavailable" if adult else "preferred_unavailable")
+        if picked:
+            result = trial_service.assign_slot(bot_name, draft["id"], picked)
+            if not result["ok"]:
+                return result.get("message") or _loc(lang, "no_groups")
+            return self._summary(result["data"]["trial"], slots, lang, adult)
+        reply = _class_list(shown, lang, adult)
         return f"{note}\n\n{reply}" if note else reply
+
+    def _class_slots(self, bot_name: str, draft: dict) -> list[dict]:
+        """The classes this signup can pick from, by date and time. Empty
+        until the intake is done."""
+        if self._next_step(bot_name, draft) not in ("slot", "confirm"):
+            return []
+        if self._audience(bot_name, draft) == "adult":
+            slots = trial_logic.get_adult_trial_slots(bot_name)
+        else:
+            slots = trial_logic.get_eligible_trial_slots(
+                bot_name, int(draft["child_birth_year"]), draft["school_shift"], experience=draft.get("experience"),
+            )
+        return sorted(slots, key=lambda s: (_iso_date(s["date"]), _hhmm(s["time_start"])))
+
+    @staticmethod
+    def _summary(draft: dict, slots: list[dict], lang: str, adult: bool) -> str:
+        trainer = _slot_trainer(draft, slots)
+        return _adult_confirmation(draft, lang, trainer) if adult else _confirmation(draft, lang, trainer)
+
+    def _no_classes(self, bot_name: str, draft: dict, lang: str, signup_actor: str | None) -> str:
+        if self._audience(bot_name, draft) == "adult":
+            return _loc(lang, "no_groups_call_admin")
+        age_slots = trial_logic.get_birth_year_trial_slots(bot_name, int(draft["child_birth_year"]))
+        return _no_groups_with_age_options(lang, age_slots, draft, signup_actor)
+
+    def _age_no_group(self, bot_name: str, age: int, lang: str) -> str:
+        unit = "лет" if lang == "ru" else "жас"
+        ranges = [("детская группа" if lang == "ru" else "балалар тобы") + f" — {CHILD_AGES[0]}–{CHILD_AGES[1]} {unit}"]
+        if self._offers_adult_group(bot_name):
+            ranges.append(("взрослая" if lang == "ru" else "ересектер тобы") + f" — {ADULT_AGES[0]}–{ADULT_AGES[1]} {unit}")
+        return _loc(lang, "age_no_group", age=age, ranges=", ".join(ranges),
+                    phone=ACADEMY_ADMIN_PHONES.get(bot_name, ""))
 
     def _confirm(self, chat_id: str, bot_name: str, draft: dict, lang: str) -> str:
         """Confirm the draft's chosen class, re-checking it still fits first."""
@@ -1671,179 +1614,34 @@ class LlmTrialFlowHandler:
         group = academy_repo.get_group_by_id(int(trial["group_id"])) if trial.get("group_id") else None
         trainer = (group or {}).get("trainer")
         if trial.get("audience") == "adult":
-            return _with_trainer(_loc(
+            body = _with_trainer(_loc(
                 lang,
                 "confirmed_adult",
                 date=_fmt_date(trial["trial_day"], lang),
                 start=str(trial["start_time"])[:5],
                 name=trial.get("child_name", ""),
             ), trainer, lang)
-        return _with_trainer(_loc(
-            lang,
-            "confirmed",
-            date=_fmt_date(trial["trial_day"], lang),
-            start=str(trial["start_time"])[:5],
-            end=str(trial["end_time"])[:5],
-            name=trial.get("child_name", ""),
-        ), trainer, lang)
-
-    def _restore_answers(self, bot_name: str, sender_phone: str, draft: dict, lang: str) -> dict:
-        """Prefill a new draft with the answers of the client's abandoned one."""
-        summary = academy_repo.get_trial_summary(sender_phone, bot_name)
-        answers = {f: summary.get(f) for f in academy_repo.SUMMARY_FIELDS
-                   if summary and summary.get(f) not in (None, "")}
-        if not answers:
-            return draft
-        result = trial_service.update_intake(bot_name, draft["id"], {**answers, "language": lang})
-        if not result["ok"]:
-            return draft
-        logger.info("[TRIAL] Restored %s into id=%d", sorted(answers), draft["id"])
-        details = _restored_details(answers, lang)
-        if details:
-            self._restored_note = _loc(lang, "restored_answers", details=details)
-        return result["data"]["trial"]
+        else:
+            body = _with_trainer(_loc(
+                lang,
+                "confirmed",
+                date=_fmt_date(trial["trial_day"], lang),
+                start=str(trial["start_time"])[:5],
+                end=str(trial["end_time"])[:5],
+                name=trial.get("child_name", ""),
+            ), trainer, lang)
+        # Every signup ends with what to bring to the first class.
+        body = "\n\n".join(part for part in (body, academy_what_to_bring(bot_name, lang)) if part)
+        location = academy_location(bot_name, lang)
+        return f"{body}\n\n{location}" if location else body
 
     @staticmethod
     def _offers_adult_group(bot_name: str) -> bool:
         return bool(academy_repo.get_groups_info(bot_name=bot_name, audience="adult"))
 
-    @staticmethod
-    def _detect_audience_change(
-        user_text: str,
-        history: list,
-        extracted: dict,
-        rejected: dict,
-        audience: str | None,
-        waiting_for: str | None,
-    ) -> str | None:
-        """The group this message points to, or None when it doesn't say.
-
-        A reply to the name question is not read for markers — «Балауса» would
-        otherwise look like «бала». A birth year the child flow refused as too
-        old still counts: 18+ means the adult group. The extractor's guess only
-        fills a group not chosen yet; switching takes a marker in this message.
-        """
-        if waiting_for == "audience":
-            choice = _audience_choice(user_text)
-            if choice:
-                return choice
-        year = extracted.get("child_birth_year") or rejected.get("child_birth_year", (None, None))[1]
-        if waiting_for == "child_name" and extracted.get("child_name"):
-            detected = None
-        else:
-            detected = _detect_audience(user_text, year)
-        if detected is None and audience is None:
-            detected = extracted.get("audience") or _audience_in_history(history)
-        return detected
-
-    def _assign_slot_and_confirm(
-        self, chat_id: str, bot_name: str, draft: dict, slot: dict, lang: str
-    ) -> str:
-        result = trial_service.assign_slot(bot_name, draft["id"], slot)
-        if not result["ok"]:
-            return result.get("message") or _loc(lang, "no_groups")
-        return _confirmation(result["data"]["trial"], lang, slot.get("trainer"))
-
     # ══════════════════════════════════════════════════════════════════════
-    #  Core Evaluation
+    #  Read-only views for the message handler
     # ══════════════════════════════════════════════════════════════════════
-
-    @_bot_scoped
-    def _evaluate_and_respond(
-        self,
-        chat_id: str,
-        bot_name: str,
-        draft: dict,
-        lang: str,
-        signup_actor: str | None = None,
-    ) -> str:
-        """Central dispatcher — the next reply follows from what the draft holds.
-
-        Counterpart of LlmBookingFlowHandler._evaluate_and_respond: no step
-        state, the draft alone decides. Intake comes first; after that the
-        parent's date/time (preferred_*) narrows the classes the child is
-        eligible for, and a single match is assigned straight away.
-        """
-        audience = _stored_audience(draft)
-        if audience is None:
-            if self._offers_adult_group(bot_name):
-                return _audience_prompt(lang)
-            audience = "child"
-        if audience == "adult":
-            return self._evaluate_adult(bot_name, draft, lang)
-
-        missing = _missing_prerequisite(_draft_to_data(draft))
-        if missing:
-            return _ask_missing(lang, missing, signup_actor)
-
-        slots, note = self._bookable_slots(bot_name, draft, lang)
-        if not slots:
-            age_slots = trial_logic.get_birth_year_trial_slots(bot_name, int(draft["child_birth_year"]))
-            return _no_groups_with_age_options(lang, age_slots, draft, signup_actor)
-
-        if draft.get("group_id"):
-            if _chosen_slot_still_fits(draft, slots):
-                return _confirmation(draft, lang, _slot_trainer(draft, slots))
-            result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
-            if not result["ok"]:
-                return result.get("message") or _loc(lang, "no_groups")
-            draft = result["data"]["trial"]
-
-        reply = self._narrow_slots(chat_id, bot_name, draft, slots, lang)
-        return f"{note}\n\n{reply}" if note else reply
-
-    def _evaluate_adult(self, bot_name: str, draft: dict, lang: str) -> str:
-        """The adult group: no age, level or school shift. The schedule comes
-        first, the name is asked once a class is picked."""
-        slots = trial_logic.get_adult_trial_slots(bot_name)
-        if not slots:
-            return _loc(lang, "no_groups_call_admin")
-        if draft.get("group_id"):
-            if _chosen_slot_still_fits(draft, slots):
-                return self._adult_next_step(draft, lang, _slot_trainer(draft, slots))
-            result = trial_service.update_intake(bot_name, draft["id"], {**_CLEARED_SLOT, "language": lang})
-            if not result["ok"]:
-                return result.get("message") or _loc(lang, "no_groups")
-            draft = result["data"]["trial"]
-
-        picked, text = _narrow_adult(_only_trainer(slots, getattr(self, "_user_text", None)), draft, lang)
-        if not picked:
-            return text
-        result = trial_service.assign_slot(bot_name, draft["id"], picked)
-        if not result["ok"]:
-            return result.get("message") or _loc(lang, "no_groups")
-        return self._adult_next_step(result["data"]["trial"], lang, picked.get("trainer"))
-
-    @staticmethod
-    def _adult_next_step(draft: dict, lang: str, trainer: str | None = None) -> str:
-        if not _is_plausible_child_name(draft.get("child_name")):
-            return _ask_missing(lang, "child_name", "self")
-        return _adult_confirmation(draft, lang, trainer)
-
-    @staticmethod
-    def _bookable_slots(bot_name: str, draft: dict, lang: str) -> tuple[list[dict], str | None]:
-        """Classes the child can join, plus a note when only a lower level fits.
-
-        The lower-level groups are listed right away rather than behind a
-        yes/no question — picking one is the parent's agreement.
-        """
-        year, shift, level = int(draft["child_birth_year"]), draft["school_shift"], draft.get("experience")
-        slots = trial_logic.get_eligible_trial_slots(bot_name, year, shift, experience=level)
-        if slots:
-            return slots, None
-        lower = trial_logic.get_fallback_trial_slots(bot_name, year, shift, level)
-        if not lower:
-            return [], None
-        return lower, _loc(lang, "fallback_shown", requested=_level_label(level, lang))
-
-    def _narrow_slots(
-        self, chat_id: str, bot_name: str, draft: dict, slots: list[dict], lang: str,
-    ) -> str:
-        """Assign the single class the parent's date/time points to, or list the options."""
-        picked, text = _narrow(_only_trainer(slots, getattr(self, "_user_text", None)), draft, lang)
-        if picked:
-            return self._assign_slot_and_confirm(chat_id, bot_name, draft, picked, lang)
-        return text
 
     @_bot_scoped
     def pending_prompt(
@@ -1857,30 +1655,23 @@ class LlmTrialFlowHandler:
         """
         if not draft:
             return None
-        audience = _stored_audience(draft)
-        if audience is None and self._offers_adult_group(bot_name):
-            return _audience_prompt(lang)
-        if audience == "adult":
-            slots = trial_logic.get_adult_trial_slots(bot_name)
+        step = self._next_step(bot_name, draft)
+        if step == "audience":
+            return _audience_prompt(lang, user_text)
+        adult = self._audience(bot_name, draft) == "adult"
+        signup_actor = self._signup_actor(bot_name, draft, user_text)
+        token = _current_actor.set(signup_actor)
+        try:
+            if step not in ("slot", "confirm"):
+                return _ask_missing(lang, step, signup_actor)
+            slots = self._class_slots(bot_name, draft)
             if not slots:
                 return None
-            if draft.get("group_id") and _chosen_slot_still_fits(draft, slots):
-                return self._adult_next_step(draft, lang, _slot_trainer(draft, slots))
-            _, text = _narrow_adult(_only_trainer(slots, user_text), draft, lang,
-                                    pick=False, note_unavailable=False)
-            return text
-        missing = _missing_prerequisite(_draft_to_data(draft))
-        if missing:
-            return _ask_missing(lang, missing)
-        slots, note = self._bookable_slots(bot_name, draft, lang)
-        if not slots:
-            return None
-        if draft.get("group_id") and _chosen_slot_still_fits(draft, slots):
-            return _confirmation(draft, lang, _slot_trainer(draft, slots))
-        # The "not available" note answered the message that asked for that
-        # date; repeating it under every later side answer would nag.
-        _, text = _narrow(_only_trainer(slots, user_text), draft, lang, pick=False, note_unavailable=False)
-        return f"{note}\n\n{text}" if note else text
+            if step == "confirm" and _slot_on_offer(draft, slots):
+                return _loc(lang, "confirm_or_questions")
+            return _class_list(_only_trainer(slots, user_text), lang, adult)
+        finally:
+            _current_actor.reset(token)
 
     @_bot_scoped
     def names_trainer(self, bot_name: str, draft: dict | None, user_text: str) -> bool:
@@ -1888,35 +1679,22 @@ class LlmTrialFlowHandler:
         can choose from — the flow then answers with that trainer's list."""
         if not draft:
             return False
-        if _stored_audience(draft) == "adult":
-            slots = trial_logic.get_adult_trial_slots(bot_name)
-        elif _missing_prerequisite(_draft_to_data(draft)):
-            return False
-        else:
-            slots, _ = self._bookable_slots(bot_name, draft, "ru")
-        return _trainer_named(user_text, slots) is not None
+        return _trainer_named(user_text, self._class_slots(bot_name, draft)) is not None
 
     @_bot_scoped
     def fitting_slots_context(self, bot_name: str, draft: dict | None) -> str | None:
         """The classes this signup can actually be booked into, for the LLM to
         answer day/time questions mid-signup — instead of the general schedule,
-        which mixes every trainer and age group. None until the flow knows
-        enough to filter (age, level, school shift)."""
+        which mixes every trainer and age group. None until the intake is done."""
         if not draft:
             return None
-        if _stored_audience(draft) == "adult":
-            slots = trial_logic.get_adult_trial_slots(bot_name)
-        elif _missing_prerequisite(_draft_to_data(draft)):
-            return None
-        else:
-            slots, _ = self._bookable_slots(bot_name, draft, "ru")
+        slots = self._class_slots(bot_name, draft)
         if not slots:
             return None
-        ordered = sorted(slots, key=lambda s: (str(s["date"]), _hhmm(s["time_start"])))
         lines = [
             f"  {_fmt_date(s['date'], 'ru')} {_hhmm(s['time_start'])}–{_hhmm(s['time_end'])}"
             f" — {s.get('group_name') or 'группа'}{_trainer_suffix(s)}"
-            for s in ordered
+            for s in slots
         ]
         return (
             "Занятия, на которые можно записать этого клиента (возраст, уровень и смена уже учтены). "

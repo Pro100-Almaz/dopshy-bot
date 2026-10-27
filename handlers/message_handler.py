@@ -18,7 +18,7 @@ from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_abandoned, is_draft_in_progress
+from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_abandoned
 from handlers.llm_trial_flow import is_greeting as is_trial_greeting
 from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
 from handlers.llm_trial_flow import confirm_decision as confirm_trial_decision
@@ -29,7 +29,7 @@ from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChan
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations import trial_service
 from integrations.repo.academy_repo import get_existing_trial_draft
-from integrations.repo.bot_pause_repo import is_bot_paused
+from integrations.repo.bot_pause_repo import is_bot_paused, set_bot_paused
 from integrations.repo.existing_client_repo import is_existing_academy_client
 from integrations.repo.postgres import cancel_booking_trial
 from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_bookings, refresh_week_sheet
@@ -44,7 +44,7 @@ from handlers.edit_trial import (
     handle_trial_status_request,
 )
 from integrations import booking_service, payment_validation, booking, trial
-from utils import display_end_time
+from utils import display_end_time, parse_relative_weekdays
 from integrations.repo import academy_repo, booking_repo
 from integrations.repo import postgres as _pg
 from handlers.llm_booking_flow import LlmBookingFlowHandler
@@ -221,18 +221,20 @@ _PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
 
 
 def _has_foreign_phone(text: str, bot_name: str) -> bool:
-    """True if the text names any phone number other than this school's admin.
+    """True if the text names any phone number other than the academy admins'.
 
-    Academy replies must never carry the arena's or an invented number.
+    Academy replies must never carry the arena's or an invented number. The
+    other section's admin is allowed: football sends boxing questions there
+    and back (academy_rules 14, 19).
     """
-    admin = re.sub(r"\D", "", ACADEMY_ADMIN_PHONES[bot_name])
+    allowed = {re.sub(r"\D", "", phone) for phone in ACADEMY_ADMIN_PHONES.values()}
     for match in _PHONE_RE.finditer(text or ""):
         digits = re.sub(r"\D", "", match.group())
         if len(digits) == 11 and digits.startswith("8"):
             digits = "7" + digits[1:]
         # Full KZ numbers (+7 7xx… mobile, +7 71xx… city) are 11 digits starting
         # with 77 — this keeps price ranges like "10 000 - 15 000" from matching.
-        if len(digits) == 11 and digits.startswith("77") and digits != admin:
+        if len(digits) == 11 and digits.startswith("77") and digits not in allowed:
             return True
     return False
 
@@ -313,23 +315,55 @@ def _with_pending(answer: str, pending: str | None) -> str:
     return f"{answer}\n\n{pending}" if pending else answer
 
 
+# Any link the client sends: the bot never opens or judges one — the admin does.
+_URL_RE = re.compile(r"https?://|www\.|\b[\w-]+\.(?:kz|ru|com|net|org|me|ly|link|app|site)/", re.I)
+
+
+def _pause_for_admin(sender_id: str, bot_name: str) -> None:
+    """Pause the bot for this contact so the admin answers next.
+
+    The pause shows in the manager UI (reason 'handover') and holds until the
+    admin turns the bot back on — the bot must not keep talking over them.
+    """
+    try:
+        set_bot_paused(sender_id, True, reason="handover", paused_by=bot_name)
+    except Exception:
+        logger.exception("[HANDOVER] Could not pause the bot for %s", sender_id)
+
+
+def _promises_admin(reply: str | None) -> bool:
+    """True when the reply tells the client the admin will contact them."""
+    # The LLM says the same line by rule 7, maybe without the closing period.
+    return any(line.rstrip(".") in (reply or "") for line in _ACADEMY_UNCLEAR_REPLY.values())
+
+
+def _hand_over_to_admin(sender_id: str, bot_name: str) -> str:
+    """Pause the bot for this contact (_pause_for_admin); returns the reply."""
+    _pause_for_admin(sender_id, bot_name)
+    phone = ACADEMY_ADMIN_PHONES.get(bot_name, "")
+    return (
+        f"Передал администратору, он ответит вам здесь. Телефон администратора: {phone}.\n\n"
+        f"Әкімшіге жеткіздім, ол осы жерде жауап береді. Әкімші телефоны: {phone}."
+    )
+
+
 def _has_letters(text: str) -> bool:
     return bool(re.search(r"[^\W\d_]", text or ""))
 
 
 def _active_trial_draft(sender_id: str, bot_name: str) -> dict | None:
-    """The trial draft of a signup still in progress, or None (see is_draft_in_progress)."""
-    draft = academy_repo.get_existing_trial_draft(sender_id, bot_name)
-    return draft if draft and is_draft_in_progress(draft) else None
+    """The trial draft of a signup in progress, or None. A draft left too long
+    is abandoned before this is asked (_abandon_stale_trial_draft)."""
+    return academy_repo.get_existing_trial_draft(sender_id, bot_name)
 
 
 def _abandon_stale_trial_draft(chat_id: str, sender_id: str, bot_name: str) -> bool:
-    """Cancel a draft untouched for TRIAL_DRAFT_KEEP_SECONDS, keeping its
-    answers as a summary. True when one was abandoned (the chat is wiped)."""
+    """Cancel a draft untouched for TRIAL_DRAFT_KEEP_SECONDS. True when one
+    was abandoned (the chat is wiped)."""
     draft = academy_repo.get_existing_trial_draft(sender_id, bot_name)
     if not draft or not is_draft_abandoned(draft):
         return False
-    logger.info("[TRIAL] Draft id=%d abandoned — keeping answers as a summary", draft["id"])
+    logger.info("[TRIAL] Draft id=%d abandoned", draft["id"])
     trial_service.abandon_draft(bot_name, chat_id, draft)
     return True
 
@@ -359,12 +393,10 @@ def _dispatch_in_trial_signup(
     if intent == "trial_status":
         return _with_pending(handle_trial_status_request(sender_id, bot_name, lang), pending)
     if intent == "human_help":
-        return _with_pending(
-            "Передам администратору. Он сможет уточнить детали по записи.\n\n"
-            "Әкімшіге жіберемін. Ол жазылым бойынша нақтылап береді.",
-            pending,
-        )
-    # Info questions (schedule, trainers, prices, ...) are answered by RAG/LLM.
+        return _hand_over_to_admin(sender_id, bot_name)
+    # Info questions (schedule, trainers, prices, ...) are answered by RAG/LLM;
+    # the signup answers they carry («8 жаста, бағасы қанша?») are saved first.
+    LlmTrialFlowHandler().absorb(chat_id, sender_id, bot_name, user_text, history, lang)
     return None
 
 
@@ -492,7 +524,6 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 refresh_all_bookings()
             else:
                 draft = get_existing_trial_draft(sender_id, bot_config["name"])
-                academy_repo.delete_trial_summary(sender_id, bot_config["name"])
                 if draft:
                     cancel_booking_trial(bot_config["name"], draft["id"])
                     refresh_all_trials()
@@ -722,15 +753,34 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             trial_draft = _active_trial_draft(sender_id, bot_name)
             draft_lang = (trial_draft or {}).get("language") or "kk"
 
+            # A link is never opened or answered by the LLM: it may be a fake
+            # payment page, so the admin looks at it.
+            if _URL_RE.search(user_text or ""):
+                logger.info("[TRIAL] Link from %s — handing over to the admin", sender_id)
+                handle_reply = _hand_over_to_admin(sender_id, bot_name)
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", handle_reply)
+                send_text_message(channel, sender_id, handle_reply)
+                return
+
             # (a.5) Pre-LLM confirmation short-circuit: a plain yes/no on a
             # draft with a chosen class confirms or cancels it even if the
             # router would misclassify a bare "да". Stricter than the arena's
             # _confirm_intent: a question like «…жоқ па?» goes to the router.
             if trial_draft and trial_draft.get("group_id") and confirm_trial_decision(user_text):
-                logger.info("[TRIAL] Pre-LLM confirm short-circuit for draft id=%s", trial_draft["id"])
-                handle_reply = LlmTrialFlowHandler().handle(
-                    chat_id, sender_id, bot_name, user_text, history, draft_lang
-                )
+                last_bot = next((m.get("content") or "" for m in reversed(history)
+                                 if m.get("role") == "assistant"), "")
+                if is_trial_acknowledgement(user_text) and "📋" not in last_bot:
+                    # «ок» after a side answer acknowledges it — ask again
+                    # rather than confirm.
+                    handle_reply = LlmTrialFlowHandler().pending_prompt(
+                        bot_name, trial_draft, draft_lang, user_text,
+                    )
+                else:
+                    logger.info("[TRIAL] Pre-LLM confirm short-circuit for draft id=%s", trial_draft["id"])
+                    handle_reply = LlmTrialFlowHandler().handle(
+                        chat_id, sender_id, bot_name, user_text, history, draft_lang
+                    )
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)
@@ -744,9 +794,12 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                         chat_id, sender_id, bot_name, user_text, history, draft_lang
                     )
                 elif is_trial_greeting(user_text):
+                    # One language — the one the client wrote in, as the router
+                    # reads it («Саламатсыз ба» has no Kazakh-only letters).
+                    _, greet_lang = route_trial_message(history, user_text)
                     handle_reply = (
-                        "Здравствуйте! Чем могу помочь?\n\n"
-                        "Сәлеметсіз бе! Қалай көмектесе аламын?"
+                        "Здравствуйте! Чем могу помочь?" if greet_lang == "ru"
+                        else "Сәлеметсіз бе! Қалай көмектесе аламын?"
                     )
                 elif is_bot_identity_question(user_text):
                     handle_reply = (
@@ -775,7 +828,19 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 free = trial.get_trial_daytime(bot_config["name"], None)
                 availability_ctx = trial.format_availability_context(free)
                 logger.info("[TRIAL] Injecting availability context (%d free trial times) into LLM call", len(free))
+            closed_ctx = trial.format_closed_dates_context(bot_name)
+            if closed_ctx:
+                availability_ctx = f"{closed_ctx}\n\n{availability_ctx}"
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
+            if trial_draft:
+                # Last, so it is the final thing the LLM reads.
+                context += (
+                    "\n\nВАЖНО: идёт запись на пробное занятие. Ответь только на вопрос клиента, коротко, и "
+                    "НЕ задавай в конце никаких вопросов и не предлагай выбрать — следующий шаг "
+                    "записи бот добавит сам. Не перечисляй занятия, дни и время и не составляй своих "
+                    "списков — нумерованный список бот покажет сам. О тренерах говори только о тех, "
+                    "кто есть в занятиях этого клиента, без полного расписания, и не выбирай тренера за клиента."
+                )
 
             pending = LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang)
             trial_intent, trial_lang = route_trial_message(
@@ -828,6 +893,12 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     append_message(chat_id, "assistant", handle_reply)
                     send_text_message(channel, sender_id, handle_reply)
                     return
+                # The question may have answered a step — show the one still open.
+                trial_draft = _active_trial_draft(sender_id, bot_name)
+                pending = shorten_repeated_list(
+                    LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang, user_text),
+                    history, draft_lang,
+                )
 
             # The router is tuned to over-trigger signup intent. The booking flow
             # cannot answer a price/schedule/location question, so veto the router
@@ -864,7 +935,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 # — otherwise this falls through to RAG/LLM exactly as before.
                 # Mid-signup, once the client's classes are known, the LLM
                 # answers from those instead (fitting_ctx).
-                weekdays = trial.parse_weekdays(user_text)
+                weekdays = trial.parse_weekdays(user_text) or parse_relative_weekdays(user_text)
                 if weekdays and not fitting_ctx:
                     classes = trial.list_classes_by_weekday(bot_config["name"], weekdays)
                     handle_reply = _with_pending(trial.format_weekday_schedule(classes, trial_lang), pending)
@@ -906,10 +977,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 return
 
             if trial_intent == "human_help":
-                handle_reply = (
-                    "Передам администратору. Он сможет уточнить детали по записи.\n\n"
-                    "Әкімшіге жіберемін. Ол жазылым бойынша нақтылап береді."
-                )
+                handle_reply = _hand_over_to_admin(sender_id, bot_name)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)
@@ -926,6 +994,8 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             # the LLM guess.
             if trial_intent == "unclear":
                 handle_reply = _academy_unclear_reply(history, trial_lang, pending)
+                if _promises_admin(handle_reply):
+                    _pause_for_admin(sender_id, bot_name)
                 append_message(chat_id, "user", user_text)
                 append_message(chat_id, "assistant", handle_reply)
                 send_text_message(channel, sender_id, handle_reply)
@@ -995,6 +1065,11 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         # 5b. A side question answered mid-signup: remind the pending step.
         elif pending:
             reply = f"{reply}\n\n{pending}" if reply else pending
+
+        # Told the client the admin will contact them (rule 7, or the foreign
+        # phone fallback above): the bot steps back until the admin is done.
+        if is_academy and _promises_admin(reply):
+            _pause_for_admin(sender_id, bot_config["name"])
 
         # 6. Save to history
         append_message(chat_id, "user", user_text)

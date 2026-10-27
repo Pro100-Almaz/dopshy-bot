@@ -172,10 +172,7 @@ BOOKING_FIELDS: list = _json.loads(
 )
 BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
 BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1200"))  # seconds
-# Academy trial signup: a reply within TRIAL_IN_PROGRESS_SECONDS continues the
-# signup; a draft untouched for TRIAL_DRAFT_KEEP_SECONDS is cancelled and its
-# answers kept as a summary (academy_trial_summaries).
-TRIAL_IN_PROGRESS_SECONDS: int = int(os.getenv("TRIAL_IN_PROGRESS_SECONDS", "1800"))  # 30 minutes
+# Academy trial signup: a draft untouched for TRIAL_DRAFT_KEEP_SECONDS is cancelled.
 TRIAL_DRAFT_KEEP_SECONDS: int = int(os.getenv("TRIAL_DRAFT_KEEP_SECONDS", "7200"))  # 120 minutes
 PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "1200"))  # 20 minutes
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")

@@ -189,3 +189,39 @@ def test_limit_counts_only_attended_among_mixed_rows():
 
     _add("confirmed", attended=True, day_offset=-7)
     assert check_trial_limits(BOXING_BOT, PHONE) is False
+
+
+# ------------------------------------------------------------------- per child
+
+
+def _name_last(name):
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE academy_trials SET child_name = %s WHERE id = "
+                "(SELECT max(id) FROM academy_trials WHERE phone = %s)", (name, PHONE),
+            )
+
+
+def test_a_siblings_upcoming_trial_does_not_block_another_child():
+    _add("confirmed", day_offset=5)
+    _name_last("Алихан")
+    assert has_active_trial(BOXING_BOT, PHONE, "Амина") is False
+    assert has_active_trial(BOXING_BOT, PHONE, " алихан ") is True
+    assert has_active_trial(BOXING_BOT, PHONE) is True
+
+
+def test_same_child_under_another_spelling_is_not_booked_twice():
+    _add("confirmed", day_offset=5)
+    _name_last("Алихан")
+    assert has_active_trial(BOXING_BOT, PHONE, "Әлихан") is True
+    assert has_active_trial(BOXING_BOT, PHONE, "Alikhan") is True
+    assert has_active_trial(BOXING_BOT, PHONE, "Әлия") is False
+
+
+def test_a_siblings_attended_trial_does_not_use_another_childs_quota():
+    _set_limit(1)
+    _add("confirmed", attended=True, day_offset=-10)
+    _name_last("Алихан")
+    assert check_trial_limits(BOXING_BOT, PHONE, "Амина") is True
+    assert check_trial_limits(BOXING_BOT, PHONE, "Алихан") is False

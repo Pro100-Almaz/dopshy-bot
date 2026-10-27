@@ -27,8 +27,9 @@ def test_foreign_phone_detected(text):
     ("dopsy_fs_school", "Позвоните +7 700 555 2202"),
     ("dopsy_boxing", "Позвоните +7 700 555 6006"),
 ])
-def test_other_academy_admin_phone_is_foreign(bot_name, text):
-    assert message_handler._has_foreign_phone(text, bot_name)
+def test_other_academy_admin_phone_is_allowed(bot_name, text):
+    # Football sends boxing questions to the boxing admin and back (rules 14, 19).
+    assert not message_handler._has_foreign_phone(text, bot_name)
 
 
 @pytest.mark.parametrize("text", [
@@ -62,8 +63,14 @@ def academy(monkeypatch):
     monkeypatch.setattr(message_handler, "retrieve_context", lambda *a, **k: "")
     monkeypatch.setattr(message_handler._pg, "get_active_session", lambda *a: None)
     monkeypatch.setattr(message_handler.academy_repo, "get_existing_trial_draft", lambda *a: None)
+    monkeypatch.setattr(message_handler.academy_repo, "get_groups_info", lambda **k: [])
     monkeypatch.setattr(message_handler.trial, "get_trial_daytime", lambda *a: [])
     monkeypatch.setattr(message_handler.trial, "format_availability_context", lambda free: "")
+    monkeypatch.setattr(message_handler.trial, "format_closed_dates_context", lambda bot: "")
+    paused = []
+    monkeypatch.setattr(message_handler, "set_bot_paused",
+                        lambda phone, value, **k: paused.append((phone, value, k.get("reason"))))
+    state["paused"] = paused
     monkeypatch.setattr(message_handler, "route_trial_message",
                         lambda *a, **k: state["intent"])
     monkeypatch.setattr(message_handler, "get_ai_response",
@@ -107,6 +114,37 @@ def test_unclear_again_after_clarifying_gets_admin_line(academy, monkeypatch, la
     message_handler.handle_incoming_message(_text("анау ше"))
 
     assert academy["sent"] == [expected]
+    # "The admin will contact you" is kept: the bot steps back for them.
+    assert academy["paused"] == [("+77001112233", True, "handover")]
+
+
+def test_first_clarifying_question_does_not_pause(academy):
+    academy["intent"] = ("unclear", "kk")
+
+    message_handler.handle_incoming_message(_text("ммм қалай анау"))
+
+    assert academy["paused"] == []
+
+
+@pytest.mark.parametrize("llm_reply", [
+    "Күте тұрыңыз, сізбен мектеп әкімшісі байланысады.",
+    "Бұл сұрақ бойынша нақты ақпарат жоқ. Подождите, пожалуйста, с вами свяжется администратор школы",
+])
+def test_llm_promising_the_admin_pauses_the_bot(academy, llm_reply):
+    academy["llm_reply"] = llm_reply
+
+    message_handler.handle_incoming_message(_text("турнир қашан"))
+
+    assert academy["sent"] == [llm_reply]
+    assert academy["paused"] == [("+77001112233", True, "handover")]
+
+
+def test_ordinary_llm_reply_does_not_pause(academy):
+    academy["llm_reply"] = "Жаттығулар аптасына 3 рет өтеді."
+
+    message_handler.handle_incoming_message(_text("қанша рет"))
+
+    assert academy["paused"] == []
 
 
 def test_unclear_mid_signup_re_asks_the_pending_question():
@@ -128,6 +166,7 @@ def test_llm_reply_with_foreign_number_is_replaced(academy):
     message_handler.handle_incoming_message(_text("алаң қайда"))
 
     assert academy["sent"] == [_KK]
+    assert academy["paused"] == [("+77001112233", True, "handover")]
 
 
 def test_llm_reply_with_admin_number_is_kept(academy):

@@ -107,7 +107,28 @@ EXTRACT_TRIAL_DATA_LLM = {
                         "'как вас зовут / есіміңіз кім' — their own name IS the student's name. "
                         "Return only the name itself ('менің атым Айдос' -> 'Айдос'). "
                         "A trainer or group name from the assistant's list ('Box Timur' -> "
-                        "'Тимур') is never the child's name."
+                        "'Тимур') is never the child's name. A message that is not a name — a "
+                        "correction, refusal or remark ('не меня а сына', 'балам емес өзім') — is null."
+                    ),
+                },
+                "signup_for": {
+                    "type": ["string", "null"],
+                    "enum": ["self", "other", None],
+                    "description": (
+                        "Who is being signed up, judged from the whole conversation; the latest "
+                        "statement wins. 'self': the writer signs up themselves ('хочу записаться', "
+                        "'мне 16', 'маған жазылу керек', 'өзім жазыламын', 'мен ғой, бала емес'). "
+                        "'other': a child or another person ('записать сына', 'дочке 8', "
+                        "'баламды жазғым келеді'). Null when unclear."
+                    ),
+                },
+                "asks_about_trial_or_price": {
+                    "type": "boolean",
+                    "description": (
+                        "True when this message is about the trial lesson, asks to sign up for "
+                        "classes, or asks about the price ('хочу на пробное', 'записать сына на "
+                        "занятия', 'сколько стоит?', 'сынақ сабағы', 'боксқа жазылайын деген едім', "
+                        "'сабаққа жазылу керек еді', 'бағасы қанша?'). Otherwise false."
                     ),
                 },
                 "child_birth_year": {
@@ -179,6 +200,8 @@ EXTRACT_TRIAL_DATA_LLM = {
             },
             "required": [
                 "child_name",
+                "signup_for",
+                "asks_about_trial_or_price",
                 "child_birth_year",
                 "audience",
                 "experience",

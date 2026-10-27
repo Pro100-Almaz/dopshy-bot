@@ -100,6 +100,14 @@ def test_arena_bot_keeps_unscoped_fallback(monkeypatch):
     assert store.calls == [retriever._scope_filter("dopsy_bot"), None]
 
 
+def test_shared_policies_reach_both_academy_bots():
+    assert _document_scope(Path("academy_shared_policies.md")) == "academy_shared"
+    for bot in ("dopsy_fs_school", "dopsy_boxing"):
+        assert "academy_shared" in str(retriever._scope_filter(bot))
+    names = [name for name, _ in retriever._full_context_docs("dopsy_boxing")]
+    assert "academy_shared_policies.md" in names
+
+
 def test_voucher_docs_get_their_own_scope():
     assert _document_scope(Path("academy_football_voucher_transfer_steps.md")) == "academy_voucher"
     # ...which no bot's similarity-search filter includes.

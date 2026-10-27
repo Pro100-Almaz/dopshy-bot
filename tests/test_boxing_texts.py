@@ -13,8 +13,7 @@ def _ask_name_via_flow(monkeypatch, bot_name):
 
 
 def test_boxing_bot_uses_friendly_texts(monkeypatch):
-    # Boxing asks the age first.
-    assert _ask_name_via_flow(monkeypatch, "dopsy_boxing") == BOXING_T["ask_birth_year"]["ru"]
+    assert _ask_name_via_flow(monkeypatch, "dopsy_boxing") == BOXING_T["ask_name"]["ru"]
 
 
 def test_football_bot_keeps_original_texts(monkeypatch):

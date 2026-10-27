@@ -50,6 +50,8 @@ _KEY_PREFIX = "batch"
 # Self-cleaning safety net: if a worker dies before its timer fires, the keys
 # expire on their own rather than leaking. Comfortably longer than the window.
 _KEY_TTL_SECONDS = int(config.MESSAGE_BATCH_WINDOW_SECONDS) + 60
+# How long a received message id is remembered; provider retries come well within it.
+_SEEN_TTL_SECONDS = 24 * 3600
 
 # Drain the buffer ONLY if the sequence counter still equals the caller's token
 # (no newer message arrived). Returns [pickled_template, text, text, ...] or [].
@@ -123,12 +125,35 @@ def _conversation_key(payload: IncomingWhatsAppMessage) -> str:
     return f"{phone_number_id}:{sender}"
 
 
+def _is_duplicate(payload: IncomingWhatsAppMessage) -> bool:
+    """True when this message id was already received.
+
+    Providers retry a webhook they think failed, and the same message would
+    get a second reply. Fails open: without Redis or an id, nothing is skipped.
+    """
+    message_id = payload.whatsapp_message_id or payload.provider_message_id
+    if not message_id:
+        return False
+    try:
+        first = _redis().set(f"{_KEY_PREFIX}:seen:{message_id}", 1,
+                             nx=True, ex=_SEEN_TTL_SECONDS)
+    except Exception:
+        logger.exception("[BATCH] Redis unavailable — duplicate check skipped")
+        return False
+    return not first
+
+
 def enqueue_incoming_message(payload: IncomingWhatsAppMessage) -> None:
     """Entry point for inbound messages. Non-blocking.
 
     Text → buffered in Redis and (re)scheduled for a delayed combined flush.
     Anything else → pending text flushed first, then handled right away.
     """
+    if _is_duplicate(payload):
+        logger.info("[BATCH] Duplicate delivery of message %s — skipped",
+                    payload.whatsapp_message_id or payload.provider_message_id)
+        return
+
     if payload.message_type != "text" or not payload.text:
         _handle_non_text(payload)
         return
