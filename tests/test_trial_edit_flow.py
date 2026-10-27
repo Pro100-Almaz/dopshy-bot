@@ -32,6 +32,7 @@ def flow(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot: dict(state["draft"]))
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_group_by_id", lambda group_id: None)
     monkeypatch.setattr(llm_trial_flow.trial_logic, "get_eligible_trial_slots", lambda *a, **k: [_SLOT])
 
     def fake_update(bot_name, trial_id, fields):
@@ -68,7 +69,7 @@ def test_choice_from_the_group_list_assigns_the_class(flow):
 
     assert state["assigned"]["group_id"] == 7
     assert "📋 Детали записи" in reply and "18:00–19:30" in reply
-    assert "Ответьте *да* или *нет*" in reply
+    assert reply.endswith("Если нужно что-то изменить, подскажите.")
 
 
 def test_a_bare_list_number_is_not_read_as_a_level(flow):
@@ -76,18 +77,19 @@ def test_a_bare_list_number_is_not_read_as_a_level(flow):
 
     run("2", _INTAKE, {"preferred_date": "2026-08-24"})
 
-    assert state["updates"][0]["experience"] == "Beginner"
+    assert state["draft"]["experience"] == "Beginner"
 
 
-def test_edit_with_a_chosen_class_updates_the_draft_and_reasks_confirmation(flow):
+def test_edit_with_a_chosen_class_updates_the_draft_and_lists_the_classes_again(flow):
     run, state = flow
 
     reply = run("поменяйте смену на утреннюю", {**_INTAKE, **_CHOSEN, "school_shift": "afternoon"},
                 {"school_shift": "morning"})
 
     assert state["updates"][0]["school_shift"] == "morning"
-    assert "🏫 Смена: утренняя" in reply
-    assert "Ответьте *да* или *нет*" in reply
+    # The new shift drops the chosen class: the list is shown to pick again.
+    assert state["updates"][0]["group_id"] is None
+    assert reply.startswith("Выберите тренировку") and "1. Пн 24.08.2026 — 18:00–19:30" in reply
     assert not state["confirmed"]
 
 
@@ -98,7 +100,7 @@ def test_yes_confirms_the_chosen_class(flow, monkeypatch):
     reply = run("да", {**_INTAKE, **_CHOSEN})
 
     assert state["confirmed"]
-    assert reply.startswith("Вы записаны на пробный урок")
+    assert reply.startswith("Запись на пробный урок оформлена")
 
 
 def test_yes_clears_an_ineligible_class_and_reselects(flow, monkeypatch):

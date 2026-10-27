@@ -23,7 +23,7 @@ _ACADEMY_DRAFT_FIELDS = {
     "state", "language", "client_token", "phone", "child_name",
     "child_birth_year", "experience", "school_shift",
     "preferred_date", "preferred_weekday", "preferred_time_start",
-    "preferred_time_end", "audience", "group_type",
+    "preferred_time_end", "audience", "group_type", "signup_for",
 }
 
 _ARENA_DRAFT_FIELDS = {

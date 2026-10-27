@@ -80,3 +80,14 @@ def clean_db(request):
                 "apipay_invoices, contract_installments RESTART IDENTITY CASCADE"
             )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _fixed_trial_questions(monkeypatch):
+    """Trial questions use the fixed text in tests instead of the LLM."""
+    from chat import llm
+
+    def _offline(*args, **kwargs):
+        raise RuntimeError("no LLM in tests")
+
+    monkeypatch.setattr(llm, "get_question_reply", _offline)

@@ -20,6 +20,11 @@ from handlers.llm_trial_flow import BOXING_T, T, LlmTrialFlowHandler, _confirm_d
 
 pytestmark = pytest.mark.no_db
 
+
+@pytest.fixture(autouse=True)
+def _no_adult_group(monkeypatch):
+    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name=None, audience=None: [])
+
 _CHOSEN_DRAFT = {
     "id": 11, "trial_day": "2026-09-25", "start_time": "16:00", "end_time": "17:00", "group_id": 7,
     "child_name": "Ерсултан", "child_birth_year": 2016,
@@ -51,19 +56,15 @@ def test_confirm_decision_only_reads_plain_answers():
     assert _confirm_decision("да?") is None
 
 
-def test_plain_no_keeps_the_answers_for_the_next_signup(monkeypatch):
+def test_plain_no_cancels_the_signup(monkeypatch):
     _with_draft(monkeypatch, _CHOSEN_DRAFT)
-    abandoned = {}
-    monkeypatch.setattr(
-        llm_trial_flow.trial_service, "abandon_draft",
-        lambda bot_name, chat_id, draft, reason: abandoned.update(trial_id=draft["id"], reason=reason),
-    )
+    cancelled = []
     monkeypatch.setattr(llm_trial_flow.trial_service, "cancel_trial",
-                        lambda *a: pytest.fail("a plain no must keep the answers"))
+                        lambda bot_name, chat_id, trial_id, reason: cancelled.append((trial_id, reason)))
 
     LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_boxing", "жоқ", [], "kk")
 
-    assert abandoned == {"trial_id": 11, "reason": "user_declined_gated_trial"}
+    assert cancelled == [(11, "user_declined_gated_trial")]
 
 
 def test_fitting_slots_context_lists_only_this_childs_classes(monkeypatch):
@@ -91,6 +92,8 @@ def test_unrelated_question_with_a_chosen_class_does_not_autoconfirm(monkeypatch
     _with_draft(monkeypatch, _CHOSEN_DRAFT)
     monkeypatch.setattr(llm_trial_flow.trial_service, "confirm_trial",
                         lambda *a: pytest.fail("must not confirm"))
+    cancelled = []
+    monkeypatch.setattr(llm_trial_flow.trial_service, "cancel_trial", lambda *a: cancelled.append(a))
     monkeypatch.setattr(llm_trial_flow.trial_logic, "get_eligible_trial_slots", lambda *a, **k: [{
         "group_id": 7, "date": "2026-09-25", "time_start": "16:00", "time_end": "17:00", "level": [],
     }])
@@ -99,7 +102,8 @@ def test_unrelated_question_with_a_chosen_class_does_not_autoconfirm(monkeypatch
         "chat-1", "7700", "dopsy_boxing", "кстати можешь дать информацию по тренерам?", [], "ru",
     )
 
-    assert "Детали записи" in reply
+    # At the summary, anything that is neither a yes nor a change cancels.
+    assert cancelled and "отменена" in reply
 
 
 def test_cancel_phrase_with_a_chosen_class_actually_cancels(monkeypatch):
@@ -139,7 +143,8 @@ def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: None)
     monkeypatch.setattr(llm_trial_flow.trial_service, "create_or_get_draft",
                         lambda *a: {"ok": True, "data": {"trial": {"id": 11}}})
-    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
+                        lambda history, text: {"asks_about_trial_or_price": True})
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)
@@ -153,15 +158,15 @@ def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
         "chat-1", "7700", "dopsy_boxing", "Балама сынақ сабағы керек", [], "kk",
     )
 
-    assert saved["child_name"] is None
-    # A new signup: "the trial is free", then the age (boxing asks it first).
-    assert reply == f"{BOXING_T['trial_free_intro']['kk']}\n\n{BOXING_T['ask_birth_year']['kk']}"
+    assert not saved.get("child_name")
+    # A new signup: "the trial is free", then the name.
+    assert reply == f"{BOXING_T['trial_free_intro']['kk']}\n\n{BOXING_T['ask_name']['kk']}"
 
 
-def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatch):
+def test_sentence_on_return_to_a_draft_is_not_taken_as_the_name(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    # Past the 30-minute answer window, not yet abandoned (120 minutes).
+    # Not yet abandoned (120 minutes): the message answers the name question.
     stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=60)}
     saved = {}
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: dict(stale))
@@ -179,8 +184,8 @@ def test_sentence_on_return_to_a_stale_draft_is_not_taken_as_the_name(monkeypatc
         "chat-1", "7700", "dopsy_boxing", "сынақ сабағына жазылғым келеді", [], "kk",
     )
 
-    assert saved["child_name"] is None
-    assert reply == BOXING_T["ask_birth_year"]["kk"]
+    assert not saved.get("child_name")
+    assert reply == BOXING_T["ask_name"]["kk"]
 
 
 def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypatch):
@@ -214,7 +219,7 @@ def test_trainer_is_found_by_first_name_with_a_kazakh_ending():
 
 def test_adult_list_shows_trainers_and_narrows_to_a_named_one(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.trial_logic, "get_adult_trial_slots", lambda bot: list(_ADULT_SLOTS))
-    draft = {"id": 5, "audience": "adult"}
+    draft = {"id": 5, "audience": "adult", "child_name": "Ерлан", "child_birth_year": 1996}
     handler = LlmTrialFlowHandler()
 
     full = handler.pending_prompt("dopsy_boxing", draft, "kk")

@@ -3,7 +3,7 @@
 import logging
 from datetime import date, datetime
 
-from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES
+from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES, academy_location
 from handlers.academy_extractor import extract_trial_details
 from integrations import trial_service
 from integrations.repo import postgres
@@ -254,6 +254,10 @@ def handle_trial_status_request(sender_phone: str, bot_name: str, lang: str = "r
         else:
             header = "У вас есть подтвержденная запись:" if len(confirmed) == 1 else "У вас есть подтвержденные записи:"
         parts.append(header + "\n" + "\n\n".join(_trial_details(t, i, lang) for i, t in enumerate(confirmed, 1)))
+        # «Мекенжай қайда?» after signing up is answered here too.
+        location = academy_location(bot_name, lang)
+        if location:
+            parts.append(location)
     if drafts:
         if lang == "kk":
             header = "Сізде аяқталмаған жазылым жобасы бар:" if len(drafts) == 1 else "Сізде аяқталмаған жазылым жобалары бар:"
@@ -261,6 +265,19 @@ def handle_trial_status_request(sender_phone: str, bot_name: str, lang: str = "r
             header = "У вас есть незаконченный черновик записи:" if len(drafts) == 1 else "У вас есть незаконченные черновики записей:"
         parts.append(header + "\n" + "\n\n".join(_draft_summary(t, i, lang) for i, t in enumerate(drafts, 1)))
     return "\n\n".join(parts)
+
+
+def _cancelled(bot_name: str, lang: str | None) -> str:
+    phone = ACADEMY_ADMIN_PHONES[bot_name]
+    ru = ("Ваша запись на пробное занятие отменена. "
+          f"Если нужна помощь — администратор: {phone}.")
+    kk = ("Сынақ сабағына жазылымыңыз тоқтатылды. "
+          f"Көмек керек болса — әкімші: {phone}.")
+    if lang == "ru":
+        return ru
+    if lang == "kk":
+        return kk
+    return _bilingual(ru, kk)
 
 
 def _nothing_to_cancel(bot_name: str, lang: str | None) -> str:
@@ -287,10 +304,7 @@ def handle_cancel_trial_request(chat_id: str, sender_phone: str, bot_name: str,
         return _nothing_to_cancel(bot_name, lang)
     if len(trials) == 1:
         trial_service.cancel_trial(bot_name, chat_id, trials[0]["id"], "user_cancel_trial")
-        return _bilingual(
-            "Ваша запись на пробное занятие отменена.",
-            "Сынақ сабағына жазылымыңыз тоқтатылды.",
-        )
+        return _cancelled(bot_name, lang)
 
     postgres.upsert_session(
         bot_name,

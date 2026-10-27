@@ -27,7 +27,7 @@ _DRAFT = {"id": 11, "language": "kk", "group_id": None}
 def academy(monkeypatch):
     state = {
         "sent": [], "draft": None, "intent": ("other", "kk"), "llm_reply": "LLM",
-        "handled": [], "routed": [],
+        "handled": [], "routed": [], "absorbed": [],
     }
     monkeypatch.setattr(message_handler.config, "BOT_CONFIGS", {
         "academy-phone-id": {"name": "dopsy_boxing", "phone_number_id": "academy-phone-id"},
@@ -55,6 +55,10 @@ def academy(monkeypatch):
     monkeypatch.setattr(
         LlmTrialFlowHandler, "handle",
         lambda self, chat_id, phone, bot, text, history, lang: state["handled"].append((text, lang)) or "FLOW",
+    )
+    monkeypatch.setattr(
+        LlmTrialFlowHandler, "absorb",
+        lambda self, chat_id, phone, bot, text, history, lang: state["absorbed"].append(text),
     )
     monkeypatch.setattr(LlmTrialFlowHandler, "pending_prompt",
                         lambda self, bot, draft, lang, user_text=None: "PENDING" if draft else None)
@@ -114,6 +118,16 @@ def test_side_question_is_answered_and_the_pending_question_follows(academy):
     assert academy["sent"] == ["LLM\n\nPENDING"]
 
 
+def test_side_question_saves_the_answers_it_carries(academy):
+    academy["draft"] = dict(_DRAFT)
+    academy["intent"] = ("question_price", "kk")
+
+    message_handler.handle_incoming_message(_text("8 жаста, бағасы қанша?"))
+
+    assert academy["absorbed"] == ["8 жаста, бағасы қанша?"]
+    assert academy["handled"] == []
+
+
 def test_info_intent_mid_signup_adds_the_pending_question(academy):
     academy["draft"] = dict(_DRAFT)
     academy["intent"] = ("question_contacts", "kk")
@@ -148,7 +162,7 @@ def test_greeting_without_a_signup_gets_the_fixed_reply(academy):
     message_handler.handle_incoming_message(_text("сәлем"))
 
     assert academy["handled"] == []
-    assert academy["sent"][0].startswith("Здравствуйте! Чем могу помочь?")
+    assert academy["sent"][0] == "Сәлеметсіз бе! Қалай көмектесе аламын?"
 
 
 def test_no_draft_routes_without_a_pending_question(academy):
@@ -171,17 +185,21 @@ def test_legacy_llm_flow_session_row_is_dropped(monkeypatch):
     assert deleted == ["chat-1"]
 
 
-@pytest.mark.parametrize(("age_minutes", "active"), [(5, True), (29, True), (31, False), (60 * 24 * 14, False)])
-def test_only_a_recently_touched_draft_counts_as_in_progress(monkeypatch, age_minutes, active):
-    monkeypatch.setattr(message_handler.config, "TRIAL_IN_PROGRESS_SECONDS", 1800)
-    draft = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=age_minutes)}
-    monkeypatch.setattr(message_handler.academy_repo, "get_existing_trial_draft", lambda *a: draft)
+@pytest.mark.parametrize(("age_minutes", "active"), [(5, True), (60, True), (119, True), (121, False)])
+def test_a_draft_counts_until_it_is_abandoned(monkeypatch, age_minutes, active):
+    monkeypatch.setattr(message_handler.config, "TRIAL_DRAFT_KEEP_SECONDS", 7200)
+    drafts = [{"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=age_minutes)}]
+    monkeypatch.setattr(message_handler.academy_repo, "get_existing_trial_draft",
+                        lambda *a: drafts[0] if drafts else None)
+    monkeypatch.setattr(message_handler.trial_service, "abandon_draft", lambda *a: drafts.clear())
 
-    assert (message_handler._active_trial_draft("7700", "dopsy_boxing") is draft) is active
+    message_handler._abandon_stale_trial_draft("chat-1", "7700", "dopsy_boxing")
+
+    assert (message_handler._active_trial_draft("7700", "dopsy_boxing") is not None) is active
 
 
-def test_stale_draft_does_not_keep_the_client_in_signup_mode(academy):
-    academy["draft"] = None  # what _active_trial_draft returns for a stale draft
+def test_without_a_draft_the_client_is_not_in_signup_mode(academy):
+    academy["draft"] = None
     academy["intent"] = ("other", "kk")
 
     message_handler.handle_incoming_message(_text("бағасы қанша?"))
@@ -195,3 +213,40 @@ def test_stale_draft_does_not_keep_the_client_in_signup_mode(academy):
 ])
 def test_has_letters(text, expected):
     assert message_handler._has_letters(text) is expected
+
+
+@pytest.fixture
+def paused(monkeypatch):
+    calls = []
+    monkeypatch.setattr(message_handler, "set_bot_paused",
+                        lambda phone, value, reason="manual", paused_by=None:
+                        calls.append((phone, value, reason)))
+    return calls
+
+
+@pytest.mark.parametrize("draft", [None, _DRAFT])
+def test_human_help_hands_over_and_pauses_the_bot(academy, paused, draft):
+    academy["draft"] = dict(draft) if draft else None
+    academy["intent"] = ("human_help", "kk")
+
+    message_handler.handle_incoming_message(_text("маған адам жауап берсін"))
+
+    assert paused == [("+77001112233", True, "handover")]
+    assert len(academy["sent"]) == 1
+    assert "+7 700 555 2202" in academy["sent"][0]
+    assert "PENDING" not in academy["sent"][0]
+
+
+def test_a_link_goes_to_the_admin_not_the_llm(academy, paused):
+    message_handler.handle_incoming_message(_text("оплатите тут https://pay-fake.kz/x"))
+
+    assert academy["routed"] == []
+    assert paused == [("+77001112233", True, "handover")]
+    assert len(academy["sent"]) == 1
+
+
+def test_plain_text_is_not_mistaken_for_a_link(academy, paused):
+    message_handler.handle_incoming_message(_text("сағат 17.00 бола ма?"))
+
+    assert paused == []
+    assert academy["routed"] == [None]

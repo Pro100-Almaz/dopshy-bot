@@ -57,7 +57,7 @@ def get_ai_response(
         model=config.MODEL_NAME,
         messages=messages,
         temperature=0.2 if is_dopsy else 0.6,
-        max_completion_tokens=512,
+        max_completion_tokens=1024,
     )
     if not is_dopsy:
         # start_trial retired: trial_new / trial_continue reach LlmTrialFlowHandler
@@ -119,6 +119,47 @@ def get_booking_reply(
         ],
         temperature=0.5,
         max_completion_tokens=400,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def get_question_reply(lang: str, template: str, history: list, actor: str | None = None) -> str:
+    """The trial signup question `template`, phrased for this chat: about the
+    client for `actor` "self", about the child for "other", neutral when None."""
+    who = {
+        "self": "Клиент записывает САМ СЕБЯ — спрашивай о нём самом («ваше имя», «сколько вам лет»), "
+                "никогда не о ребёнке. ",
+        "other": "Клиент записывает ребёнка — спрашивай о ребёнке, никогда не имя самого клиента. ",
+    }.get(actor, "Неизвестно, кто записывается — спрашивай нейтрально, не упоминая ни ребёнка, ни "
+                 "самого клиента («Как зовут того, кто будет заниматься?», «Кім қатысады, есімі кім?»). ")
+    system_content = (
+        "Ты — ассистент спортивной академии и ведёшь запись на пробное занятие. "
+        "Не обращайся к клиенту по имени. "
+        "Задай клиенту ОДИН короткий вежливый вопрос с тем же смыслом, что и шаблон ниже. "
+        f"{who}"
+        "Не пересказывай клиенту его же просьбу. "
+        "Если последнее сообщение клиента — не ответ на предыдущий вопрос бота, сначала коротко и тепло откликнись "
+        "на него (одной фразой, без советов и фактов), затем задай вопрос. "
+        "Не добавляй фактов, списков, вариантов ответа и других вопросов. "
+        "Обращайся только на «вы» («сіз»). "
+        "О себе говори только в мужском роде: «понял», а не «поняла» или «понял(а)». "
+        "Весь ответ — на одном языке: в казахском ответе «Түсіндім», а не «Понял». "
+        "Не здоровайся. "
+        "Откликайся естественно и коротко («Рад это слышать», «Хорошо»), без шаблонных фраз вроде "
+        "«Рад вашему сообщению». "
+        "Если клиент поправляет тебя — признай это («Понял», «Түсіндім»), не начинай с «Хорошо»/«Жақсы». "
+        f"Отвечай только на {'русском' if lang == 'ru' else 'казахском'} языке.\n\n"
+        f"Шаблон: {template}"
+    )
+    messages = [{"role": "system", "content": system_content}] + [
+        {"role": m["role"], "content": m["content"]}
+        for m in history[-6:] if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+    response = _client.chat.completions.create(
+        model=config.MODEL_NAME,
+        messages=messages,
+        temperature=0.3,
+        max_completion_tokens=100,
     )
     return response.choices[0].message.content.strip()
 
@@ -236,7 +277,11 @@ def route_trial_message(
         "a later greeting, thanks or question trial_cancel. "
         "Use trial_edit when the user wants to change a detail of an existing signup — "
         "e.g. 'перенесите на другое время', 'поменяйте дату', 'измените имя ребенка'. "
-        "Use human_help when they ask for an administrator or human manager. "
+        "Use human_help when they ask for an administrator or a live person — e.g. "
+        "'маған адам жауап берсін', 'соедините с администратором' — and when the message "
+        "is something staff must act on today about the child's safety or attendance — e.g. "
+        "'бүгін баламды әжесі алып кетеді', 'сегодня ребёнка заберёт папа', "
+        "'балам бүгін келмейді'. "
         "Use decline_distance when the client says the academy is too far for them — e.g. "
         "'Сіздер бізден алыссыздар', 'бізге алыс екен', 'біз келмейміз, алыс екен', 'далеко от нас'. "
         "Use decline_later when they put it off — e.g. 'кейін хабарласамын', 'ойланып көрейік', "

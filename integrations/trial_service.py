@@ -38,11 +38,9 @@ def create_or_get_draft(bot_name: str, chat_id: str, phone: str, lang: str) -> d
     # asked about prices got "you have used up your trial lessons" instead of an
     # answer. The limit is enforced at confirm_trial() — the only point where a
     # trial lesson is actually taken. The has_active_trial-before-limit ordering
-    # introduced on the api_contract_spec branch is preserved there.
-    if academy_repo.has_active_trial(bot_name, phone):
-        logger.info("[TRIAL_SERVICE] Draft refused: phone=%s already has an active %s trial",
-                    phone, bot_name)
-        return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
+    # introduced on the api_contract_spec branch is preserved there. An active
+    # trial is not checked here either: the child is not named yet, and the
+    # phone's existing trial may belong to a sibling.
 
     result = postgres.create_draft(
         bot_name,
@@ -115,12 +113,13 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
     # Order matters: a client who already holds a booking must hear that, not
     # that they are out of trials.
     phone = trial.get("phone")
+    child_name = (trial.get("child_name") or "").strip() or None
     if phone:
-        if academy_repo.has_active_trial(bot_name, phone):
+        if academy_repo.has_active_trial(bot_name, phone, child_name):
             logger.info("[TRIAL_SERVICE] Confirm refused for trial_id=%s: phone=%s already has "
                         "an active %s trial", trial_id, phone, bot_name)
             return _err("HAS_ACTIVE_TRIAL", "Active trial already exists.")
-        if not academy_repo.check_trial_limits(bot_name, phone):
+        if not academy_repo.check_trial_limits(bot_name, phone, child_name):
             logger.info("[TRIAL_SERVICE] Confirm refused for trial_id=%s: phone=%s reached the "
                         "%s trial limit", trial_id, phone, bot_name)
             return _err("LIMIT_REACHED", "Trial limit reached.")
@@ -139,11 +138,7 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
 
 
 def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dict:
-    """Cancel a draft or trial and wipe the chat — and, on a cancel the client
-    asked for, the saved answers of an earlier abandoned signup too."""
-    trial = academy_repo.get_trial(trial_id) or {}
-    if trial.get("phone"):
-        academy_repo.delete_trial_summary(trial["phone"], bot_name)
+    """Cancel a draft or trial and wipe the chat."""
     result = postgres.cancel_booking_trial(
         bot_name,
         trial_id,
@@ -158,13 +153,8 @@ def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dic
 
 
 def abandon_draft(bot_name: str, chat_id: str, draft: dict, reason: str = "abandoned_120m") -> None:
-    """Cancel a draft (by default one nobody answered for
-    TRIAL_DRAFT_KEEP_SECONDS), wipe the chat, keep its answers as a summary
-    for the client's next signup."""
-    answers = {field: draft.get(field) for field in academy_repo.SUMMARY_FIELDS}
+    """Cancel a draft nobody answered for TRIAL_DRAFT_KEEP_SECONDS and wipe the chat."""
     cancel_trial(bot_name, chat_id, draft["id"], reason)
-    if any(answers.get(field) not in (None, "") for field in academy_repo.SUMMARY_FIELDS[1:]):
-        academy_repo.save_trial_summary(draft["phone"], bot_name, answers)
 
 
 def get_active_trials(bot_name: str, phone: str) -> dict:

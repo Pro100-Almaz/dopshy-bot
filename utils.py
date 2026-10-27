@@ -43,6 +43,24 @@ def parse_weekdays(text: str) -> list[int]:
     return [day for day, pattern in _WEEKDAY_PATTERNS.items() if pattern.search(value)]
 
 
+# «Бүгін сабақ бар ма?» names a day without its weekday. «послезавтра» and
+# «бүрсігүні» are not here: "tomorrow" must not match inside them.
+_TODAY_RE = re.compile(r"\b(?:сегодня|бүгін\w*|бугин\w*)\b", re.IGNORECASE)
+_TOMORROW_RE = re.compile(r"\b(?:завтра|ертең\w*|ертен\w*)\b", re.IGNORECASE)
+
+
+def parse_relative_weekdays(text: str, today: date | None = None) -> list[int]:
+    """Weekdays of «сегодня/бүгін» and «завтра/ертең» named in the text."""
+    base = today or today_almaty()
+    value = text or ""
+    days = []
+    if _TODAY_RE.search(value):
+        days.append(base.weekday())
+    if _TOMORROW_RE.search(value):
+        days.append((base + timedelta(days=1)).weekday())
+    return days
+
+
 def closest_weekday_date(weekday: int, today: date | None = None) -> date:
     """Return the closest occurrence of ``weekday``, including today.
 
