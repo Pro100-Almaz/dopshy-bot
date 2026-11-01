@@ -101,7 +101,7 @@ def _booking_to_row(b: dict) -> list:
         (b.get("updated_at") or now_almaty()).strftime("%Y-%m-%d %H:%M"),
         b.get("source", ""),
         b.get("reserved_until").strftime("%Y-%m-%d %H:%M")
-        if b.get("state") == "awaiting_payment" and b.get("reserved_until") else "",
+        if b.get("state") in ("awaiting_consent", "awaiting_payment") and b.get("reserved_until") else "",
         float(b.get("price_total", 0)),
         float(b.get("payment_current", 0)),
         max(0, float(b.get("price_total", 0)) - float(b.get("payment_current", 0))),
@@ -225,7 +225,7 @@ def _get_current_week_bookings(field_num: int) -> list[dict]:
     last_day = today + datetime.timedelta(days=6)
 
     bookings = booking_repo.get_bookings_in_range(
-        str(today), str(last_day), states=("awaiting_payment", "confirmed")
+        str(today), str(last_day), states=("awaiting_consent", "awaiting_payment", "confirmed")
     )
 
     filtered_bookings = []

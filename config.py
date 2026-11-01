@@ -174,8 +174,40 @@ BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Almaty")
 BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1200"))  # seconds
 # Academy trial signup: a draft untouched for TRIAL_DRAFT_KEEP_SECONDS is cancelled.
 TRIAL_DRAFT_KEEP_SECONDS: int = int(os.getenv("TRIAL_DRAFT_KEEP_SECONDS", "7200"))  # 120 minutes
-PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "1200"))  # 20 minutes
+PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "3600"))  # 1 hour
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
+# Public offer (оферта). The client must agree to it (non-refundable avans)
+# before any ApiPay invoice is raised — see integrations/consent_flow.py.
+OFFER_URL: str = os.getenv("OFFER_URL", "https://www.dopsy.kz/offer")
+# Stored on the booking with the consent, so it is provable later which offer
+# and which wording of the consent question the client agreed to.
+OFFER_VERSION: str = os.getenv("OFFER_VERSION", "2026-10-31")
+CONSENT_TEXT_VERSION: str = os.getenv("CONSENT_TEXT_VERSION", "v1")
+# How long a slot is held (state awaiting_consent) while the client answers.
+CONSENT_TTL_SECONDS: int = int(os.getenv("CONSENT_TTL_SECONDS", "1800"))  # 30 minutes
+# Payment number without Kaspi: the bot asks for another number at most this
+# many times; after that (or when the Kaspi check itself fails) it falls back
+# to the payment link below.
+KASPI_PHONE_MAX_RETRIES: int = int(os.getenv("KASPI_PHONE_MAX_RETRIES", "2"))
+# Payment number without Kaspi (or the check failing): the client gets the
+# Kaspi payment link (KASPI_PAYMENT_URL), an admin is alerted to confirm the
+# payment by its receipt, and the slot is held this long meanwhile.
+LINK_PAYMENT_TTL_SECONDS: int = int(os.getenv("LINK_PAYMENT_TTL_SECONDS", "7200"))  # 2 hours
+# WhatsApp number (any format) alerted when a booking needs a person.
+ADMIN_ALERT_PHONE: str = os.getenv("ADMIN_ALERT_PHONE", "")
+
+# Meta-approved WhatsApp templates. Free-form messages only reach a number
+# that wrote to us in the last 24h; outside that window the template with the
+# same purpose is sent instead (integrations/client_notify.py). Empty = not
+# approved yet → free-form is attempted anyway. See docs/whatsapp_templates.md
+# for the text, variables and buttons each one must have.
+WA_TEMPLATE_LANG: str = os.getenv("WA_TEMPLATE_LANG", "ru")
+WA_TEMPLATES: dict[str, str] = {
+    purpose: os.getenv(f"WA_TEMPLATE_{purpose.upper()}", "")
+    for purpose in ("booking_confirm_request", "booking_created", "booking_edited",
+                    "booking_confirmed", "booking_cancelled", "payment_link",
+                    "admin_alert")
+}
 
 # Payment receipt validation
 PAYMENT_MIN_FRACTION: float = float(os.getenv("PAYMENT_MIN_FRACTION", "0.5"))           # min share of full price
@@ -254,3 +286,27 @@ MAX_PLAYERS: int = 100
 BOOKING_PULL_MIN_L=60
 BOOKING_PULL_MAX_L=180
 BOOKING_PULL_BUFFER=30
+
+
+# ── Test allowlist (local instance running next to production) ──────────────
+# Comma-separated numbers, any format. When set, this instance talks ONLY to
+# them: inbound messages from anyone else are ignored (production answers
+# those), and outbound messages to anyone else are refused — so a local TTL
+# sweep or notification can never reach a real client. Production leaves it
+# empty, and pauses these same numbers instead (bot_paused_contacts).
+def _allow_key(phone: str | None) -> str:
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    elif len(digits) == 10 and digits.startswith("7"):
+        digits = "7" + digits
+    return digits
+
+
+BOT_ONLY_NUMBERS: frozenset[str] = frozenset(
+    k for k in (_allow_key(p) for p in os.getenv("BOT_ONLY_NUMBERS", "").split(",")) if k)
+
+
+def bot_number_allowed(phone: str | None) -> bool:
+    """False only when the test allowlist is on and `phone` is not on it."""
+    return not BOT_ONLY_NUMBERS or _allow_key(phone) in BOT_ONLY_NUMBERS

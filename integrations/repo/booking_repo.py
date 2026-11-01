@@ -27,12 +27,13 @@ def get_all_bookings(page: int| None = None, search: str | None = None) -> list[
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
                        customer_id, discount_id, discount_amount, price_before_discount,
+                       kaspi_phone, consent_at, consent_channel, consent_text_version, offer_version, payment_method,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
                 FROM bookings
                 WHERE NOT is_test
-                  AND field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_payment', 'unpaid')
+                  AND field IS NOT NULL AND date IS NOT NULL AND state IN ('confirmed', 'awaiting_consent', 'awaiting_payment', 'unpaid')
                   AND time_start IS NOT NULL AND time_end IS NOT NULL
             """
 
@@ -112,7 +113,7 @@ def get_booking_customers() -> list[dict]:
 
 
 def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
-    """Return slot-holding bookings (awaiting_payment + confirmed) in a date range.
+    """Return slot-holding bookings (awaiting_consent + awaiting_payment + confirmed) in a date range.
 
     Sandbox rows created by the agent-test console are invisible to real
     traffic, so a test conversation can never make a slot look taken. Inside a
@@ -130,7 +131,7 @@ def get_booked_slots(week_start: str, week_end: str) -> list[dict]:
                        customer_name, phone, players, notes
                 FROM bookings
                 WHERE date BETWEEN %s AND %s
-                  AND state IN ('awaiting_payment', 'confirmed')
+                  AND state IN ('awaiting_consent', 'awaiting_payment', 'confirmed')
                   AND (NOT is_test OR phone = ANY(%s))
                 ORDER BY date, time_start, field
             """, (week_start, week_end, phone_variants(own_test_phone)))
@@ -148,7 +149,7 @@ def get_user_upcoming_bookings(phone: str) -> list[dict]:
                 FROM bookings
                 WHERE phone = ANY(%s)
                   AND date >= CURRENT_DATE
-                  AND state IN ('awaiting_payment', 'confirmed')
+                  AND state IN ('awaiting_consent', 'awaiting_payment', 'confirmed')
                 ORDER BY date, time_start
             """, (phone_variants(phone),))
             return [dict(r) for r in cur.fetchall()]
@@ -202,7 +203,7 @@ def get_bookings_for_sheet() -> list[dict]:
                        paid_kaspi_qr, paid_cash
                 FROM bookings
                 WHERE NOT is_test
-                  AND state IN ('awaiting_payment', 'confirmed', 'unpaid')
+                  AND state IN ('awaiting_consent', 'awaiting_payment', 'confirmed', 'unpaid')
                   AND date >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY date, time_start, field
             """)
@@ -256,6 +257,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
                        customer_id, discount_id, discount_amount, price_before_discount,
+                       kaspi_phone, consent_at, consent_channel, consent_text_version, offer_version, payment_method,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
@@ -265,7 +267,7 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                   AND (%s::int IS NULL OR field = %s)
 
                   AND field IS NOT NULL AND time_start IS NOT NULL AND time_end IS NOT NULL
-                  AND state in ('confirmed', 'awaiting_payment', 'unpaid')
+                  AND state in ('confirmed', 'awaiting_consent', 'awaiting_payment', 'unpaid')
             """
 
             parameters = [
@@ -323,9 +325,16 @@ def get_booking(booking_id: int) -> dict | None:
                        phone, notes, state, price_total, source, reserved_until,
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
                        group_transition, customer_id, discount_id, discount_amount, price_before_discount,
+                       kaspi_phone, consent_at, consent_channel, consent_text_version, offer_version, payment_method,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
-                       ) AS has_contract
+                       ) AS has_contract,
+                       (SELECT ai.invoice_id FROM apipay_invoices ai
+                         WHERE bookings.id = ANY(ai.booking_ids)
+                         ORDER BY ai.id DESC LIMIT 1) AS apipay_invoice_id,
+                       (SELECT cr.step FROM consent_requests cr
+                         WHERE bookings.id = ANY(cr.booking_ids)
+                         ORDER BY cr.id DESC LIMIT 1) AS consent_step
                 FROM bookings WHERE id = %s
             """, (booking_id,))
             row = cur.fetchone()
@@ -469,7 +478,7 @@ def cancel_draft_awaiting_payment(phone: str) -> bool:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 UPDATE bookings SET state = 'cancelled', updated_at = NOW()
-                WHERE id = (SELECT id FROM bookings WHERE phone = ANY(%s) AND state IN ('draft', 'awaiting_payment')
+                WHERE id = (SELECT id FROM bookings WHERE phone = ANY(%s) AND state IN ('draft', 'awaiting_consent', 'awaiting_payment')
                 ORDER BY created_at DESC 
                 LIMIT 1)
             """, (phone_variants(phone),))
@@ -486,7 +495,7 @@ def has_awaiting_payments(phone: str) -> bool:
                 SELECT 1
                 FROM bookings
                 WHERE phone = ANY(%s)
-                  AND state  = 'awaiting_payment'
+                  AND state IN ('awaiting_consent', 'awaiting_payment')
                 LIMIT 1
             """, (phone_variants(phone),))
 

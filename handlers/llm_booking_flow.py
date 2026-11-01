@@ -37,12 +37,11 @@ from handlers.base_classes.base_checker import BaseChecker
 from handlers.base_classes.base_draft_handler import BaseDraftHandler
 from handlers.base_classes.base_format import BaseFormat
 from handlers.base_classes.base_helper import BaseHelper
-from integrations import apipay_client, apipay_service
+from integrations import consent_flow
 from integrations import booking as booking_logic
 from integrations import booking_service
 from integrations import platform_prefill
 from integrations import test_context
-from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.booking import floor_time_to_30_minutes
 from integrations.repo import booking_repo, postgres
 from integrations.sheets.booking_sheets import refresh_all_bookings, refresh_week_sheet
@@ -163,53 +162,6 @@ T = {
                                     "💳 Қаласаңыз толық соманы бірден төлей аласыз.\n"
                                     "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
                                     "⚠️ 20 мин төлемсіз — брондау жойылады.")},
-    # ApiPay path: the client confirms the push in their own Kaspi app, so
-    # there is no link to follow and no receipt to send back.
-    "booking_done_apipay":  {"ru": ("📋 Бронь оформлена!\n\n"
-                                    "📅 {date}\n"
-                                    "⏰ {ts}–{te}\n"
-                                    "⚽ {fmt}\n"
-                                    "👤 Имя: {name}\n"
-                                    "💰 {price}\n\n"
-                                    "💳 Счёт на аванс {avans} отправлен в ваше приложение Kaspi — "
-                                    "подтвердите оплату там.\n"
-                                    "Остаток оплачивается на месте.\n"
-                                    "⚠️ Возврат при неявке не производится\n\n"
-                                    "⚠️ 20 мин без оплаты — бронь отменится."),
-                             "kk": ("📋 Брондау тіркелді!\n\n"
-                                    "📅 {date}\n"
-                                    "⏰ {ts}–{te}\n"
-                                    "⚽ {fmt}\n"
-                                    "👤 Аты: {name}\n"
-                                    "💰 {price}\n\n"
-                                    "💳 {avans} аванс шоты Kaspi қосымшаңызға жіберілді — "
-                                    "төлемді сол жерде растаңыз.\n"
-                                    "Қалған сома орында төленеді.\n"
-                                    "⚠️ Келмесеңіз төлем қайтарылмайды\n\n"
-                                    "⚠️ 20 мин төлемсіз — брондау жойылады.")},
-    # The avans invoice could not be raised, so the booking was not kept. The
-    # provider's own wording goes in verbatim ({error}) — it is the only thing
-    # that tells a manager what actually happened when the client forwards this.
-    "apipay_failed":        {"ru": ("⚠️ Не удалось выставить счёт на аванс.\n"
-                                    "{error}\n\n"
-                                    "Бронь не создана — слот остался свободным.\n"
-                                    "📞 Позвоните менеджеру, он забронирует вручную."),
-                             "kk": ("⚠️ Аванс шотын жасау мүмкін болмады.\n"
-                                    "{error}\n\n"
-                                    "Брондау жасалмады — слот бос қалды.\n"
-                                    "📞 Менеджерге қоңырау шалыңыз, ол қолмен брондайды.")},
-    # The number is not registered in Kaspi, so the avans cannot be pushed to
-    # it at all. Checked before the slot is reserved — nothing was created, and
-    # the client can only be helped by a manager (their WhatsApp number is the
-    # one we would bill, so there is nothing for them to correct here).
-    "apipay_no_kaspi":      {"ru": ("⚠️ Номер {phone} не зарегистрирован в Kaspi.\n\n"
-                                    "Аванс выставляется в приложение Kaspi, поэтому "
-                                    "бронь не создана — слот остался свободным.\n"
-                                    "📞 Позвоните менеджеру: он забронирует вручную."),
-                             "kk": ("⚠️ {phone} нөмірі Kaspi-де тіркелмеген.\n\n"
-                                    "Аванс Kaspi қосымшасына жіберіледі, сондықтан "
-                                    "брондау жасалмады — слот бос қалды.\n"
-                                    "📞 Менеджерге қоңырау шалыңыз, ол қолмен брондайды.")},
     "cancelled":            {"ru": "Бронь отменена. Напишите, если что! 🙂",
                              "kk": "Брондау тоқтатылды. Қаласаңыз жазыңыз! 🙂"},
     "general_header":       {"ru": "Давайте забронируем! Свободные слоты:",
@@ -485,96 +437,38 @@ class LlmBookingFlowHandler:
         provider: str = "ycloud",
     ) -> str:
         """
-        Transition draft → awaiting_payment via booking_service.request_payment.
+        Reserve the slot for the client's "Подтверждаю".
 
-        When ApiPay is configured the client's number is checked against Kaspi
-        first (a number Kaspi does not know can never pay an invoice), the avans
-        invoice is QUEUED in the same transaction that reserves the slot, then
-        sent once that has committed — so a failed send can never erase the
-        record of what was asked for. The
-        Kaspi link + PDF-receipt flow stays as the fallback for when ApiPay is
-        off or the send did not go through.
+        ApiPay configured → draft → awaiting_consent: the slot is held, NO
+        invoice yet, and the reply is the separate offer-consent question
+        ("✅ Келісемін / ❌ Жоқ"). The rest of the dialog — consent, Kaspi number,
+        invoice — is integrations/consent_flow.py, which message_handler routes
+        the client's next messages to.
+
+        Otherwise (ApiPay off, or the agent-test console) → awaiting_payment
+        with the Kaspi link + PDF-receipt flow, as before.
         """
         booking_id = draft["id"]
         client_token = str(draft.get("client_token", ""))
 
-        invoice_hook = None
-        # Agent-test console: never raise a real Kaspi invoice. Leaving the hook
-        # as None makes request_payment take its ordinary non-ApiPay path, which
-        # is what we want to exercise.
+        # Agent-test console: never raise a real Kaspi invoice — take the
+        # ordinary non-ApiPay path.
         if config.APIPAY_ENABLED and not test_context.is_test_mode():
-            try:
-                apipay_client.normalize_phone(phone)
-            except ApiPayError as exc:
-                logger.warning("[LLM_FLOW] Телефон %s не годится для ApiPay: %s", phone, exc)
-            else:
-                # Kaspi is asked about the number BEFORE the slot is reserved.
-                # An invoice to a number it does not know is accepted by ApiPay
-                # and only fails minutes later as a webhook — the client would be
-                # told their booking is waiting for a payment request that can
-                # never arrive, hold the slot until the TTL, and the dead invoice
-                # would still be counted against the daily quota.
-                try:
-                    apipay_service.ensure_kaspi_client(phone)
-                except KaspiClientMissing:
-                    logger.warning("[LLM_FLOW] Номер %s не в Kaspi — бронь id=%d не создана",
-                                   phone, booking_id)
-                    return self.asker.localize(lang, "apipay_no_kaspi", phone=phone)
-                except ApiPayError as exc:
-                    logger.error("[LLM_FLOW] Проверка номера %s в Kaspi не удалась: %s",
-                                 phone, exc)
-                    return self.asker.localize(lang, "apipay_failed", error=str(exc))
+            return self._reserve_for_consent(draft, chat_id, phone, lang, provider)
 
-                def invoice_hook(cur, booking_ids):  # noqa: F811
-                    return {"invoice": apipay_service.queue_invoice(
-                        cur, phone, booking_ids, slot_count=1,
-                        description="Аванс за бронь", source="bot",
-                        notify_chat_id=chat_id, notify_provider=provider,
-                        notify_lang=lang,
-                    )}
-
-        result = booking_service.request_payment(booking_id, client_token,
-                                                 on_reserved=invoice_hook)
+        result = booking_service.request_payment(booking_id, client_token)
 
         if not result["ok"]:
-            if result["code"] == "SLOT_TAKEN":
-                logger.warning(
-                    "[LLM_FLOW] Slot taken at finalization, id=%d", booking_id,
-                )
-                return (
-                    self.asker.localize(lang, "slot_taken") + "\n\n"
-                    + self._show_general_availability(lang)
-                )
-            logger.error("[LLM_FLOW] request_payment failed: %s", result)
-            return result.get("message", "Ошибка. Попробуйте ещё раз.")
+            return self._reservation_failed(result, booking_id, lang)
 
         d = str(draft["date"])
         ts = str(draft["time_start"])[:5]
         te = str(draft["time_end"])[:5]
         field_id = int(draft["field"])
         fmt = draft.get("format") or "?"
-        players = draft.get("players", "?")
         name = draft.get("customer_name", "")
 
         logger.info("[LLM_FLOW] Booking id=%d → awaiting_payment", booking_id)
-
-        # The reservation is committed; the ApiPay call is deliberately out here.
-        # No invoice means no booking: the reservation is taken back and the
-        # client is told what went wrong and to call a manager, rather than
-        # being left holding a slot with no way to pay for it.
-        queued = (result.get("data") or {}).get("invoice")
-        sent = None
-        if queued:
-            try:
-                sent = apipay_service.send_invoice(queued)
-            except ApiPayError as exc:
-                apipay_service.rollback_failed_send(queued, str(exc))
-                logger.error("[LLM_FLOW] Счёт не выставлен для брони id=%d — "
-                             "бронь отменена: %s", booking_id, exc)
-                clear_history(chat_id)
-                refresh_all_bookings()
-                refresh_week_sheet()
-                return self.asker.localize(lang, "apipay_failed", error=str(exc))
 
         clear_history(chat_id)
         refresh_all_bookings()
@@ -583,13 +477,43 @@ class LlmBookingFlowHandler:
         total = calculate_full_booking_price(fmt, d, ts, te)
         common = dict(date=self.formatter.fmt_date(d, lang), ts=ts, te=te,
                       fid=field_id, fmt=fmt, name=name, price=fmt_price(total))
-
-        if sent:
-            return self.asker.localize(
-                lang, "booking_done_apipay",
-                avans=fmt_price(sent["amount"]), **common)
         return self.asker.localize(lang, "booking_done",
                                    pay_url=config.KASPI_PAYMENT_URL, **common)
+
+    def _reserve_for_consent(self, draft: dict, chat_id: str, phone: str,
+                             lang: str, provider: str) -> str:
+        """draft → awaiting_consent + consent request; reply = consent question."""
+        booking_id = draft["id"]
+
+        def consent_hook(cur, booking_ids):
+            # Both halves of a day-crossing booking are one slot, one avans.
+            return {"consent_request_id": consent_flow.create_request(
+                cur, phone=phone, booking_ids=booking_ids,
+                chargeable_ids=booking_ids, slot_count=1, source="bot",
+                consent_channel="bot", lang=lang, chat_id=chat_id,
+                provider=provider, description="Аванс за бронь")}
+
+        result = booking_service.request_payment(
+            booking_id, str(draft.get("client_token", "")), on_reserved=consent_hook,
+            target_state="awaiting_consent", ttl_seconds=config.CONSENT_TTL_SECONDS)
+        if not result["ok"]:
+            return self._reservation_failed(result, booking_id, lang)
+
+        logger.info("[LLM_FLOW] Booking id=%d → awaiting_consent (request #%s)",
+                    booking_id, (result.get("data") or {}).get("consent_request_id"))
+        refresh_all_bookings()
+        refresh_week_sheet()
+        return consent_flow.prompt_message(lang, config.APIPAY_AVANS_PER_BOOKING)
+
+    def _reservation_failed(self, result: dict, booking_id: int, lang: str) -> str:
+        if result["code"] == "SLOT_TAKEN":
+            logger.warning("[LLM_FLOW] Slot taken at finalization, id=%d", booking_id)
+            return (
+                self.asker.localize(lang, "slot_taken") + "\n\n"
+                + self._show_general_availability(lang)
+            )
+        logger.error("[LLM_FLOW] request_payment failed: %s", result)
+        return result.get("message", "Ошибка. Попробуйте ещё раз.")
 
     def _cancel_draft(self, draft: dict, chat_id: str, lang: str = "ru") -> str:
         """Cancel the draft and return user-facing confirmation."""

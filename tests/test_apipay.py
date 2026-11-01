@@ -123,6 +123,10 @@ def client(monkeypatch):
     monkeypatch.setattr("blueprints.manager_api._single_table_erase", lambda row: None)
     monkeypatch.setattr("blueprints.manager_api.upsert_booking_row", lambda row: None)
     monkeypatch.setattr("blueprints.manager_api.refresh_week_sheet", lambda: None)
+    # The website's "booking created" WhatsApp message is tested in
+    # test_consent.py; here it would only crowd the notification assertions.
+    monkeypatch.setattr("blueprints.manager_api._notify_site_booking", lambda *a, **k: None)
+    monkeypatch.setattr(config, "ADMIN_ALERT_PHONE", "")
     app = Flask(__name__)
     app.register_blueprint(manager_api)
     return app.test_client()
@@ -149,6 +153,13 @@ def _post_webhook(hook_client, invoice_id, status, event="invoice.status_changed
     return hook_client.post("/webhooks/apipay", data=raw,
                             headers={"Content-Type": "application/json",
                                      "X-Webhook-Signature": sig})
+
+
+def _site(body):
+    """A website batch: the client ticked the offer checkbox, so the invoice is
+    raised at once. (A manager batch without consent waits for it on WhatsApp —
+    see tests/test_consent.py.)"""
+    return {**body, "consent": {"accepted": True}}
 
 
 def _slot(field, date, ts="10:00", te="11:00", **extra):
@@ -261,7 +272,7 @@ def _queued_batch(slots, phone=_PHONE):
 
     res = booking_service.manager_create_bookings_batch(
         slots, phone=phone, actor_id="test@dopshy.kz",
-        on_created=apipay_service.batch_invoice_hook(phone),
+        on_created=apipay_service.batch_invoice_hook(phone, consent={}),
         avans_per_booking=config.APIPAY_AVANS_PER_BOOKING,
     )
     assert res["ok"], res
@@ -286,7 +297,7 @@ def test_two_slots_make_one_invoice_of_20000(client, apipay_on):
         _slot(1, "2027-03-01", "10:00", "11:00"),
         _slot(1, "2027-03-01", "12:00", "13:00"),
     ]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200, r.get_json()
     data = r.get_json()
 
@@ -304,7 +315,7 @@ def test_two_slots_make_one_invoice_of_20000(client, apipay_on):
 
 def test_single_slot_is_10000(client, apipay_on):
     body = {"phone": _PHONE, "slots": [_slot(2, "2027-03-02")]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200
     assert apipay_on["created"][0]["amount"] == 10000
 
@@ -316,7 +327,7 @@ def test_repeating_slots_are_not_charged(client, apipay_on):
         _slot(2, "2027-04-05", "10:00", "11:00",
               repeat_mode="weekly", repeat_until="2027-04-26"),
     ]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200
     data = r.get_json()
 
@@ -329,7 +340,7 @@ def test_all_repeating_batch_creates_no_invoice(client, apipay_on):
     body = {"phone": _PHONE, "slots": [
         _slot(1, "2027-05-03", repeat_mode="weekly", repeat_until="2027-05-24"),
     ]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200
     data = r.get_json()
 
@@ -356,7 +367,7 @@ def test_failed_send_cancels_the_batch_and_reports_the_error(client, apipay_on,
         _slot(1, "2027-06-07", "10:00", "11:00"),
         _slot(1, "2027-06-07", "12:00", "13:00"),
     ]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 502, r.get_json()
     data = r.get_json()
 
@@ -388,10 +399,10 @@ def test_failed_send_frees_the_slot_for_the_next_booking(client, apipay_on,
 
     body = {"phone": _PHONE, "slots": [_slot(1, "2027-06-08", "10:00", "11:00")]}
     assert client.post("/api/manager/bookings/batch",
-                       json=body, headers=_HDR).status_code == 502
+                       json=_site(body), headers=_HDR).status_code == 502
 
     outage["down"] = False
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200, r.get_json()
     assert set(_states(r.get_json()["booking_ids"]).values()) == {"awaiting_payment"}
 
@@ -408,7 +419,7 @@ def test_failed_send_takes_back_the_repeating_slots_too(client, apipay_on,
         _slot(2, "2027-06-14", "10:00", "11:00",
               repeat_mode="weekly", repeat_until="2027-07-05"),
     ]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 502, r.get_json()
 
     cancelled = r.get_json()["cancelled_booking_ids"]
@@ -549,7 +560,7 @@ def test_webhook_resolves_by_external_order_id_before_the_send_lands(
 
 def test_missing_phone_is_rejected_before_anything_is_created(client, apipay_on):
     body = {"slots": [_slot(1, "2027-06-08")]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 400
     assert apipay_on["created"] == []
     with _conn() as conn:
@@ -562,53 +573,42 @@ def test_missing_phone_is_rejected_before_anything_is_created(client, apipay_on)
 # Kaspi registration check — the failure that must NOT be found out by webhook
 # ---------------------------------------------------------------------------
 
-def test_batch_is_refused_when_the_number_has_no_kaspi(client, apipay_on):
-    """Nothing is created, nothing is sent, and the manager is told in the reply.
-
-    Without the check the invoice would be accepted, spend one of the day's
-    invoice slots, and only fail later as a webhook — by then this request has
-    answered 200 and nobody is listening.
-    """
+def test_website_number_without_kaspi_pays_by_link(client, apipay_on):
+    """The quota is never spent on a doomed invoice — and the booking is not
+    refused either: the client pays by the Kaspi link, an admin confirms it."""
     apipay_on["no_kaspi"].add("87001234567")
     body = {"phone": _PHONE, "slots": [_slot(1, "2027-06-11")]}
 
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
 
-    assert r.status_code == 400
+    assert r.status_code == 200, r.get_json()
     payload = r.get_json()
-    assert payload["code"] == "NO_KASPI"
-    assert "Kaspi" in payload["message"]
+    assert payload["payment"]["method"] == "link" and payload["payment"]["reason"] == "no_kaspi"
     assert apipay_on["checked"] == ["87001234567"]
-    assert apipay_on["created"] == [], "the quota is never spent on a doomed invoice"
+    assert apipay_on["created"] == []
     assert _invoice_count() == 0
-    assert _states_on_date("2027-06-11") == {}
+    assert set(_states_on_date("2027-06-11").values()) == {"awaiting_payment"}
 
 
-def test_batch_is_refused_when_the_check_itself_fails(client, apipay_on, monkeypatch):
-    """An unanswerable check is fatal too — before anything is written.
-
-    Reserving on the assumption that the number is fine would only move the
-    failure to `send_invoice`, which takes the whole batch back again.
-    """
+def test_website_check_failure_pays_by_link_too(client, apipay_on, monkeypatch):
     def down(phone):
         raise ApiPayError("ApiPay недоступен: timeout")
 
     monkeypatch.setattr(apipay_client, "check_client", down)
     body = {"phone": _PHONE, "slots": [_slot(1, "2027-06-12")]}
 
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
 
-    assert r.status_code == 502
-    assert r.get_json()["code"] == "PAYMENT_PROVIDER_ERROR"
+    assert r.status_code == 200
+    assert r.get_json()["payment"]["reason"] == "check_failed"
     assert apipay_on["created"] == []
-    assert _states_on_date("2027-06-12") == {}
 
 
 def test_repeating_only_batch_is_not_checked(client, apipay_on):
     """No avans → no invoice → no reason to ask Kaspi anything."""
     body = {"phone": _PHONE, "slots": [_slot(1, "2027-06-13", repeat_mode="weekly",
                                              repeat_until="2027-06-27")]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
 
     assert r.status_code == 200
     assert apipay_on["checked"] == []
@@ -620,7 +620,7 @@ def test_check_can_be_switched_off(client, apipay_on, monkeypatch):
     apipay_on["no_kaspi"].add("87001234567")   # would be refused if consulted
 
     body = {"phone": _PHONE, "slots": [_slot(1, "2027-06-14")]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
 
     assert r.status_code == 200
     assert apipay_on["checked"] == []
@@ -630,7 +630,7 @@ def test_check_can_be_switched_off(client, apipay_on, monkeypatch):
 def test_batch_still_works_when_apipay_is_disabled(client, monkeypatch):
     monkeypatch.setattr(config, "APIPAY_ENABLED", False)
     body = {"phone": _PHONE, "slots": [_slot(3, "2027-06-09")]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200
     assert r.get_json()["invoice"] is None
     assert _invoice_count() == 0
@@ -646,7 +646,7 @@ def _make_batch(client, date="2027-07-01", extra_slots=()):
         _slot(1, date, "12:00", "13:00"),
         *extra_slots,
     ]}
-    r = client.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    r = client.post("/api/manager/bookings/batch", json=_site(body), headers=_HDR)
     assert r.status_code == 200, r.get_json()
     return r.get_json()
 
@@ -859,7 +859,7 @@ def test_reconcile_ignores_unsent_rows_and_survives_apipay_being_down(
 
     # Now one that WAS sent, with the GET failing.
     sent = client.post("/api/manager/bookings/batch",
-                       json={"phone": _PHONE, "slots": [_slot(2, "2027-08-06")]},
+                       json=_site({"phone": _PHONE, "slots": [_slot(2, "2027-08-06")]}),
                        headers=_HDR).get_json()
     monkeypatch.setattr(apipay_client, "get_invoice",
                         lambda iid: (_ for _ in ()).throw(ApiPayError("timeout")))
@@ -1117,6 +1117,10 @@ def _bot_hook(chat_id="7770001:87001234567", lang="ru", provider="ycloud",
     from integrations import apipay_service
 
     def hook(cur, booking_ids):
+        # The client agreed to the offer (the consent dialog's job) — without
+        # it queue_invoice refuses.
+        from integrations import consent_flow
+        consent_flow.record_consent(cur, booking_ids, "bot")
         return {"invoice": apipay_service.queue_invoice(
             cur, phone, booking_ids, slot_count=1, description="Аванс за бронь",
             source="bot", notify_chat_id=chat_id, notify_provider=provider,
@@ -1353,17 +1357,26 @@ def test_queued_invoice_is_retired_when_the_receipt_arrives_first(apipay_on,
 # ---------------------------------------------------------------------------
 
 def _finalize(monkeypatch, booking_id, token, date, lang="ru"):
-    """Run the bot's real finalization step, side effects stubbed."""
+    """Run the bot's real finalization step, then agree to the offer.
+
+    "Подтверждаю" only holds the slot and asks for consent; the invoice comes
+    from the client's "✅ Согласен" — so that is the reply returned here.
+    """
     from handlers import llm_booking_flow as flow_mod
+    from integrations import consent_flow
 
     for name in ("clear_history", "refresh_all_bookings", "refresh_week_sheet"):
         monkeypatch.setattr(flow_mod, name, lambda *a, **kw: None)
+    monkeypatch.setattr(consent_flow, "_refresh_sheets", lambda: None)
 
     draft = {"id": booking_id, "client_token": token, "date": date,
              "time_start": "18:00", "time_end": "19:00", "field": 1,
              "format": "5x5", "players": 8, "customer_name": "Клиент"}
-    return flow_mod.LlmBookingFlowHandler()._finalize_booking(
+    prompt = flow_mod.LlmBookingFlowHandler()._finalize_booking(
         draft, chat_id="7770001:87001234567", phone="87001234567", lang=lang)
+    assert config.OFFER_URL in prompt, "the consent question comes first"
+    assert _invoice_count() == 0, "no invoice before consent"
+    return consent_flow.handle_message("87001234567", "✅ Согласен" if lang == "ru" else "✅ Келісемін")
 
 
 def test_bot_failed_send_cancels_the_booking_and_tells_the_client(apipay_on,
@@ -1396,47 +1409,8 @@ def test_bot_failed_send_cancels_the_booking_and_tells_the_client(apipay_on,
     assert apipay_on["created"] == [], "no request for money after a cancelled booking"
 
 
-def test_bot_refuses_a_number_that_has_no_kaspi(apipay_on, monkeypatch):
-    """The client is told immediately — not left holding an unpayable slot.
-
-    The number is the one they are writing from, so there is nothing for them
-    to correct: the reply hands them to a manager. Nothing is reserved, and no
-    invoice is spent on a request Kaspi could never deliver.
-    """
-    apipay_on["no_kaspi"].add("87001234567")
-    bid, token = _draft(date="2027-07-11")
-
-    reply = _finalize(monkeypatch, bid, token, "2027-07-11")
-
-    assert "Kaspi" in reply and "менеджер" in reply.lower()
-    assert config.KASPI_PAYMENT_URL not in reply
-    assert apipay_on["created"] == [], "the doomed invoice is never created"
-    assert _invoice_count() == 0, "and no row is queued for the sweeper either"
-    assert _states([bid]) == {bid: "draft"}, "the slot was never reserved"
-
-
-def test_bot_answers_the_kaspi_refusal_in_kazakh(apipay_on, monkeypatch):
-    apipay_on["no_kaspi"].add("87001234567")
-    bid, token = _draft(date="2027-07-12")
-
-    reply = _finalize(monkeypatch, bid, token, "2027-07-12", lang="kk")
-
-    assert "Kaspi" in reply
-    assert "Менеджерге" in reply
-
-
-def test_bot_does_not_reserve_when_the_check_cannot_be_made(apipay_on, monkeypatch):
-    """A check that fails is treated like a send that fails — but for free."""
-    monkeypatch.setattr(apipay_client, "check_client",
-                        lambda phone: (_ for _ in ()).throw(
-                            ApiPayError("ApiPay недоступен: timeout")))
-    bid, token = _draft(date="2027-07-13")
-
-    reply = _finalize(monkeypatch, bid, token, "2027-07-13")
-
-    assert "ApiPay недоступен" in reply
-    assert _states([bid]) == {bid: "draft"}, "nothing to take back"
-    assert _invoice_count() == 0
+# The no-Kaspi and failed-check bot paths (payment link + admin alert) are
+# covered in tests/test_consent.py.
 
 
 def test_bot_failed_send_answers_in_kazakh(apipay_on, monkeypatch):

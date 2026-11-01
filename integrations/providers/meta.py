@@ -47,7 +47,18 @@ def parse_meta(raw: dict) -> IncomingWhatsAppMessage:
             )
 
         interactive = None
-        if msg_type == 'interactive':
+        if msg_type == 'button':
+            # Quick-reply tap on a TEMPLATE message (e.g. the offer-consent
+            # template): Meta reports it as type "button", not "interactive".
+            # Normalised to an interactive button reply so the handler treats
+            # both the same way.
+            btn = msg.get('button') or {}
+            msg_type = 'interactive'
+            interactive = WhatsAppInteractive(
+                type='button_reply',
+                button_reply=WhatsAppButtonReply(id=btn.get('payload'), title=btn.get('text')),
+            )
+        elif msg_type == 'interactive':
             inter = msg['interactive']
             button_reply = inter.get('button_reply', {})
             interactive = WhatsAppInteractive(
