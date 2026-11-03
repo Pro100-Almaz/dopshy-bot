@@ -3,15 +3,16 @@
 Offer URL: `https://www.dopsy.kz/offer` (`OFFER_URL`).
 
 No Kaspi (ApiPay) invoice is raised until the client has agreed to the offer
-(the avans is non-refundable). On the website the agreement is a checkbox; the
+(the avans is refundable within 48 hours of payment). On the website the agreement is a checkbox; the
 backend stores it on every booking as proof (`consent_at`, `consent_channel =
 "site"`, `offer_version`, `consent_text_version`) and refuses to invoice without it.
 
 ## UI
 
-- Checkbox before the submit button: **«Офертамен танысып, келісемін. Аванс
-  қайтарылмайды»** (ru: «С офертой ознакомлен(а) и согласен(на). Аванс не
-  возвращается»), the word «Оферта» linking to the offer URL.
+- Checkbox before the submit button: **«Офертамен танысып, келісемін. Авансты
+  төлегеннен кейін 48 сағат ішінде қайтаруға болады»** (ru: «С офертой
+  ознакомлен(а) и согласен(на). Аванс можно вернуть в течение 48 часов после
+  оплаты»), the word «Оферта» linking to the offer URL.
 - Submit stays **disabled** until it is ticked (the backend rejects it anyway).
 - A separate **Kaspi number** field, prefilled with the client's phone. The
   invoice goes there.

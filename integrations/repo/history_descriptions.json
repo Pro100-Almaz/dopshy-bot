@@ -6,6 +6,9 @@
   "manager_avans_change": "Изменен сумма полученного аванса с [OLD_AMOUNT] на [NEW_AMOUNT]",
   "manager_kaspi_qr_change": "Изменен сумма оплаты через KaspiQR c [OLD_AMOUNT] на [NEW_AMOUNT]",
   "manager_cash_change": "Изменен сумма оплаты наличными с [OLD_AMOUNT] на [NEW_AMOUNT]",
+  "apipay_refund_requested": "Запрошен возврат [AMOUNT]тг через Kaspi (ApiPay), счёт №[INVOICE_ID] ([WINDOW]).[COMMENT]",
+  "apipay_refund_done": "Возврат [AMOUNT]тг через Kaspi (ApiPay) выполнен, счёт №[INVOICE_ID].",
+  "apipay_refund_failed": "Возврат [AMOUNT]тг через Kaspi (ApiPay) не прошёл. [REASON]",
 
   "apipay_paid": "Оплата аванса [AMOUNT]тг через Kaspi (ApiPay), счёт №[INVOICE_ID].",
   "apipay_cancelled": "Счёт ApiPay №[INVOICE_ID] отменён. Причина: [REASON].",

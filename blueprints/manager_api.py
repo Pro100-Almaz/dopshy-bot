@@ -24,7 +24,7 @@ from flask import Blueprint, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 import config
-from integrations import apipay_client, apipay_service, booking_service, client_notify, contract_billing
+from integrations import apipay_client, apipay_service, booking_refunds, booking_service, client_notify, contract_billing
 from integrations import consent_flow, test_context
 from integrations.apipay_client import ApiPayError, KaspiClientMissing
 from integrations.repo import academy_repo
@@ -1227,6 +1227,65 @@ def patch_booking(booking_id: int):
                 logger.error("[MANAGER_API] sheet sync failed for booking %s: %s", booking_id, exc)
 
     return jsonify(res), (200 if res["ok"] else 404)
+
+
+@manager_api.get("/api/manager/bookings/<int:booking_id>/refunds")
+def get_booking_refunds(booking_id: int):
+    """Refund history, what can be refunded through Kaspi (ApiPay) right now,
+    and the 48-hour window flag. Unfinished refunds of this booking are
+    reconciled with ApiPay first, so reopening the modal shows the real state."""
+    try:
+        booking_refunds.sweep(booking_id=booking_id)
+    except Exception:  # reconciliation is best-effort; the summary still answers
+        logger.exception("[MANAGER_API] refund sync failed for booking %s", booking_id)
+    res = booking_refunds.get_summary(booking_id)
+    if not res["ok"]:
+        return jsonify(res), 404
+    return jsonify({"ok": True, "data": _refund_json(res["data"])}), 200
+
+
+@manager_api.post("/api/manager/bookings/<int:booking_id>/refunds")
+def create_booking_refund(booking_id: int):
+    """Refund through ApiPay. Body: `{amount, comment?, request_key?, source?}`.
+
+    `request_key` (one per button press) makes the call idempotent: resending it
+    returns the same refund. The answer is the refund's state — `processing`
+    means accepted, the money moves when ApiPay confirms.
+    """
+    body = request.get_json(silent=True) or {}
+    if "amount" not in body:
+        return jsonify({"ok": False, "code": "INVALID_AMOUNT",
+                        "message": "Укажите сумму возврата."}), 400
+    res = booking_refunds.request_refund(
+        booking_id, body.get("amount"), comment=body.get("comment"),
+        request_key=body.get("request_key"),
+        actor=body.get("source") or _api_key_actor(),
+    )
+    if res.get("data") is not None:
+        res["data"] = _refund_json(res["data"])
+    if res["ok"]:
+        return jsonify(res), 200
+    status = {"NOT_FOUND": 404, "INVALID_AMOUNT": 400, "INVALID": 400,
+              "NOT_CONFIGURED": 503}.get(res["code"], 409)
+    return jsonify(res), status
+
+
+def _refund_json(data: dict) -> dict:
+    out = _serialize(data)
+    out["refunds"] = [_refund_row_json(r) for r in data.get("refunds") or []]
+    if data.get("refund"):
+        out["refund"] = _refund_row_json(data["refund"])
+    # _serialize maps None → "", but "unknown" must stay distinguishable from False.
+    out["within_window"] = data.get("within_window")
+    out["blocked_reason"] = data.get("blocked_reason")
+    out["invoice_id"] = data.get("invoice_id")
+    return out
+
+
+def _refund_row_json(row: dict) -> dict:
+    out = _serialize(row)
+    out["within_window"] = row.get("within_window")
+    return out
 
 
 # States in which a reschedule is news to the client.

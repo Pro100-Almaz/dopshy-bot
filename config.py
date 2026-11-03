@@ -176,13 +176,17 @@ BOOKING_SESSION_TTL: int = int(os.getenv("BOOKING_SESSION_TTL", "1200"))  # seco
 TRIAL_DRAFT_KEEP_SECONDS: int = int(os.getenv("TRIAL_DRAFT_KEEP_SECONDS", "7200"))  # 120 minutes
 PAYMENT_TTL_SECONDS: int = int(os.getenv("PAYMENT_TTL_SECONDS", "3600"))  # 1 hour
 KASPI_PAYMENT_URL: str = os.getenv("KASPI_PAYMENT_URL", "https://pay.kaspi.kz/pay/z7xcvrgq")
-# Public offer (оферта). The client must agree to it (non-refundable avans)
-# before any ApiPay invoice is raised — see integrations/consent_flow.py.
+# Public offer (оферта). The client must agree to it before any ApiPay invoice
+# is raised — see integrations/consent_flow.py.
 OFFER_URL: str = os.getenv("OFFER_URL", "https://www.dopsy.kz/offer")
 # Stored on the booking with the consent, so it is provable later which offer
 # and which wording of the consent question the client agreed to.
-OFFER_VERSION: str = os.getenv("OFFER_VERSION", "2026-10-31")
-CONSENT_TEXT_VERSION: str = os.getenv("CONSENT_TEXT_VERSION", "v1")
+# 2026-11-02 / v2: the avans is refundable within REFUND_WINDOW_HOURS of payment.
+OFFER_VERSION: str = os.getenv("OFFER_VERSION", "2026-11-02")
+CONSENT_TEXT_VERSION: str = os.getenv("CONSENT_TEXT_VERSION", "v2")
+# The client may ask for a refund within this many hours of first paying
+# (bookings.first_paid_at). Past it a refund is still possible, just not owed.
+REFUND_WINDOW_HOURS: int = int(os.getenv("REFUND_WINDOW_HOURS", "48"))
 # How long a slot is held (state awaiting_consent) while the client answers.
 CONSENT_TTL_SECONDS: int = int(os.getenv("CONSENT_TTL_SECONDS", "1800"))  # 30 minutes
 # Payment number without Kaspi: the bot asks for another number at most this

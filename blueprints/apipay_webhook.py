@@ -21,8 +21,8 @@ import logging
 from flask import Blueprint, jsonify, request
 
 import config
-from integrations import apipay_service, test_context
-from integrations.apipay_client import STATUS_REFUNDED, verify_webhook_signature
+from integrations import apipay_service, booking_refunds, test_context
+from integrations.apipay_client import REFUND_COMPLETED, STATUS_REFUNDED, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,18 @@ def receive_apipay_webhook():
         return jsonify({"status": "ignored"}), 200
 
     if event == "invoice.refunded":
+        # The REFUND object carries the news; the invoice itself stays paid /
+        # partially_refunded (ApiPay has no "refunded" invoice status).
+        refund = payload.get("refund") or {}
+        logger.info("[APIPAY] Вебхук: event=%s invoice=%s refund=%s status=%s code=%s",
+                    event, invoice_id, refund.get("id"), refund.get("status"),
+                    refund.get("error_code"))
+        if booking_refunds.apply_refund_event(payload):
+            return jsonify({"status": "ok"}), 200
+        # Contract installments keep their own handling — but only a refund
+        # that actually completed is news; a failed one moved no money.
+        if refund.get("status") not in (None, REFUND_COMPLETED):
+            return jsonify({"status": "ok"}), 200
         status = STATUS_REFUNDED
 
     # Identifiers only — the payload also carries client_name/client_phone, and
