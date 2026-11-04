@@ -66,6 +66,12 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
         test_context.capture_reply(to, text)
         return {"messages": [{"id": f"console-{uuid.uuid4().hex}"}]}
 
+    # Local test instance: never message a number outside BOT_ONLY_NUMBERS
+    # (the local DB holds real clients' bookings; its sweepers must stay quiet).
+    if not config.bot_number_allowed(to):
+        logger.warning("Outbound to %s refused — not in BOT_ONLY_NUMBERS", to)
+        return {"messages": [{"id": "refused-not-allowlisted"}]}
+
     # Context-free backstop. contextvars can be lost (a raw threading.Thread, a
     # scheduler job acting on a sandbox row), and the ambient flag is then gone.
     # A console phone is never a real subscriber, so refuse rather than dial it.
@@ -137,6 +143,60 @@ def send_text_message(channel: OutboundChannel, to: str, text: str) -> dict:
             "send_text_message failed: %s %s → %s",
             response.status_code, url, response.text,
         )
+    response.raise_for_status()
+    return response.json()
+
+
+def send_template_message(channel: OutboundChannel, to: str, name: str,
+                          language: str, body_params: list[str] | None = None) -> dict:
+    """Send a Meta-approved template message (Meta Cloud API or YCloud).
+
+    The only way to reach a client who has not written in the last 24 hours —
+    free-form text is rejected outside that window. `body_params` fill the
+    template's {{1}}, {{2}}, … in order (no newlines allowed by Meta).
+    Raises on an HTTP error, like `send_text_message`.
+    """
+    if test_context.is_test_mode():
+        test_context.capture_reply(to, f"[template {name}] {' | '.join(body_params or [])}")
+        return {"messages": [{"id": f"console-{uuid.uuid4().hex}"}]}
+
+    from integrations.repo.agent_test_repo import is_test_phone
+
+    if not config.bot_number_allowed(to):
+        logger.warning("Template to %s refused — not in BOT_ONLY_NUMBERS", to)
+        return {"messages": [{"id": "refused-not-allowlisted"}]}
+    if is_test_phone(to):
+        logger.error("Refusing template send to console test phone %s.", to)
+        return {"messages": [{"id": "refused-test-phone"}]}
+
+    bot_config = config.get_bot_config(channel.phone_number_id)
+    if not bot_config:
+        raise ValueError(f"Bot config not found for phone number ID: {channel.phone_number_id}")
+
+    template = {"name": name, "language": {"code": language}}
+    if body_params:
+        template["components"] = [{
+            "type": "body",
+            "parameters": [{"type": "text", "text": str(p)} for p in body_params],
+        }]
+
+    if channel.provider == "meta":
+        headers = {"Authorization": f"Bearer {bot_config['access_token']}",
+                   "Content-Type": "application/json"}
+        payload = {"messaging_product": "whatsapp", "recipient_type": "individual",
+                   "to": to, "type": "template", "template": template}
+        url = config.get_whatsapp_api_url(channel.phone_number_id)
+    else:
+        headers = {"X-API-Key": bot_config["ycloud_api_key"],
+                   "Accept": "application/json", "Content-Type": "application/json"}
+        payload = {"from": bot_config["ycloud_from"], "to": to,
+                   "type": "template", "template": template}
+        url = config.get_ycloud_api_url()
+
+    response = requests.post(url, json=payload, headers=headers, timeout=10)
+    if not response.ok:
+        logger.error("send_template_message failed: %s %s → %s",
+                     response.status_code, url, response.text)
     response.raise_for_status()
     return response.json()
 

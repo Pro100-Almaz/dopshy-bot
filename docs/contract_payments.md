@@ -133,6 +133,7 @@ any unpaid ──(contract cancelled / booking cancelled / plan stopped)──�
 {
   "customer_name": "ТОО Ромашка", "phone": "+7 700 123 45 67",
   "start_date": "2026-10-01", "end_date": "2026-12-31", "price": 450000,
+  "has_signed_contract": false,
   "slots": [{"field": 1, "date": "2026-10-01", "time_start": "19:00", "time_end": "21:00",
              "repeat_mode": "weekly", "repeat_until": "2026-12-31"}],
   "payment_plan": {
@@ -147,6 +148,12 @@ any unpaid ──(contract cancelled / booking cancelled / plan stopped)──�
   }
 }
 ```
+
+`has_signed_contract` is optional and defaults to `false`. Monthly customers
+without signed paperwork still use the same contract record. `price` is always
+the manager-entered amount: it is copied to every linked booking and is never
+replaced by field/time pricing. Changing the contract price updates its linked
+bookings to the new manual amount.
 
 Response `data` gains `payment_plan` (same shape as `GET …/payments`).
 Errors: `400 INVALID_PLAN` / `NO_KASPI`, `409 SLOT_TAKEN` (now with every

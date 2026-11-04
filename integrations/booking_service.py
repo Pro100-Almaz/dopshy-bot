@@ -6,13 +6,15 @@ Every function returns a typed result envelope:
 `code` is machine-readable (see ERROR CODES below); `message` is the
 human-friendly RU text the bot echoes to the user.
 
-State machine: draft → awaiting_payment → confirmed
-                            ├→ cancelled (user cancelled)
+State machine: draft → [awaiting_consent →] awaiting_payment → confirmed
+                            ├→ cancelled (user cancelled / consent declined)
                             ├→ unpaid    (TTL expired without payment)
                             └→ failed    (payment rejected)
 
 Slot overlap is enforced by the `bookings_no_overlap` EXCLUDE constraint
-(scoped to awaiting_payment + confirmed), not by application checks.
+(scoped to awaiting_consent + awaiting_payment + confirmed), not by application
+checks. awaiting_consent is the ApiPay path's wait for offer consent — see
+integrations/consent_flow.py.
 """
 
 import json
@@ -173,8 +175,13 @@ def _record_status_change(cur, booking_id: int, old_status, new_status,
 
 
 def request_payment(booking_id: int, client_token: str,
-                    on_reserved=None) -> dict:
+                    on_reserved=None, target_state: str = "awaiting_payment",
+                    ttl_seconds: int | None = None) -> dict:
     """Transition DRAFT → AWAITING_PAYMENT: reserve the slot and start the TTL.
+
+    `target_state='awaiting_consent'` (ApiPay path) reserves the slot the same
+    way but waits for offer consent first; `ttl_seconds` then is the consent
+    window instead of PAYMENT_TTL_SECONDS.
 
     The EXCLUDE constraint atomically rejects a slot already held by another
     awaiting_payment/confirmed booking → SLOT_TAKEN.
@@ -201,7 +208,7 @@ def request_payment(booking_id: int, client_token: str,
                 row = cur.fetchone()
                 if not row:
                     return _err("NOT_FOUND", "Бронь не найдена.")
-                if row["state"] == "awaiting_payment":
+                if row["state"] in ("awaiting_payment", "awaiting_consent"):
                     return _ok({"booking_id": booking_id}, message="Бронь уже ожидает оплаты.")
                 if row["state"] != "draft":
                     return _err("BOOKING_WRONG_STATE", "Эту бронь уже нельзя подтвердить.")
@@ -266,7 +273,7 @@ def request_payment(booking_id: int, client_token: str,
                 # Transition to awaiting_payment — handles both normal and transitive
                 cur.execute(
                     "UPDATE bookings SET "
-                    "  state = 'awaiting_payment', "
+                    "  state = %s, "
                     "  reserved_until = CASE "
                     "    WHEN id = %s THEN NOW() + make_interval(secs => %s) "
                     "    ELSE reserved_until "
@@ -276,13 +283,16 @@ def request_payment(booking_id: int, client_token: str,
                     "  price_total = CASE WHEN id = %s THEN %s ELSE %s END, "
                     "  updated_at = NOW() "
                     "WHERE id = %s OR group_transition = (SELECT group_transition FROM bookings WHERE id = %s)",
-                    (booking_id, config.PAYMENT_TTL_SECONDS, config.BOOKING_TIMEZONE,
+                    (target_state, booking_id, ttl_seconds or config.PAYMENT_TTL_SECONDS,
+                     config.BOOKING_TIMEZONE,
                      config.BOOKING_TIMEZONE, booking_id, price_first, price_second,
                      booking_id, booking_id),
                 )
-                _record_event(cur, booking_id, "payment_requested", "whatsapp")
+                _record_event(cur, booking_id,
+                              "payment_requested" if target_state == "awaiting_payment"
+                              else "slot_reserved", "whatsapp")
                 _record_status_change(cur, booking_id, row["state"],
-                                      "awaiting_payment", "chatbot:Бот")
+                                      target_state, "chatbot:Бот")
                 cur.execute("SELECT reserved_until FROM bookings WHERE id = %s", (booking_id,))
                 reserved_until = cur.fetchone()["reserved_until"]
 
@@ -1017,11 +1027,12 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
                          customer: str | None = None, phone: str | None = None,
                          notes: str | None = None, price_total=None, prepayment=None,
                          actor_id: str | None = None, client_token: str | None = None,
-                         format_: str | None = None, reserved_until: int = 30,
+                         format_: str | None = None, reserved_until: int = 60,
                          updated_by: str = 'manager',
                          state: str = "awaiting_payment",
                          discount_id: int | None = None,
-                         customer_id: int | None = None) -> list[int]:
+                         customer_id: int | None = None,
+                         force_reserved_until: bool = False) -> list[int]:
     """Insert one or more booking rows on the caller's cursor and return their ids."""
     if discount_id == "":
         discount_id = None
@@ -1055,7 +1066,7 @@ def _insert_booking_rows(cur, field: int, date: str, time_start: str, time_end: 
         )
                            if row_discount_id is not None else Decimal(0))
         row_price = max(Decimal(0), gross_price - discount_amount)
-        skip_reserved = is_repetitive or is_latter
+        skip_reserved = (is_repetitive or is_latter) and not force_reserved_until
         # The prepayment/avans belongs to the MAIN booking only.
         # Coalesce: paid_avans is NOT NULL, and callers routinely omit prepayment.
         row_avans = (prepayment or 0) if i == 0 else 0
@@ -1087,13 +1098,20 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                            notes: str | None = None, price_total=None,
                            actor_id: str | None = None,
                            client_token: str | None = None,
-                           format_: str | None = None, reserved_until: int = 30,
+                           format_: str | None = None, reserved_until: int = 60,
                            updated_by: str = 'manager',
                            state: str = "confirmed",
                            discount_id: int | None = None,
                            customer_id: int | None = None,
-                           prepayment=None) -> dict:
-    """Manager-created booking: DRAFT is skipped, inserted directly as confirmed."""
+                           prepayment=None, on_created=None,
+                           force_reserved_until: bool = False) -> dict:
+    """Manager-created booking: DRAFT is skipped, inserted directly as confirmed.
+
+    ``on_created(cur, booking_ids)`` runs in the same transaction once the rows
+    exist (the consent request for an `awaiting_consent` booking); whatever it
+    returns is merged into the result data.
+    """
+    hook_data: dict = {}
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1106,7 +1124,10 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
                     reserved_until=reserved_until, updated_by=updated_by,
                     state=state, discount_id=discount_id,
                     customer_id=customer_id, prepayment=prepayment,
+                    force_reserved_until=force_reserved_until,
                 )
+                if on_created is not None:
+                    hook_data = on_created(cur, ids) or {}
     except psycopg2.errors.ExclusionViolation:
         return _err("SLOT_TAKEN", "Это поле уже забронировано на это время.")
     except psycopg2.errors.UniqueViolation:
@@ -1120,7 +1141,8 @@ def manager_create_booking(field: int, date: str, time_start: str, time_end: str
         raise
     except DiscountError as exc:
         return _err(exc.code, exc.message)
-    return _ok({"booking_id": ids[-1], "status": "ОЖИДАНИЕ"})
+    return _ok({"booking_id": ids[-1], "booking_ids": ids, "status": "ОЖИДАНИЕ",
+                **hook_data})
 
 
 def occurrence_dates(start_date, end_date, repeat):
@@ -1237,7 +1259,7 @@ def _split_day_segments(start_dt: datetime, end_dt: datetime):
 
 
 # statuses that can take the slots
-_BLOCKING_STATES = ("awaiting_payment", "confirmed")
+_BLOCKING_STATES = ("awaiting_consent", "awaiting_payment", "confirmed")
 
 def _conflict(conflicts: list[dict]) -> dict:
     """Conflict envelope: nothing was created, `conflicts` lists what collided."""
@@ -1329,10 +1351,12 @@ def count_slot_occurrences(slots: list[dict]) -> int:
 
 def manager_create_bookings_batch(slots: list[dict], customer: str | None = None, phone: str | None = None,
                                   notes: str | None = None, price_total=None, prepayment=None, actor_id: str | None = None,
-                                  reserved_until: int = 30, updated_by: str = 'manager',
+                                  reserved_until: int = 60, updated_by: str = 'manager',
                                   on_created=None, avans_per_booking=None,
                                   discount_id: int | None = None,
-                                  customer_id: int | None = None
+                                  customer_id: int | None = None,
+                                  state: str = "awaiting_payment",
+                                  force_reserved_until: bool = False,
                                   ) -> dict:
     """Create bookings for a batch of (possibly repeating) merged intervals.
 
@@ -1385,9 +1409,10 @@ def manager_create_bookings_batch(slots: list[dict], customer: str | None = None
                         prepayment=avans_per_booking if is_chargeable else prepayment,
                         actor_id=actor_id,
                         reserved_until=reserved_until, updated_by=updated_by,
-                        state="awaiting_payment",
+                        state=state,
                         discount_id=e["discount_id"],
                         customer_id=customer_id,
+                        force_reserved_until=force_reserved_until,
                     )
                     booking_ids.extend(ids)
                     created.extend({"booking_id": bid, "status": "ОЖИДАНИЕ"} for bid in ids)
@@ -1465,7 +1490,8 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
                     notes: str | None = None, source: str | None = None,
                     slots: list[dict] | None = None,
                     actor_id: str | None = None,
-                    payment_plan: dict | None = None) -> dict:
+                    payment_plan: dict | None = None,
+                    has_signed_contract: bool = False) -> dict:
     """Create a contract, its bookings and — with `payment_plan` — its installments.
 
     Everything is one transaction. The plan is validated and its number checked
@@ -1501,10 +1527,12 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "INSERT INTO contracts "
-                    "  (customer_name, phone, start_date, end_date, price, status, notes, source) "
-                    "VALUES (%s, %s, %s::date, %s::date, %s, %s, %s, %s) "
+                    "  (customer_name, phone, start_date, end_date, price, status, notes, source, "
+                    "   has_signed_contract) "
+                    "VALUES (%s, %s, %s::date, %s::date, %s, %s, %s, %s, %s) "
                     "RETURNING id",
-                    (customer_name, phone, start_date, end_date, price, status, notes, source),
+                    (customer_name, phone, start_date, end_date, price, status, notes, source,
+                     has_signed_contract),
                 )
                 contract_id = cur.fetchone()["id"]
                 booking_ids: list[int] = []
@@ -1521,7 +1549,9 @@ def create_contract(customer_name: str, start_date: str, end_date: str, price,
                         customer=customer_name,
                         phone=phone,
                         notes=notes,
-                        price_total=0,
+                        # Contract prices are always the manager-entered value;
+                        # field/time pricing must never recalculate them.
+                        price_total=price,
                         actor_id=actor_id,
                         reserved_until=0,
                         updated_by=source or "contract",
@@ -1568,7 +1598,7 @@ def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | N
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT id, customer_name, phone, status, notes, start_date, end_date "
+                    "SELECT id, customer_name, phone, status, notes, start_date, end_date, price "
                     "FROM contracts WHERE id = %s FOR UPDATE",
                     (contract_id,),
                 )
@@ -1595,7 +1625,7 @@ def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | N
                         customer=contract["customer_name"],
                         phone=contract["phone"],
                         notes=contract["notes"],
-                        price_total=0,
+                        price_total=contract["price"],
                         actor_id=actor_id,
                         reserved_until=0,
                         updated_by=source or "contract",
@@ -1622,7 +1652,8 @@ def add_contract_bookings(contract_id: int, slots: list[dict], actor_id: str | N
 
 
 def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> dict:
-    allowed = {"customer_name", "phone", "start_date", "end_date", "price", "status", "notes", "source"}
+    allowed = {"customer_name", "phone", "start_date", "end_date", "price", "status", "notes", "source",
+               "has_signed_contract"}
     patch = {k: v for k, v in fields.items() if k in allowed}
     if "phone" in patch:
         patch["phone"] = normalize_phone(patch["phone"]) or None
@@ -1642,6 +1673,14 @@ def update_contract(contract_id: int, actor_id: str | None = None, **fields) -> 
                 if not cur.fetchone():
                     return _err("NOT_FOUND", "Договор не найден.")
                 if "price" in patch:
+                    # Keep every contract booking on the same manual price.
+                    # This deliberately bypasses calculate_booking_price().
+                    cur.execute(
+                        "UPDATE bookings b SET price_total = %s, updated_at = NOW() "
+                        "FROM contract_bookings cb "
+                        "WHERE cb.booking_id = b.id AND cb.contract_id = %s",
+                        (patch["price"], contract_id),
+                    )
                     contract_billing.on_price_changed(cur, contract_id)
                 if "status" in patch:
                     cur.execute(

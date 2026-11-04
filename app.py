@@ -18,7 +18,6 @@ import config
 from integrations import client_notify
 from handlers.message_batcher import enqueue_incoming_message
 from integrations.providers.meta import parse_meta, WhatsappPayloadParserError
-from integrations.providers.payload import OutboundChannel
 from integrations.providers.ycloud import parser_ycloud
 from integrations.repo import postgres
 from integrations.repo.bot_pause_repo import set_bot_paused
@@ -114,7 +113,14 @@ def _cancel_expired_bookings():
         from integrations.repo import booking_repo
         from integrations import booking_service
         from integrations.sheets import booking_sheets as sheets
-        from handlers.whatsapp_client import send_text_message
+
+        # Bookings held for offer consent (awaiting_consent) the client never
+        # answered: cancelled, and the client told (template outside 24h).
+        try:
+            from integrations import consent_flow
+            consent_flow.expire_stale()
+        except Exception:
+            logger.exception("[CONSENT] Sweep of expired consent requests failed")
 
         expired = booking_repo.get_expired_bookings(config.BOOKING_SESSION_TTL)
         if not expired:
@@ -157,20 +163,9 @@ def _cancel_expired_bookings():
 
         for b in to_notify:
             try:
-                ts = str(b["time_start"])[:5]
-                te = str(b["time_end"])[:5]
-                send_text_message(
-                    OutboundChannel(provider="ycloud", phone_number_id=config.WHATSAPP_PHONE_NUMBER_ID_BOT_1),
-                    # A booking phone is not an inbound id: manager-entered rows
-                    # hold '8…' or '+7 700 …', and YCloud takes E.164 only.
-                    client_notify.normalize_recipient(b["phone"]),
-                    f"К сожалению, ваша бронь на {b['date']} ({ts}–{te}, {b.get('format', '')}) "
-                    f"была отменена — оплата не поступила в течении 20 минут.\n"
-                    f"Хотите забронировать снова? Просто напишите нам!\n\n"
-                    f"Өкінішке орай, брондауыңыз {b['date']} ({ts}–{te}, {b.get('format', '')}) "
-                    f"20 минут ішінде төленбегендіктен жойылды.\n"
-                    f"Қайта брондау үшін жазыңыз!",
-                )
+                # Through client_notify: outside the client's 24h window this
+                # goes out as the `booking_cancelled` template.
+                client_notify.send(b["phone"], "ttl_unpaid", slots=client_notify.fmt_slot(b))
             except Exception as exc:
                 logger.error("[PAYMENT] Failed to notify %s about cancelled booking %d: %s",
                              b["phone"], b["id"], exc)

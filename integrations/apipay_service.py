@@ -175,6 +175,30 @@ def ensure_kaspi_client(phone: str) -> str | None:
     return name
 
 
+class ConsentRequired(ApiPayError):
+    """An invoice was asked for a booking whose client has not agreed to the
+    offer. Raised by `queue_invoice`; an ApiPayError so every caller already
+    treats it as "no invoice" (and rolls its transaction back)."""
+
+
+def _assert_consent(cur, booking_ids: list[int]) -> None:
+    """The consent guard: no invoice for a booking without `consent_at`.
+
+    Lives in `queue_invoice` because that is the one place every booking
+    invoice path goes through — the bot, the website, the manager endpoints and
+    the re-issue after a partial cancel. Contract instalments write their rows
+    directly and are deliberately not covered (open question).
+    """
+    cur.execute("SELECT id FROM bookings WHERE id = ANY(%s) AND consent_at IS NULL",
+                (list(booking_ids),))
+    missing = [r["id"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+    if missing:
+        logger.error("[APIPAY] Счёт не выставлен: нет согласия с офертой для броней %s",
+                     missing)
+        raise ConsentRequired(
+            f"Клиент не согласился с офертой (брони {missing}) — счёт не выставляется.")
+
+
 def queue_invoice(cur, phone: str, booking_ids: list[int], slot_count: int,
                   description: str, source: str = "manager",
                   notify_chat_id: str | None = None,
@@ -186,7 +210,10 @@ def queue_invoice(cur, phone: str, booking_ids: list[int], slot_count: int,
     commit and then send. `external_order_id` is generated here, once: retries
     reuse it rather than minting a new one, which is what keeps a repeated send
     from becoming a second charge.
+
+    Raises `ConsentRequired` if any of `booking_ids` has no offer consent.
     """
+    _assert_consent(cur, booking_ids)
     amount = slot_count * config.APIPAY_AVANS_PER_BOOKING
     if prepayment:
         amount = prepayment
@@ -210,7 +237,8 @@ def queue_invoice(cur, phone: str, booking_ids: list[int], slot_count: int,
             "booking_ids": list(booking_ids), "status": apipay_client.STATUS_CREATED}
 
 
-def batch_invoice_hook(phone: str, customer: str | None = None):
+def batch_invoice_hook(phone: str, customer: str | None = None,
+                       consent: dict | None = None):
     """Build the ``on_created`` hook for `manager_create_bookings_batch`.
 
     Called with the batch's open cursor once every booking row exists. Only
@@ -227,6 +255,17 @@ def batch_invoice_hook(phone: str, customer: str | None = None):
         if count == 0:
             logger.info("[APIPAY] Пакет без разовых слотов — счёт не создаётся.")
             return {}
+        if consent is not None:
+            # Website: the client ticked the offer checkbox. The proof goes on
+            # every booking of the request before the guard in queue_invoice
+            # looks for it.
+            from integrations import consent_flow
+            consent_flow.record_consent(cur, ctx["booking_ids"], "site",
+                                        offer_version=consent.get("offer_version"),
+                                        text_version=consent.get("text_version"))
+            cur.execute("UPDATE bookings SET kaspi_phone = %s, payment_method = 'kaspi_invoice' "
+                        " WHERE id = ANY(%s)",
+                        (apipay_client.normalize_phone(phone), list(booking_ids)))
 
         queued = queue_invoice(cur, phone, booking_ids, count,
                                _avans_description(count, customer),
@@ -565,8 +604,10 @@ def notify_paid(invoice_row: dict, confirmed_ids: list[int]) -> None:
     """Tell the client their payment landed and the slots are theirs."""
     if not confirmed_ids:
         return
+    from integrations.repo import booking_repo
     _notify_invoice_client(invoice_row, "apipay_paid",
-                           amount=client_notify.fmt_amount(invoice_row.get("amount")))
+                           amount=client_notify.fmt_amount(invoice_row.get("amount")),
+                           slots=client_notify.fmt_slots(booking_repo.get_bookings(confirmed_ids)))
 
 
 def notify_unpaid(invoice_row: dict, released_ids: list[int], status: str) -> None:

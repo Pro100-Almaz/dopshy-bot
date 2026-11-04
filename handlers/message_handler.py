@@ -28,6 +28,7 @@ from handlers.llm_trial_flow import is_factual_question as is_trial_factual_ques
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations import trial_service
+from integrations import client_notify, consent_flow
 from integrations.repo.academy_repo import get_existing_trial_draft
 from integrations.repo.bot_pause_repo import is_bot_paused, set_bot_paused
 from integrations.repo.existing_client_repo import is_existing_academy_client
@@ -447,6 +448,16 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         message_id = payload.whatsapp_message_id
         sender_id = payload.customer.phone  # sender phone number
 
+        # Local test instance (BOT_ONLY_NUMBERS): everyone else belongs to the
+        # production bot — no reply, not even marked as read.
+        if not config.bot_number_allowed(sender_id):
+            logger.info("[ALLOWLIST] %s не в списке тестовых номеров — пропуск", sender_id)
+            return
+
+        # Opens the 24h window in which free-form messages reach this client
+        # (outside it the consent question needs a Meta template).
+        client_notify.touch_inbound(sender_id)
+
         # Bot paused for this contact — a manager is handling them. Mark the
         # message read so their inbox stays clean, but send no auto-reply.
         if is_bot_paused(sender_id):
@@ -520,6 +531,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 draft = get_existing_draft(sender_id)
                 if draft:
                     cancel_booking_trial(bot_config["name"], draft["id"])
+                consent_flow.cancel_for_phone(sender_id)
                 refresh_week_sheet()
                 refresh_all_bookings()
             else:
@@ -544,6 +556,17 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
             phone_number_id,
             user_text[:80],
         )
+
+        # Offer consent dialog in progress (booking held in awaiting_consent):
+        # the message is an answer to it — consent, a Kaspi number — and never
+        # goes to the LLM. See integrations/consent_flow.py.
+        if bot_config["name"] == "dopsy_bot":
+            consent_reply = consent_flow.handle_message(sender_id, user_text)
+            if consent_reply is not None:
+                append_message(chat_id, "user", user_text)
+                append_message(chat_id, "assistant", consent_reply)
+                send_text_message(channel, sender_id, consent_reply)
+                return
 
         try:
             context = retrieve_context(user_text, bot_name=bot_config["name"])

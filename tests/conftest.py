@@ -77,7 +77,8 @@ def clean_db(request):
         with conn.cursor() as cur:
             cur.execute(
                 "TRUNCATE customers, discounts, contracts, contract_bookings, bookings, booking_events, payments, booking_sessions, "
-                "apipay_invoices, contract_installments RESTART IDENTITY CASCADE"
+                "apipay_invoices, contract_installments, consent_requests, whatsapp_last_inbound "
+                "RESTART IDENTITY CASCADE"
             )
     yield
 
@@ -91,3 +92,27 @@ def _fixed_trial_questions(monkeypatch):
         raise RuntimeError("no LLM in tests")
 
     monkeypatch.setattr(llm, "get_question_reply", _offline)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_whatsapp_templates(monkeypatch):
+    """Tests never send real WhatsApp templates.
+
+    The template names live in the developer's .env, and a template is sent
+    whenever a client is outside the 24h window — which every test number is.
+    Without this, any test that stubs only `send_text_message` would reach
+    YCloud for real (it did: 38 failed sends to +77001234567). Templates are
+    switched off by default and the sender refuses to run unless a test
+    replaces it; tests that exercise templates set both explicitly.
+    """
+    from handlers import whatsapp_client
+
+    monkeypatch.setattr(config, "WA_TEMPLATES", {k: "" for k in config.WA_TEMPLATES})
+    monkeypatch.setattr(config, "ADMIN_ALERT_PHONE", "")
+    # The developer's local BOT_ONLY_NUMBERS must not filter test traffic.
+    monkeypatch.setattr(config, "BOT_ONLY_NUMBERS", frozenset())
+
+    def _refuse(*args, **kwargs):
+        raise RuntimeError("real WhatsApp template send attempted in a test")
+
+    monkeypatch.setattr(whatsapp_client, "send_template_message", _refuse)

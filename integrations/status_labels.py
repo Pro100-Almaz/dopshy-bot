@@ -8,6 +8,7 @@ circular import.
 # DB state → sheet status label (uppercase, matches Apps Script dropdown).
 STATE_DISPLAY = {
     "draft":            "DRAFT",
+    "awaiting_consent": "AWAITING_CONSENT",
     "awaiting_payment": "AWAITING_PAYMENT",
     "confirmed":        "CONFIRMED",
     "cancelled":        "CANCELLED",
@@ -18,6 +19,7 @@ STATE_DISPLAY = {
 # DB state → Russian label (uppercase).
 STATES_RUSSIAN = {
     "draft":            "ЧЕРНОВИК",
+    "awaiting_consent": "ОЖИДАЕТ СОГЛАСИЯ",
     "awaiting_payment": "ОЖИДАЕТ ОПЛАТЫ",
     "confirmed":        "ПОДТВЕРЖДЕНО",
     "cancelled":        "ОТМЕНЕНО",

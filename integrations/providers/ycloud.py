@@ -48,7 +48,17 @@ def parser_ycloud(raw: dict) -> IncomingWhatsAppMessage:
         # camelCase (buttonReply) — accept both so confirmation buttons resolve to
         # the reply title instead of an empty message.
         interactive = None
-        if msg_type == 'interactive':
+        if msg_type == 'button':
+            # Quick-reply tap on a TEMPLATE message (the offer-consent template)
+            # arrives as type "button" with {text, payload}; normalised to an
+            # interactive button reply like Meta's.
+            btn = message.get('button') or {}
+            msg_type = 'interactive'
+            interactive = WhatsAppInteractive(
+                type='button_reply',
+                button_reply=WhatsAppButtonReply(id=btn.get('payload'), title=btn.get('text')),
+            )
+        elif msg_type == 'interactive':
             inter = message.get('interactive') or {}
             reply = (
                 inter.get('button_reply')

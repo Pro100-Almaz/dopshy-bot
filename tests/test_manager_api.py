@@ -16,8 +16,12 @@ _HDR = {"X-API-Key": _KEY}
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     config.X_SERVICE_TOKEN = _KEY
+    # Plain manager bookings. With ApiPay on, a booking with a phone waits for
+    # the client's offer consent instead (tests/test_consent.py) — and whether
+    # it is on must not depend on the .env of the machine running the tests.
+    monkeypatch.setattr(config, "APIPAY_ENABLED", False)
     app = Flask(__name__)
     app.register_blueprint(manager_api)
     return app.test_client()
@@ -118,7 +122,7 @@ def test_delete_cancels(client):
     assert g.get_json()["data"]["state"] == "cancelled"
 
 
-def test_contract_create_links_confirmed_zero_price_bookings(client, monkeypatch):
+def test_contract_create_uses_manual_price_and_signed_flag(client, monkeypatch):
     monkeypatch.setattr("blueprints.manager_api._single_table_write", lambda row: None)
     body = {
         "customer_name": "Big Co",
@@ -126,6 +130,7 @@ def test_contract_create_links_confirmed_zero_price_bookings(client, monkeypatch
         "start_date": "2026-12-01",
         "end_date": "2026-12-31",
         "price": 550000,
+        "has_signed_contract": False,
         "slots": [
             {"field": 1, "date": "2026-12-01", "time_start": "10:00", "time_end": "11:00"},
             {"field": 1, "date": "2026-12-08", "time_start": "10:00", "time_end": "11:00"},
@@ -141,6 +146,7 @@ def test_contract_create_links_confirmed_zero_price_bookings(client, monkeypatch
     contract = client.get(f"/api/manager/contracts/{data['contract_id']}", headers=_HDR)
     assert contract.status_code == 200
     assert contract.get_json()["data"]["price"] == 550000.0
+    assert contract.get_json()["data"]["has_signed_contract"] is False
     assert contract.get_json()["data"]["booking_ids"] == data["booking_ids"]
 
     with _conn() as conn:
@@ -151,7 +157,39 @@ def test_contract_create_links_confirmed_zero_price_bookings(client, monkeypatch
             )
             rows = cur.fetchall()
     assert [row[0] for row in rows] == ["confirmed", "confirmed"]
-    assert [float(row[1]) for row in rows] == [0.0, 0.0]
+    assert [float(row[1]) for row in rows] == [550000.0, 550000.0]
+
+
+def test_contract_defaults_to_unsigned_and_price_patch_updates_bookings(client, monkeypatch):
+    monkeypatch.setattr("blueprints.manager_api._single_table_write", lambda row: None)
+    body = {
+        "customer_name": "Monthly Client",
+        "start_date": "2026-12-01",
+        "end_date": "2026-12-31",
+        "price": 123456,
+        "slots": [
+            {"field": 1, "date": "2026-12-02", "time_start": "10:00", "time_end": "12:00"},
+        ],
+    }
+    created = client.post("/api/manager/contracts", json=body, headers=_HDR).get_json()["data"]
+
+    contract = client.get(f"/api/manager/contracts/{created['contract_id']}", headers=_HDR)
+    assert contract.get_json()["data"]["has_signed_contract"] is False
+
+    changed = client.patch(
+        f"/api/manager/contracts/{created['contract_id']}",
+        json={"price": 654321, "has_signed_contract": True},
+        headers=_HDR,
+    )
+    assert changed.status_code == 200
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT price_total FROM bookings WHERE id = %s", (created["booking_ids"][0],))
+            assert float(cur.fetchone()[0]) == 654321.0
+
+    contract = client.get(f"/api/manager/contracts/{created['contract_id']}", headers=_HDR)
+    assert contract.get_json()["data"]["has_signed_contract"] is True
 
 
 def test_contract_delete_cancels_linked_bookings(client, monkeypatch):
