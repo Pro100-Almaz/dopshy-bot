@@ -1818,6 +1818,23 @@ def delete_discount(discount_id: int):
                         "message": "Скидка не найдена или уже использовалась."}), 409
     return jsonify({"ok": True, "data": {"discount_id": discount_id}}), 200
 
+_CONTACT_FILTERS = ("all", "texted", "booking", "paused")
+
+
+def _contact_matches_search(contact: dict, search: str) -> bool:
+    """Name substring (case-insensitive) or phone-digits substring."""
+    if search.casefold() in (contact.get("name") or "").casefold():
+        return True
+    digits = "".join(ch for ch in search if ch.isdigit())
+    if not digits:
+        return False
+    phone = contact.get("phone") or ""
+    if digits in phone:
+        return True
+    # Managers often type the local form 8 7xx…, while phones are stored as 7 7xx….
+    return len(digits) > 1 and digits[0] == "8" and ("7" + digits[1:]) in phone
+
+
 @manager_api.get("/api/manager/contacts")
 def list_contacts():
     """Every customer the bot knows, deduped by normalized phone.
@@ -1832,10 +1849,21 @@ def list_contacts():
     Pagination: ?page=<1-based> &page_size=<n> (default config.PAGE_SIZE, max 100).
     For compatibility, requests without either pagination parameter still return
     the legacy bare list.
+
+    Filtering (applied to the whole list, before pagination, so `total` counts matches):
+      ?search=<text>  case-insensitive name substring, or phone digits substring
+                      (a local '8…' prefix also matches the stored '7…' form)
+      ?filter=all|texted|booking|paused
     """
     bot_cfg, error = _contact_bot_type_arg()
     if error:
         return error
+
+    contact_filter = (request.args.get("filter") or "all").strip()
+    if contact_filter not in _CONTACT_FILTERS:
+        return jsonify({"ok": False, "code": "INVALID_FILTER",
+                        "message": f"filter must be one of: {', '.join(_CONTACT_FILTERS)}"}), 400
+    search = (request.args.get("search") or "").strip()
 
     wants_pagination = "page" in request.args or "page_size" in request.args
     page, page_size, offset = _page_args()
@@ -1934,16 +1962,32 @@ def list_contacts():
         entry["is_regular_customer"] = postgres_regular if is_registered else False
     result.sort(key=lambda c: (c["last_activity"] or ""), reverse=True)
 
+    if contact_filter == "texted":
+        result = [c for c in result if c["texted"]]
+    elif contact_filter == "booking":
+        result = [c for c in result if c["has_booking"]]
+    if search:
+        result = [c for c in result if _contact_matches_search(c, search)]
+
+    def _attach_statuses(rows: list[dict]) -> None:
+        statuses = get_statuses([entry["phone"] for entry in rows])
+        for entry in rows:
+            status = statuses.get(entry["phone"], {"paused": False, "paused_reason": None})
+            entry["paused"] = status["paused"]
+            entry["paused_reason"] = status["paused_reason"]
+
+    if contact_filter == "paused":
+        # Pause state lives in a separate table, so it has to be known for every
+        # candidate before we can filter and count — one batched query.
+        _attach_statuses(result)
+        result = [c for c in result if c["paused"]]
+
     total = len(result)
     if wants_pagination:
         result = result[offset:offset + page_size]
 
-    statuses = get_statuses([entry["phone"] for entry in result])
-    for entry in result:
-        key = entry["phone"]
-        status = statuses.get(key, {"paused": False, "paused_reason": None})
-        entry["paused"] = status["paused"]
-        entry["paused_reason"] = status["paused_reason"]
+    if contact_filter != "paused":
+        _attach_statuses(result)
 
     if wants_pagination:
         return _paginated(result, total, page, page_size)
