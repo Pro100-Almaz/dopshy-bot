@@ -28,6 +28,10 @@ def get_all_bookings(page: int| None = None, search: str | None = None) -> list[
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
                        customer_id, discount_id, discount_amount, price_before_discount,
                        kaspi_phone, consent_at, consent_channel, consent_text_version, offer_version, payment_method,
+                       first_paid_at,
+                       (SELECT COALESCE(SUM(r.amount), 0) FROM booking_refunds r
+                         WHERE r.booking_id = bookings.id
+                           AND r.state IN ('recorded', 'refunded')) AS refunded_total,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
@@ -258,6 +262,10 @@ def get_bookings_in_range(start: str, end: str, states: tuple = ("awaiting_payme
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at, group_transition,
                        customer_id, discount_id, discount_amount, price_before_discount,
                        kaspi_phone, consent_at, consent_channel, consent_text_version, offer_version, payment_method,
+                       first_paid_at,
+                       (SELECT COALESCE(SUM(r.amount), 0) FROM booking_refunds r
+                         WHERE r.booking_id = bookings.id
+                           AND r.state IN ('recorded', 'refunded')) AS refunded_total,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract
@@ -326,6 +334,10 @@ def get_booking(booking_id: int) -> dict | None:
                        paid_kaspi_qr, paid_cash, paid_avans, created_at, updated_at,
                        group_transition, customer_id, discount_id, discount_amount, price_before_discount,
                        kaspi_phone, consent_at, consent_channel, consent_text_version, offer_version, payment_method,
+                       first_paid_at,
+                       (SELECT COALESCE(SUM(r.amount), 0) FROM booking_refunds r
+                         WHERE r.booking_id = bookings.id
+                           AND r.state IN ('recorded', 'refunded')) AS refunded_total,
                        EXISTS (
                            SELECT 1 FROM contract_bookings cb WHERE cb.booking_id = bookings.id
                        ) AS has_contract,

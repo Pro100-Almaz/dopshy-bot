@@ -73,9 +73,14 @@ KK example:
 **2. booking_created**
 ```
 Бронь в Dopsy Arena создана: {{1}}.
-{{2}}. Аванс не возвращается, без оплаты бронь отменится через 20 минут.
+{{2}}. Аванс можно вернуть в течение 48 часов после оплаты, без оплаты бронь отменится через 20 минут.
 ```
 `{{2}}` e.g. «счёт на аванс 10 000₸ отправлен в Kaspi на номер +7 707 111 22 33».
+
+> ⚠️ 2026-11-02: the avans is now refundable within 48 hours of payment. The
+> template approved earlier still says «Аванс не возвращается» — submit this
+> wording (ru + kk) to Meta as a new version and switch `WA_TEMPLATE_*` to it
+> once approved. The text lives in Meta, not in this repo.
 
 **3. booking_edited**
 ```

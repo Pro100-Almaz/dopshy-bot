@@ -553,6 +553,107 @@ def test_contacts_can_be_paginated(client, monkeypatch):
     assert data["data"][0]["paused"] is True
 
 
+def _seed_search_contacts(monkeypatch, paused_phones=()):
+    monkeypatch.setattr(
+        "blueprints.manager_api._list_conversation_contacts",
+        lambda: [
+            {"chat_id": "wa:77010000001", "updated_at": "2026-08-30 10:00:00"},
+            {"chat_id": "wa:77010000002", "updated_at": "2026-08-29 10:00:00"},
+            {"chat_id": "wa:77020000003", "updated_at": "2026-08-28 10:00:00"},
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.repo.get_booking_customers",
+        lambda: [
+            {"phone": "77010000002", "customer_name": "Айгерим", "last_at": "2026-08-29 10:00:00"},
+            {"phone": "77030000004", "customer_name": "Aigerim Bek", "last_at": "2026-08-27 10:00:00"},
+            {"phone": "77030000005", "customer_name": "Daniyar", "last_at": "2026-08-26 10:00:00"},
+        ],
+    )
+    monkeypatch.setattr(
+        "blueprints.manager_api.get_statuses",
+        lambda phones: {
+            p: {"paused": p in paused_phones, "paused_reason": "manual" if p in paused_phones else None}
+            for p in phones
+        },
+    )
+
+
+@pytest.mark.no_db
+def test_contacts_search_runs_before_pagination(client, monkeypatch):
+    _seed_search_contacts(monkeypatch)
+
+    # Both matches sit past the first page of the unfiltered list.
+    r = client.get("/api/manager/contacts?page=1&page_size=2&search=aigerim", headers=_HDR)
+
+    data = r.get_json()
+    assert r.status_code == 200
+    assert data["total"] == 1
+    assert [c["phone"] for c in data["data"]] == ["77030000004"]
+
+
+@pytest.mark.no_db
+def test_contacts_search_by_phone_digits_and_local_prefix(client, monkeypatch):
+    _seed_search_contacts(monkeypatch)
+
+    r = client.get("/api/manager/contacts?page=1&page_size=10&search=+7 703", headers=_HDR)
+    assert [c["phone"] for c in r.get_json()["data"]] == ["77030000004", "77030000005"]
+
+    r = client.get("/api/manager/contacts?page=1&page_size=10&search=8 702", headers=_HDR)
+    assert [c["phone"] for c in r.get_json()["data"]] == ["77020000003"]
+
+
+@pytest.mark.no_db
+def test_contacts_search_matches_cyrillic_name_case_insensitive(client, monkeypatch):
+    _seed_search_contacts(monkeypatch)
+
+    r = client.get("/api/manager/contacts?page=1&page_size=10&search=АЙГЕР", headers=_HDR)
+    assert [c["phone"] for c in r.get_json()["data"]] == ["77010000002"]
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    "flt, expected",
+    [
+        ("texted", ["77010000001", "77010000002", "77020000003"]),
+        ("booking", ["77010000002", "77030000004", "77030000005"]),
+        ("paused", ["77020000003", "77030000005"]),
+    ],
+)
+def test_contacts_filters_whole_list_and_counts_total(client, monkeypatch, flt, expected):
+    _seed_search_contacts(monkeypatch, paused_phones=("77020000003", "77030000005"))
+
+    r = client.get(f"/api/manager/contacts?page=1&page_size=1&filter={flt}", headers=_HDR)
+
+    data = r.get_json()
+    assert r.status_code == 200
+    assert data["total"] == len(expected)
+    assert data["total_pages"] == len(expected)
+    assert [c["phone"] for c in data["data"]] == expected[:1]
+
+
+@pytest.mark.no_db
+def test_contacts_filter_and_search_combine(client, monkeypatch):
+    _seed_search_contacts(monkeypatch, paused_phones=("77030000004",))
+
+    r = client.get("/api/manager/contacts?page=1&page_size=10&filter=paused&search=aig", headers=_HDR)
+
+    data = r.get_json()
+    assert data["total"] == 1
+    assert data["data"][0]["phone"] == "77030000004"
+    assert data["data"][0]["paused"] is True
+
+
+@pytest.mark.no_db
+def test_contacts_rejects_unknown_filter(client, monkeypatch):
+    _seed_search_contacts(monkeypatch)
+
+    r = client.get("/api/manager/contacts?filter=vip", headers=_HDR)
+
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "INVALID_FILTER"
+
+
 @pytest.mark.no_db
 def test_contacts_filter_by_arena_bot_type(client, monkeypatch):
     calls = {}

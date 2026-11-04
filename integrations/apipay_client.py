@@ -80,7 +80,8 @@ def normalize_phone(phone: str | None) -> str:
     return digits
 
 
-def _request(method: str, path: str, json_body: dict | None = None) -> dict:
+def _request(method: str, path: str, json_body: dict | None = None,
+             headers: dict | None = None) -> dict:
     if not config.APIPAY_API_KEY:
         raise ApiPayError("APIPAY_API_KEY не задан.")
     url = f"{config.APIPAY_BASE_URL.rstrip('/')}{path}"
@@ -88,7 +89,7 @@ def _request(method: str, path: str, json_body: dict | None = None) -> dict:
         resp = requests.request(
             method, url, json=json_body, timeout=config.APIPAY_TIMEOUT,
             headers={"X-API-Key": config.APIPAY_API_KEY,
-                     "Content-Type": "application/json"},
+                     "Content-Type": "application/json", **(headers or {})},
         )
     except requests.RequestException as exc:
         raise ApiPayError(f"ApiPay недоступен: {exc}") from exc
@@ -148,6 +149,36 @@ def get_invoice(invoice_id: int) -> dict:
 def cancel_invoice(invoice_id: int) -> dict:
     """POST /invoices/{id}/cancel — used when the reservation TTL releases the slot."""
     return _request("POST", f"/invoices/{int(invoice_id)}/cancel")
+
+
+# Refund outcomes (the REFUND object, not the invoice — an invoice never becomes
+# "refunded"; it stays paid / partially_refunded with is_fully_refunded).
+REFUND_COMPLETED = "completed"
+REFUND_FAILED = "failed"
+
+
+def create_refund(invoice_id: int, amount: int, idempotency_key: str,
+                  reason: str | None = None) -> dict:
+    """POST /invoices/{id}/refund — return `amount` ₸ to the Kaspi that paid.
+
+    The answer (201 pending, or 200 `idempotent_replay`) means "accepted", not
+    "money returned": the outcome is the `invoice.refunded` webhook or
+    `get_refunds`. A retry after a timeout MUST reuse `idempotency_key` with the
+    same body — ApiPay then returns the same refund instead of a second one.
+    No `hold_for_buyer_confirmation`: we have no buyer-link flow, so a refusal
+    stays a plain terminal `failed` and the invoice is not left blocked.
+    """
+    body: dict = {"amount": int(amount)}
+    if reason:
+        body["reason"] = reason[:255]
+    return _request("POST", f"/invoices/{int(invoice_id)}/refund", body,
+                    headers={"Idempotency-Key": idempotency_key})
+
+
+def get_refunds(invoice_id: int) -> dict:
+    """GET /invoices/{id}/refunds — every refund of the invoice with its
+    `status` / `operation_state`, plus `invoice.available_for_refund`."""
+    return _request("GET", f"/invoices/{int(invoice_id)}/refunds")
 
 
 def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:

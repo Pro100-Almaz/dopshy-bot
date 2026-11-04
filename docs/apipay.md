@@ -281,9 +281,32 @@ A client can be mid-payment in their Kaspi app while a manager cancels. If a
 - and an ERROR is logged:
   `[APIPAY] ⚠️ ТРЕБУЕТСЯ РУЧНОЙ ВОЗВРАТ: счёт … оплачен на …₸ …`
 
-**Refunds are manual** — return the money from the ApiPay dashboard
-(`POST /invoices/{id}/refund` is deliberately not wired up). Worth alerting on
-that log line.
+This paid-too-late case is still refunded by hand from the ApiPay dashboard
+(no booking row holds the money). Worth alerting on that log line.
+
+### Booking refunds (manager UI → ApiPay)
+
+`POST /api/manager/bookings/{id}/refunds` returns part of a booking's ApiPay
+payment to the Kaspi that paid it — `integrations/booking_refunds.py`,
+migration 067. Only ApiPay money is refundable this way; cash, Kaspi QR and a
+hand-entered avans are returned outside the system.
+
+- Cap: min(price_total, booking's ApiPay share) − refunds done or in flight,
+  per invoice, one in-flight refund per invoice, whole tenge.
+- Idempotency: `request_key` per button press (replays the same row); the
+  `Idempotency-Key` is committed with the row before the call, so a resend
+  after a timeout is the same refund on ApiPay's side.
+- Outcome is async: `requested → processing → refunded | failed`, `checking`
+  when ApiPay reports `uncertain` (never retried — resolve in the cabinet).
+  Applied from the send response, the `invoice.refunded` webhook (keyed on
+  `refund.id`; redelivery is a no-op) and `_sweep_booking_refunds` every 3 min
+  (resends `requested`, reads `GET /invoices/{id}/refunds` for the rest).
+- Refunds made in the ApiPay cabinet are imported as `refunded` rows when the
+  invoice paid for exactly one booking.
+- ApiPay has no `refunded` invoice status: the invoice stays `paid` /
+  `partially_refunded`; booking invoices are no longer stamped `refunded`.
+- No `hold_for_buyer_confirmation` / buyer refund links: a Kaspi refusal that
+  needs the buyer is shown to the manager, who issues the link in the cabinet.
 
 ---
 

@@ -208,6 +208,18 @@ def _reconcile_apipay():
         logger.error("[APIPAY] Reconciliation failed: %s", exc)
 
 
+def _sweep_booking_refunds():
+    """Resend refunds ApiPay never acknowledged (same Idempotency-Key) and pull
+    the outcome of accepted ones whose `invoice.refunded` webhook was lost."""
+    if not config.APIPAY_ENABLED or not config.POSTGRES_DSN:
+        return
+    try:
+        from integrations import booking_refunds
+        booking_refunds.sweep()
+    except Exception as exc:
+        logger.error("[REFUND] Refund sweep failed: %s", exc)
+
+
 def _issue_contract_installments() -> None:
     """Send every contract installment whose due time has come.
 
@@ -266,6 +278,11 @@ _scheduler.add_job(
     _reconcile_apipay,
     trigger="interval",
     minutes=2,
+)
+_scheduler.add_job(
+    _sweep_booking_refunds,
+    trigger="interval",
+    minutes=3,
 )
 # Installments fall due at a set time (static plans) or when a booking ends
 # (per-booking plans); a minute's granularity is plenty for either.
