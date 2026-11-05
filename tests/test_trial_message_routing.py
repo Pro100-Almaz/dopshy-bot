@@ -1,7 +1,7 @@
 """Academy branch of handle_incoming_message while a trial draft is in progress.
 
 Same shape as the arena branch: no flow session — the draft row marks a signup
-in progress; a plain yes/no on a chosen class short-circuits the router; signup
+in progress; the router reads every message; signup, yes/no and small-talk
 intents go to LlmTrialFlowHandler.handle; anything else is answered and the
 flow's pending question is added after the answer.
 """
@@ -54,15 +54,15 @@ def academy(monkeypatch):
     monkeypatch.setattr(message_handler, "get_ai_response", lambda **k: (state["llm_reply"], None))
     monkeypatch.setattr(
         LlmTrialFlowHandler, "handle",
-        lambda self, chat_id, phone, bot, text, history, lang: state["handled"].append((text, lang)) or "FLOW",
+        lambda self, chat_id, phone, bot, text, history, lang, intent=None:
+            state["handled"].append((text, lang)) or "FLOW",
     )
     monkeypatch.setattr(
         LlmTrialFlowHandler, "absorb",
         lambda self, chat_id, phone, bot, text, history, lang: state["absorbed"].append(text),
     )
     monkeypatch.setattr(LlmTrialFlowHandler, "pending_prompt",
-                        lambda self, bot, draft, lang, user_text=None: "PENDING" if draft else None)
-    monkeypatch.setattr(LlmTrialFlowHandler, "names_trainer", lambda self, bot, draft, text: False)
+                        lambda self, bot, draft, lang: "PENDING" if draft else None)
     monkeypatch.setattr(LlmTrialFlowHandler, "fitting_slots_context", lambda self, bot, draft: None)
     return state
 
@@ -79,14 +79,74 @@ def _text(text: str) -> IncomingWhatsAppMessage:
     )
 
 
-def test_yes_on_a_chosen_class_skips_the_router(academy):
+def test_yes_on_a_chosen_class_goes_through_the_router(academy):
     academy["draft"] = {**_DRAFT, "group_id": 7}
+    academy["intent"] = ("confirm_yes", "ru")
 
-    message_handler.handle_incoming_message(_text("иә"))
+    message_handler.handle_incoming_message(_text("да"))
 
-    assert academy["handled"] == [("иә", "kk")]
-    assert academy["routed"] == []
+    assert academy["routed"] == ["PENDING"]
+    assert academy["handled"] == [("да", "kk")]
     assert academy["sent"] == ["FLOW"]
+
+
+@pytest.mark.parametrize("intent, expected", [
+    ("greeting", "Сәлеметсіз бе! Қалай көмектесе аламын?"),
+    ("thanks", "Жаттығулар немесе сынақ сабағы"),
+    ("bot_identity", "бот-ассистент академии"),
+])
+def test_small_talk_with_no_signup_gets_a_fixed_reply(academy, monkeypatch, intent, expected):
+    academy["intent"] = (intent, "kk")
+    monkeypatch.setattr(message_handler, "get_ai_response",
+                        lambda **k: pytest.fail("LLM must not be called for small talk"))
+
+    message_handler.handle_incoming_message(_text("сәлем"))
+
+    assert expected in academy["sent"][0]
+    assert academy["handled"] == []
+
+
+@pytest.fixture
+def extractor_down(academy, monkeypatch):
+    academy["draft"] = dict(_DRAFT)
+    academy["intent"] = ("trial_continue", "ru")
+    paused = []
+    monkeypatch.setattr(message_handler, "set_bot_paused", lambda phone, value, **k: paused.append(phone))
+    academy["paused"] = paused
+
+    def handle(self, chat_id, phone, bot, text, history, lang, intent=None):
+        self.extractor_failed = True
+        return "FLOW"
+
+    monkeypatch.setattr(LlmTrialFlowHandler, "handle", handle)
+    return academy
+
+
+def test_extractor_failure_asks_the_step_again(extractor_down):
+    message_handler.handle_incoming_message(_text("Алихан"))
+
+    assert extractor_down["sent"] == [f"{message_handler._ACADEMY_CLARIFY_LEAD['ru']}\n\nPENDING"]
+    assert extractor_down["paused"] == []
+
+
+def test_a_second_extractor_failure_goes_to_the_admin(extractor_down, monkeypatch):
+    lead = message_handler._ACADEMY_CLARIFY_LEAD["ru"]
+    monkeypatch.setattr(message_handler, "get_history",
+                        lambda chat_id: [{"role": "assistant", "content": f"{lead}\n\nPENDING"}])
+
+    message_handler.handle_incoming_message(_text("Алихан"))
+
+    assert extractor_down["sent"] == [message_handler._ACADEMY_UNCLEAR_REPLY["ru"]]
+    assert extractor_down["paused"] == ["+77001112233"]
+
+
+def test_small_talk_mid_signup_goes_to_the_flow(academy):
+    academy["draft"] = dict(_DRAFT)
+    academy["intent"] = ("greeting", "ru")
+
+    message_handler.handle_incoming_message(_text("привет"))
+
+    assert academy["handled"] == [("привет", "kk")]
 
 
 def test_list_choice_goes_to_the_flow_in_the_signup_language(academy):
@@ -116,6 +176,38 @@ def test_side_question_is_answered_and_the_pending_question_follows(academy):
 
     assert academy["handled"] == []
     assert academy["sent"] == ["LLM\n\nPENDING"]
+
+
+def test_a_closing_question_from_the_llm_is_dropped_before_the_step(academy):
+    academy["draft"] = dict(_DRAFT)
+    academy["intent"] = ("other", "kk")
+    academy["llm_reply"] = "Екеуі де тәжірибелі.\n\nҚай уақыт ыңғайлы?"
+
+    message_handler.handle_incoming_message(_text("қайсысы жақсы?"))
+
+    assert academy["sent"] == ["Екеуі де тәжірибелі.\n\nPENDING"]
+
+
+def test_a_schedule_question_at_the_class_list_goes_to_the_flow(academy, monkeypatch):
+    academy["draft"] = dict(_DRAFT)
+    academy["intent"] = ("question_schedule", "kk")
+    monkeypatch.setattr(LlmTrialFlowHandler, "choosing_class", lambda self, bot, draft: True)
+
+    message_handler.handle_incoming_message(_text("кешке бар ма?"))
+
+    assert academy["handled"] == [("кешке бар ма?", "kk")]
+
+
+def test_the_llm_gets_no_class_times_at_the_class_list(academy, monkeypatch):
+    academy["draft"] = dict(_DRAFT)
+    seen = {}
+    monkeypatch.setattr(LlmTrialFlowHandler, "choosing_class", lambda self, bot, draft: True)
+    monkeypatch.setattr(LlmTrialFlowHandler, "fitting_slots_context", lambda self, bot, draft: "19:15 Тимур")
+    monkeypatch.setattr(message_handler, "get_ai_response", lambda **k: seen.update(k) or ("LLM", None))
+
+    message_handler.handle_incoming_message(_text("тренер кім?"))
+
+    assert "19:15" not in seen["context"]
 
 
 def test_side_question_saves_the_answers_it_carries(academy):
@@ -149,20 +241,14 @@ def test_status_mid_signup_adds_the_pending_question(academy, monkeypatch):
     assert academy["sent"] == ["STATUS\n\nPENDING"]
 
 
-def test_greeting_mid_signup_goes_to_the_flow(academy):
-    academy["draft"] = dict(_DRAFT)
+def test_status_with_no_signup_goes_to_the_lookup(academy, monkeypatch):
+    academy["intent"] = ("trial_status", "ru")
+    monkeypatch.setattr(message_handler, "handle_trial_status_request", lambda phone, bot, lang: "STATUS")
 
-    message_handler.handle_incoming_message(_text("сәлем"))
+    message_handler.handle_incoming_message(_text("мои занятия"))
 
-    assert academy["handled"] == [("сәлем", "kk")]
-    assert academy["routed"] == []
-
-
-def test_greeting_without_a_signup_gets_the_fixed_reply(academy):
-    message_handler.handle_incoming_message(_text("сәлем"))
-
+    assert academy["sent"] == ["STATUS"]
     assert academy["handled"] == []
-    assert academy["sent"][0] == "Сәлеметсіз бе! Қалай көмектесе аламын?"
 
 
 def test_no_draft_routes_without_a_pending_question(academy):

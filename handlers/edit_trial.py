@@ -209,17 +209,9 @@ def _normalize_edit_patch(diff: dict, extracted: dict) -> dict:
     if "shift" in merged and "school_shift" not in merged:
         merged["school_shift"] = merged["shift"]
     if merged.get("school_shift") not in (None, "", *_SHIFTS):
-        # Imported here: llm_trial_flow imports this module (via trial_session).
-        from handlers.llm_trial_flow import shift_from_text
-        merged["school_shift"] = shift_from_text(str(merged["school_shift"])) or merged["school_shift"]
+        merged.pop("school_shift")
     if merged.get("experience") not in (None, "", "Beginner", "Intermediate", "Advanced"):
-        value = str(merged["experience"]).strip().lower()
-        if "начина" in value or "нович" in value or "бастап" in value:
-            merged["experience"] = "Beginner"
-        elif "средн" in value or "орта" in value:
-            merged["experience"] = "Intermediate"
-        elif "продвин" in value or "жоғары" in value:
-            merged["experience"] = "Advanced"
+        merged.pop("experience")
     if "trial_day" in merged and "preferred_weekday" not in merged:
         try:
             merged["preferred_weekday"] = int(merged["trial_day"]) - 1

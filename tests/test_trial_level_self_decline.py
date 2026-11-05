@@ -1,7 +1,7 @@
-"""Declines, and «not my child» sentences."""
+"""Declines."""
 import pytest
 
-from handlers import llm_trial_flow, message_handler
+from handlers import message_handler
 from tests.test_academy_unclear import _text, academy  # noqa: F401
 
 pytestmark = pytest.mark.no_db
@@ -25,16 +25,3 @@ def test_decline_replies_briefly(academy, monkeypatch, intent, needle, cancels):
     [reply] = academy["sent"]
     assert needle in reply and "?" not in reply
     assert bool(cancelled) is cancels
-
-
-@pytest.mark.parametrize("text", ["балам емес, өзім қатысамын", "не для ребёнка, хочу заниматься сам"])
-def test_not_a_child_means_the_adult_group(text):
-    assert llm_trial_flow._detect_audience(text) == "adult"
-
-
-def test_sentence_about_who_attends_is_not_a_name():
-    assert not llm_trial_flow._is_plausible_child_name("балам емес, өзім қатысамын")
-
-
-def test_age_with_locative_suffix_is_read():
-    assert 15 in llm_trial_flow._ages_in("менің жасым 15те")

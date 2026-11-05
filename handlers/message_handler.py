@@ -19,12 +19,7 @@ from handlers.questions import check_slots
 from handlers.sessions.base_session import BasePromptBuilder
 from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
 from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_abandoned
-from handlers.llm_trial_flow import is_greeting as is_trial_greeting
-from handlers.llm_trial_flow import is_acknowledgement as is_trial_acknowledgement
-from handlers.llm_trial_flow import confirm_decision as confirm_trial_decision
 from handlers.llm_trial_flow import shorten_repeated_list
-from handlers.llm_trial_flow import is_bot_identity_question
-from handlers.llm_trial_flow import is_factual_question as is_trial_factual_question
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
 from integrations import trial_service
@@ -311,6 +306,15 @@ def _academy_info_reply(intent: str, bot_name: str, lang: str) -> str:
     return f"Адрес: Астана, Сыганак 6Ф. Телефон администратора: {phone}."
 
 
+def _without_closing_question(reply: str | None) -> str:
+    """The side answer without a closing question of its own: the flow's step
+    comes next, and two questions in one message leave the client unsure."""
+    paragraphs = (reply or "").strip().split("\n\n")
+    while paragraphs and paragraphs[-1].rstrip().endswith("?"):
+        paragraphs.pop()
+    return "\n\n".join(paragraphs)
+
+
 def _with_pending(answer: str, pending: str | None) -> str:
     return f"{answer}\n\n{pending}" if pending else answer
 
@@ -368,6 +372,11 @@ def _abandon_stale_trial_draft(chat_id: str, sender_id: str, bot_name: str) -> b
     return True
 
 
+# Words with no language of their own («да», «ок») — the signup's language is kept.
+_SHORT_REPLY_INTENTS = {"greeting", "thanks", "bot_identity", "confirm_yes", "confirm_no"}
+_FLOW_INTENTS = {None, "trial_new", "trial_continue", "trial_edit", *_SHORT_REPLY_INTENTS}
+
+
 def _dispatch_in_trial_signup(
     intent: str | None,
     pending: str | None,
@@ -384,10 +393,17 @@ def _dispatch_in_trial_signup(
     appends the pending step). A None intent means the router failed — the
     message stays in the flow.
     """
-    if intent in (None, "trial_new", "trial_continue", "trial_edit"):
-        return LlmTrialFlowHandler().handle(
-            chat_id, sender_id, bot_name, user_text, history, lang
-        )
+    if intent in _FLOW_INTENTS:
+        flow = LlmTrialFlowHandler()
+        reply = flow.handle(chat_id, sender_id, bot_name, user_text, history, lang, intent=intent)
+        if not flow.extractor_failed:
+            return reply
+        # The answer was lost: ask once more, then the admin. The draft stays.
+        logger.warning("[TRIAL] Extractor failed for %s", sender_id)
+        reply = _academy_unclear_reply(history, lang, pending)
+        if _promises_admin(reply):
+            _pause_for_admin(sender_id, bot_name)
+        return reply
     if intent == "trial_cancel":
         return handle_cancel_trial_request(chat_id, sender_id, bot_name, lang)
     if intent == "trial_status":
@@ -763,45 +779,24 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 send_text_message(channel, sender_id, handle_reply)
                 return
 
-            # (a.5) Pre-LLM confirmation short-circuit: a plain yes/no on a
-            # draft with a chosen class confirms or cancels it even if the
-            # router would misclassify a bare "да". Stricter than the arena's
-            # _confirm_intent: a question like «…жоқ па?» goes to the router.
-            if trial_draft and trial_draft.get("group_id") and confirm_trial_decision(user_text):
-                last_bot = next((m.get("content") or "" for m in reversed(history)
-                                 if m.get("role") == "assistant"), "")
-                if is_trial_acknowledgement(user_text) and "📋" not in last_bot:
-                    # «ок» after a side answer acknowledges it — ask again
-                    # rather than confirm.
-                    handle_reply = LlmTrialFlowHandler().pending_prompt(
-                        bot_name, trial_draft, draft_lang, user_text,
-                    )
-                else:
-                    logger.info("[TRIAL] Pre-LLM confirm short-circuit for draft id=%s", trial_draft["id"])
-                    handle_reply = LlmTrialFlowHandler().handle(
-                        chat_id, sender_id, bot_name, user_text, history, draft_lang
-                    )
-                append_message(chat_id, "user", user_text)
-                append_message(chat_id, "assistant", handle_reply)
-                send_text_message(channel, sender_id, handle_reply)
-                return
+            pending = LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang)
+            trial_intent, trial_lang = route_trial_message(
+                history, user_text, pending=pending,
+                # Router failure mid-signup keeps the message in the flow.
+                fallback=None if trial_draft else "other",
+            )
+            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
+                        trial_intent, trial_lang)
 
-            # Greetings, "who are you" and thanks get a fixed reply — and
-            # mid-signup the flow adds the question it is waiting on.
-            if is_trial_greeting(user_text) or is_bot_identity_question(user_text) or is_trial_acknowledgement(user_text):
-                if trial_draft:
-                    handle_reply = LlmTrialFlowHandler().handle(
-                        chat_id, sender_id, bot_name, user_text, history, draft_lang
-                    )
-                elif is_trial_greeting(user_text):
-                    # One language — the one the client wrote in, as the router
-                    # reads it («Саламатсыз ба» has no Kazakh-only letters).
-                    _, greet_lang = route_trial_message(history, user_text)
+            # Greetings, "who are you" and thanks get a fixed reply — mid-signup
+            # the flow gives it, adding the question it is waiting on.
+            if not trial_draft and trial_intent in ("greeting", "thanks", "bot_identity"):
+                if trial_intent == "greeting":
                     handle_reply = (
-                        "Здравствуйте! Чем могу помочь?" if greet_lang == "ru"
+                        "Здравствуйте! Чем могу помочь?" if trial_lang == "ru"
                         else "Сәлеметсіз бе! Қалай көмектесе аламын?"
                     )
-                elif is_bot_identity_question(user_text):
+                elif trial_intent == "bot_identity":
                     handle_reply = (
                         "Я бот-ассистент академии. Могу ответить на вопросы о тренировках "
                         "и помочь записаться на пробное занятие.\n\n"
@@ -820,9 +815,14 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             # Mid-signup the LLM sees only the classes this client fits, so a
             # "any other time on Friday?" isn't answered from every group's times.
+            # At the class list the bot shows the classes itself, so the LLM
+            # gets no times at all.
+            choosing_class = LlmTrialFlowHandler().choosing_class(bot_name, trial_draft)
             fitting_ctx = LlmTrialFlowHandler().fitting_slots_context(bot_name, trial_draft)
             availability_ctx = fitting_ctx
-            if availability_ctx:
+            if choosing_class:
+                availability_ctx = ""
+            elif availability_ctx:
                 logger.info("[TRIAL] Injecting this signup's fitting classes into LLM call")
             else:
                 free = trial.get_trial_daytime(bot_config["name"], None)
@@ -842,32 +842,16 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                     "кто есть в занятиях этого клиента, без полного расписания, и не выбирай тренера за клиента."
                 )
 
-            pending = LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang)
-            trial_intent, trial_lang = route_trial_message(
-                history, user_text, pending=pending,
-                # Router failure mid-signup keeps the message in the flow.
-                fallback=None if trial_draft else "other",
-            )
-            logger.info("[TRIAL] Intent detection replied, Intent is %s, lang=%s",
-                        trial_intent, trial_lang)
-
             if trial_draft:
                 flow = LlmTrialFlowHandler()
-                # «Тимурдың уақыттары?» while choosing a class: that trainer's
-                # numbered classes are the answer — no LLM prose listing them too.
-                if (trial_intent in ("question_schedule", "other")
-                        and flow.names_trainer(bot_name, trial_draft, user_text)):
-                    handle_reply = flow.pending_prompt(bot_name, trial_draft, draft_lang, user_text)
-                    if handle_reply:
-                        logger.info("[TRIAL] Trainer named mid-signup — listing that trainer's classes")
-                        append_message(chat_id, "user", user_text)
-                        append_message(chat_id, "assistant", handle_reply)
-                        send_text_message(channel, sender_id, handle_reply)
-                        return
-                # The step shown after a side answer: narrowed to a named
-                # trainer, and not the same list the last message already had.
+                # «Тимурдың уақыттары?», «кешке бар ма?» at the class list: the
+                # answer is the list itself, narrowed to that wish.
+                if trial_intent == "question_schedule" and choosing_class:
+                    trial_intent = "trial_continue"
+                # The step shown after a side answer, not the same list the
+                # last message already had.
                 pending = shorten_repeated_list(
-                    flow.pending_prompt(bot_name, trial_draft, draft_lang, user_text), history, draft_lang,
+                    flow.pending_prompt(bot_name, trial_draft, draft_lang), history, draft_lang,
                 )
 
             if trial_intent in _DECLINE_REPLIES:
@@ -882,7 +866,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
             if trial_draft:
                 # "2." or "17:00" carries no language — keep the signup's own.
-                if not _has_letters(user_text):
+                if not _has_letters(user_text) or trial_intent in _SHORT_REPLY_INTENTS:
                     trial_lang = draft_lang
                 handle_reply = _dispatch_in_trial_signup(
                     trial_intent, pending, chat_id, sender_id,
@@ -896,28 +880,9 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 # The question may have answered a step — show the one still open.
                 trial_draft = _active_trial_draft(sender_id, bot_name)
                 pending = shorten_repeated_list(
-                    LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang, user_text),
+                    LlmTrialFlowHandler().pending_prompt(bot_name, trial_draft, draft_lang),
                     history, draft_lang,
                 )
-
-            # The router is tuned to over-trigger signup intent. The booking flow
-            # cannot answer a price/schedule/location question, so veto the router
-            # for those — but only for clients with no draft in progress, so a
-            # side-question mid-signup still reaches the flow's own interrupt
-            # handling instead of being diverted to RAG. This runs BEFORE the
-            # info-intent branch below: those two are complementary, not
-            # alternatives. _ACADEMY_INFO_INTENTS catches questions the router
-            # labelled correctly; this catches questions it labelled as signup.
-            if (
-                trial_intent in ("trial_new", "trial_continue")
-                and is_trial_factual_question(user_text)
-                and not trial_draft
-            ):
-                logger.info(
-                    "[TRIAL] Router said %s but message is a factual question and no "
-                    "draft is in progress — falling through to RAG/LLM", trial_intent
-                )
-                trial_intent = "other"
 
             if trial_intent in _ACADEMY_INFO_INTENTS:
                 handle_reply = _with_pending(
@@ -1034,19 +999,11 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
         if tool_call:
             handle_reply = reply
             if tool_call["name"] == "start_trial":
-                if is_trial_greeting(user_text) or is_trial_acknowledgement(user_text) or is_bot_identity_question(user_text):
-                    logger.info("[TRIAL] Ignoring start_trial tool for greeting/ack/bot-identity text")
-                    handle_reply = (
-                        "Хорошо. Чем могу помочь по академии?\n\n"
-                        "Жақсы. Академия бойынша қалай көмектесе аламын?"
-                    )
-                    reply = handle_reply
-                else:
-                    lang = builder.detect_lang(user_text)
-                    logger.info("[TRIAL] LLM called start_trial tool — starting gated trial flow (lang=%s)", lang)
-                    handle_reply = LlmTrialFlowHandler().handle(
-                        chat_id, sender_id, bot_config["name"], user_text, history, lang
-                    )
+                lang = builder.detect_lang(user_text)
+                logger.info("[TRIAL] LLM called start_trial tool — starting gated trial flow (lang=%s)", lang)
+                handle_reply = LlmTrialFlowHandler().handle(
+                    chat_id, sender_id, bot_config["name"], user_text, history, lang
+                )
 
             elif tool_call["name"] == "edit_trial":
                 logger.info("[EDIT] LLM called edit_trial tool — diff=%s", tool_call["args"])
@@ -1064,6 +1021,7 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
 
         # 5b. A side question answered mid-signup: remind the pending step.
         elif pending:
+            reply = _without_closing_question(reply)
             reply = f"{reply}\n\n{pending}" if reply else pending
 
         # Told the client the admin will contact them (rule 7, or the foreign

@@ -54,10 +54,10 @@ def flow(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.trial_service, "assign_slot", fake_assign)
     monkeypatch.setattr(llm_trial_flow.trial_service, "confirm_trial", fake_confirm)
 
-    def run(text, draft, extracted=None):
+    def run(text, draft, extracted=None, intent="trial_continue"):
         state["draft"] = dict(draft)
-        monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda h, t: dict(extracted or {}))
-        return LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_fs_school", text, [], "ru")
+        monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda h, t, answering=None, wish=None: dict(extracted or {}))
+        return LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_fs_school", text, [], "ru", intent=intent)
 
     return run, state
 
@@ -89,7 +89,7 @@ def test_edit_with_a_chosen_class_updates_the_draft_and_lists_the_classes_again(
     assert state["updates"][0]["school_shift"] == "morning"
     # The new shift drops the chosen class: the list is shown to pick again.
     assert state["updates"][0]["group_id"] is None
-    assert reply.startswith("Выберите тренировку") and "1. Пн 24.08.2026 — 18:00–19:30" in reply
+    assert reply.startswith("Выберите тренировку") and "📅 Пн 24.08.2026\n1. 18:00–19:30" in reply
     assert not state["confirmed"]
 
 
@@ -97,7 +97,7 @@ def test_yes_confirms_the_chosen_class(flow, monkeypatch):
     run, state = flow
     monkeypatch.setattr(llm_trial_flow.trial_logic, "is_trial_slot_eligible", lambda bot, draft: True)
 
-    reply = run("да", {**_INTAKE, **_CHOSEN})
+    reply = run("да", {**_INTAKE, **_CHOSEN}, intent="confirm_yes")
 
     assert state["confirmed"]
     assert reply.startswith("Запись на пробный урок оформлена")
@@ -109,7 +109,7 @@ def test_yes_clears_an_ineligible_class_and_reselects(flow, monkeypatch):
     monkeypatch.setattr(LlmTrialFlowHandler, "_evaluate_and_respond",
                         lambda self, chat_id, bot_name, draft, lang, signup_actor=None: "choose new group")
 
-    reply = run("да", {**_INTAKE, **_CHOSEN})
+    reply = run("да", {**_INTAKE, **_CHOSEN}, intent="confirm_yes")
 
     assert not state["confirmed"]
     assert state["updates"][0]["group_id"] is None

@@ -23,8 +23,7 @@ def test_child_name_rejection_reasons():
     assert _child_name_rejection(_LONG_NAME) == "too_long"
     assert _child_name_rejection("один два три четыре пять") == "too_many_words"
     assert _child_name_rejection("Али?") == "question"
-    assert _child_name_rejection("хочу записаться") == "blocked_phrase"
-    assert _child_name_rejection("привет") == "greeting"
+    assert _child_name_rejection("Ботагөз") is None
     assert _child_name_rejection("   ") == "empty"
 
 
@@ -36,7 +35,7 @@ def test_rejected_child_name_is_logged_with_reason(caplog):
 
 
 def test_too_long_name_is_not_saved_and_client_is_told_why(monkeypatch):
-    saved = _stub_intake(monkeypatch, {})
+    saved = _stub_intake(monkeypatch, {"audience": "child"}, {"child_name": _LONG_NAME})
 
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "77072479672", "dopsy_fs_school", _LONG_NAME, [], "ru",
@@ -59,7 +58,7 @@ def _stub_intake(monkeypatch, draft_fields, extracted=None):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot: draft)
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text: dict(extracted or {}))
+                        lambda history, text, answering=None, wish=None: dict(extracted or {}))
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)

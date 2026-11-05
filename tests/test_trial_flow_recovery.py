@@ -16,7 +16,7 @@ Real production incidents this covers:
 import pytest
 
 from handlers import llm_trial_flow
-from handlers.llm_trial_flow import BOXING_T, T, LlmTrialFlowHandler, _confirm_decision
+from handlers.llm_trial_flow import BOXING_T, T, LlmTrialFlowHandler
 
 pytestmark = pytest.mark.no_db
 
@@ -32,37 +32,13 @@ _CHOSEN_DRAFT = {
 }
 
 
-def test_confirm_decision_ignores_da_inside_other_words():
-    # "дать" contains "да" as a substring — must not read as "yes".
-    assert _confirm_decision("кстати можешь дать информацию по тренерам?") is None
-    assert _confirm_decision("да") == "yes"
-    assert _confirm_decision("подтверждаю") == "yes"
-
-
-def test_confirm_decision_recognizes_cancel_stems():
-    assert _confirm_decision("хочу отменить") == "cancel"
-    assert _confirm_decision("хочу отменить все") == "cancel"
-    assert _confirm_decision("бас тартамын") == "cancel"
-    assert _confirm_decision("нет") == "no"
-
-
-def test_confirm_decision_only_reads_plain_answers():
-    assert _confirm_decision("Иә, бәрі дұрыс") == "yes"
-    assert _confirm_decision("жоқ, рахмет") == "no"
-    # A question that contains «жоқ» is not a "no" (production incident).
-    assert _confirm_decision("жұма күнге басқа уақыттар жоқ па?") is None
-    assert _confirm_decision("жұма күнге басқа уақыттар жоқ па") is None
-    assert _confirm_decision("нет, давайте в 17:00") is None
-    assert _confirm_decision("да?") is None
-
-
 def test_plain_no_cancels_the_signup(monkeypatch):
     _with_draft(monkeypatch, _CHOSEN_DRAFT)
     cancelled = []
     monkeypatch.setattr(llm_trial_flow.trial_service, "cancel_trial",
                         lambda bot_name, chat_id, trial_id, reason: cancelled.append((trial_id, reason)))
 
-    LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_boxing", "жоқ", [], "kk")
+    LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_boxing", "жоқ", [], "kk", intent="confirm_no")
 
     assert cancelled == [(11, "user_declined_gated_trial")]
 
@@ -83,7 +59,7 @@ def _with_draft(monkeypatch, draft, extracted=None):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot_name: dict(draft))
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, user_text: dict(extracted or {}))
+                        lambda history, user_text, answering=None, wish=None: dict(extracted or {}))
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake",
                         lambda bot_name, trial_id, fields: {"ok": True, "data": {"trial": {**draft, **fields}}})
 
@@ -100,10 +76,11 @@ def test_unrelated_question_with_a_chosen_class_does_not_autoconfirm(monkeypatch
 
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_boxing", "кстати можешь дать информацию по тренерам?", [], "ru",
+        intent="trial_continue",
     )
 
-    # At the summary, anything that is neither a yes nor a change cancels.
-    assert cancelled and "отменена" in reply
+    # Neither a yes, a no nor a change: the summary is shown again.
+    assert not cancelled and "Подтверждаете запись?" in reply
 
 
 def test_cancel_phrase_with_a_chosen_class_actually_cancels(monkeypatch):
@@ -117,7 +94,7 @@ def test_cancel_phrase_with_a_chosen_class_actually_cancels(monkeypatch):
     )
 
     reply = LlmTrialFlowHandler().handle(
-        "chat-1", "7700", "dopsy_boxing", "хочу отменить все", [], "ru",
+        "chat-1", "7700", "dopsy_boxing", "хочу отменить все", [], "ru", intent="confirm_no",
     )
 
     assert cancelled == {
@@ -128,7 +105,7 @@ def test_cancel_phrase_with_a_chosen_class_actually_cancels(monkeypatch):
 
 
 def test_birth_year_gibberish_is_reasked_not_echoed_back(monkeypatch):
-    _with_draft(monkeypatch, {"id": 11, "child_name": "Ерсултан"})
+    _with_draft(monkeypatch, {"id": 11, "audience": "child", "child_name": "Ерсултан"})
 
     reply = LlmTrialFlowHandler().handle(
         "chat-1", "7700", "dopsy_fs_school", "что ты несешь?", [], "ru",
@@ -144,7 +121,7 @@ def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.trial_service, "create_or_get_draft",
                         lambda *a: {"ok": True, "data": {"trial": {"id": 11}}})
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text: {"asks_about_trial_or_price": True})
+                        lambda history, text, answering=None, wish=None: {"asks_about_trial_or_price": True, "audience": "child"})
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)
@@ -167,10 +144,10 @@ def test_sentence_on_return_to_a_draft_is_not_taken_as_the_name(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     # Not yet abandoned (120 minutes): the message answers the name question.
-    stale = {"id": 11, "updated_at": datetime.now(timezone.utc) - timedelta(minutes=60)}
+    stale = {"id": 11, "audience": "child", "updated_at": datetime.now(timezone.utc) - timedelta(minutes=60)}
     saved = {}
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: dict(stale))
-    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text: {})
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text, answering=None, wish=None: {})
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)
@@ -188,21 +165,6 @@ def test_sentence_on_return_to_a_draft_is_not_taken_as_the_name(monkeypatch):
     assert reply == BOXING_T["ask_name"]["kk"]
 
 
-def test_my_trial_query_reports_status_instead_of_asking_for_birth_year(monkeypatch):
-    monkeypatch.setattr(
-        "handlers.edit_trial.handle_trial_status_request",
-        lambda sender_phone, bot_name, lang: "У вас нет активной записи на пробное занятие.",
-    )
-
-    reply = LlmTrialFlowHandler().handle(
-        "chat-1", "7700", "dopsy_boxing", "мои занятия", [], "ru",
-    )
-
-    assert "У вас нет активной записи" in reply
-    assert "не подходит" not in reply
-    assert BOXING_T["ask_birth_year"]["ru"] not in reply
-
-
 _ADULT_SLOTS = [
     {"group_id": 1, "date": "2026-10-24", "time_start": "12:00", "time_end": "13:00",
      "trainer": "Бейсенов Тимур", "training_day": 5},
@@ -211,24 +173,17 @@ _ADULT_SLOTS = [
 ]
 
 
-def test_trainer_is_found_by_first_name_with_a_kazakh_ending():
-    assert llm_trial_flow._trainer_named("именно Тимурдың уақыттарын бере аласыз ба?", _ADULT_SLOTS) \
-        == "Бейсенов Тимур"
-    assert llm_trial_flow._trainer_named("сенбі ыңғайлы", _ADULT_SLOTS) is None
-
-
-def test_adult_list_shows_trainers_and_narrows_to_a_named_one(monkeypatch):
+def test_adult_list_shows_trainers_and_narrows_to_the_wished_one(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.trial_logic, "get_adult_trial_slots", lambda bot: list(_ADULT_SLOTS))
     draft = {"id": 5, "audience": "adult", "child_name": "Ерлан", "child_birth_year": 1996}
     handler = LlmTrialFlowHandler()
 
     full = handler.pending_prompt("dopsy_boxing", draft, "kk")
-    only_timur = handler.pending_prompt("dopsy_boxing", draft, "kk", "Тимурдың уақыттары?")
+    only_timur = handler.pending_prompt("dopsy_boxing", {**draft, "preferred_trainers": ["Timur"]}, "kk")
 
     assert "— Бейсенов Тимур" in full and "— Махмуд Мади" in full
-    assert "1. Сб 24.10.2026 — 12:00 — Бейсенов Тимур" in only_timur
+    assert "📅 Сб 24.10.2026\n1. 12:00 — Бейсенов Тимур" in only_timur
     assert "Махмуд" not in only_timur
-    assert handler.names_trainer("dopsy_boxing", draft, "Тимурдың уақыттары?")
 
 
 def test_confirmation_shows_the_trainer():
