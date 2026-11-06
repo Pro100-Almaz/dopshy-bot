@@ -53,6 +53,7 @@ class BaseChecker:
         fmt = data.get("format") or field_conf.get("format", "?")
 
         if booking_logic.check_range_free(booked, date_str, ts, te, field_id):
+            total = calculate_full_booking_price(fmt, date_str, ts, te)
             next_ask = self.asker.ask_next_priority(data)
             if not next_ask:
                 return self.check_and_confirm(data)
@@ -60,7 +61,8 @@ class BaseChecker:
             text = (
                     self.asker.localize(lang, "field_free",
                        fid=field_id, fmt=fmt,
-                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
+                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp,
+                       price=fmt_price(total))
                     + "\n\n" + next_ask
             )
             return self._offer_earlier_start(data, text, date_str, field_id, ts, te)
@@ -264,7 +266,9 @@ class BaseChecker:
             return (
                     self.asker.localize(lang, "field_auto",
                        fid=f["id"], fmt=f["format"],
-                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp)
+                       date=self.formatter.fmt_date(date_str, lang), ts=ts, te=te_disp,
+                       price=fmt_price(calculate_full_booking_price(
+                           f["format"], date_str, ts, te)))
                     + "\n\n" + next_ask
             )
 

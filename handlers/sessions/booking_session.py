@@ -60,8 +60,8 @@ _T = {
                                 "kk": "Алаң өлшемін таңдаңыз:"},
     "ask_field_invalid":      {"ru": "Пожалуйста, выберите размер поля.",
                                 "kk": "Алаң өлшемін таңдаңыз."},
-    "field_free_advance":     {"ru": "{fmt} — свободно ✅\n\nУкажите ваше имя:",
-                                "kk": "{fmt} — бос ✅\n\nАтыңызды жазыңыз:"},
+    "field_free_advance":     {"ru": "{fmt} — свободно ✅\n💰 {price}\n\nУкажите ваше имя:",
+                                "kk": "{fmt} — бос ✅\n💰 {price}\n\nАтыңызды жазыңыз:"},
     "ask_players":            {"ru": "Сколько игроков будет?",
                                 "kk": "Қанша ойыншы болады?"},
     "ask_players_invalid":    {"ru": "Пожалуйста, введите количество игроков (например: *8*).",
@@ -465,7 +465,11 @@ class BookingStepHandler(BaseStepHandler):
             )
             note = self._platform_link_note(chat_id, params, lang)
             self.save_session(chat_id, "step_name", params)
-            return self.builder.data_localization(lang, "field_free_advance", id=f["id"], fmt=f["format"]) + note
+            total = calculate_full_booking_price(f["format"], params["date"], time_start, time_end)
+            return self.builder.data_localization(
+                lang, "field_free_advance", id=f["id"], fmt=f["format"],
+                price=fmt_price(total),
+            ) + note
 
         logger.info(self.LOGGER_MESSAGES["step_time_advance"],
                     [f["id"] for f in free_fields])
@@ -502,7 +506,12 @@ class BookingStepHandler(BaseStepHandler):
             self.builder.bot_name, params["booking_id"], field=chosen_field["id"], format=chosen_field["format"]
         )
         self.save_session(chat_id, "step_name", params)
-        return self.builder.data_localization(lang, "ask_name")
+        total = calculate_full_booking_price(
+            chosen_field["format"], params["date"], params["time_start"], params["time_end"])
+        return self.builder.data_localization(
+            lang, "field_free_advance", id=chosen_field["id"], fmt=chosen_field["format"],
+            price=fmt_price(total),
+        )
 
 
 class BookingPromptBuilder(BasePromptBuilder):
