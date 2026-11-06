@@ -1,8 +1,12 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from chat import llm
 from handlers import academy_extractor
+
+pytestmark = pytest.mark.no_db
 
 
 def _completion(args: dict | None):
@@ -58,6 +62,8 @@ def test_extract_trial_details_parses_all_supported_fields(monkeypatch):
         "preferred_weekday": 4,
         "preferred_time_start": "18:00",
         "preferred_time_end": "19:30",
+        "preferred_weekdays": [4],
+        "preferred_trainers": None,
     }
     seen = {}
 
@@ -92,3 +98,45 @@ def test_extract_trial_details_merges_missing_keys_with_empty_template(monkeypat
     assert result["child_birth_year"] == 2014
     assert result["child_name"] is None
     assert result["preferred_time_start"] is None
+
+
+def test_the_extractor_is_told_the_saved_wish(monkeypatch):
+    seen = {}
+
+    def fake_create(**kwargs):
+        seen.update(kwargs)
+        return _completion({})
+
+    monkeypatch.setattr(academy_extractor.client.chat.completions, "create", fake_create)
+
+    academy_extractor.extract_trial_details(
+        [], "Тимурдың уақыттары?", "slot", {"preferred_time_start": "18:00", "preferred_trainers": None},
+    )
+
+    prompt = seen["messages"][0]["content"]
+    assert '{"preferred_time_start": "18:00"}' in prompt and "preferred_trainers\": null" not in prompt
+
+
+def test_a_failed_extraction_is_told_from_an_empty_one(monkeypatch):
+    def boom(**kwargs):
+        raise RuntimeError("openai down")
+
+    monkeypatch.setattr(academy_extractor.client.chat.completions, "create", boom)
+
+    result = academy_extractor.extract_trial_details([], "Алихан")
+
+    assert result["failed"] is True and result["child_name"] is None
+
+
+def test_extract_trial_details_is_told_the_step_being_answered(monkeypatch):
+    seen = {}
+
+    def fake_create(**kwargs):
+        seen.update(kwargs)
+        return _completion({"child_name": "Әсет"})
+
+    monkeypatch.setattr(academy_extractor.client.chat.completions, "create", fake_create)
+
+    academy_extractor.extract_trial_details([], "Есімім Әсет", "child_name")
+
+    assert "Бот сейчас спросил имя ученика" in seen["messages"][0]["content"]

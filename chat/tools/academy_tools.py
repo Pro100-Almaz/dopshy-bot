@@ -12,7 +12,7 @@ START_TRIAL_TOOL = {
             "НЕ пытайся СОБРАТЬ дату/время/личную информацию в свободном тексте ДО вызова функции. "
             "Ты должен сперва только узнать намерение "
             "и вызывать эту функцию если есть намерение записаться на пробный урок/занятие. "
-            "Запись во взрослую группу (18+) — такая же запись на пробное, вызывай функцию. "
+            "Запись во взрослую группу (17–60 лет) — такая же запись на пробное, вызывай функцию. "
             "НЕ вызывай эту функцию для персональных, индивидуальных, one-on-one "
             "тренировок или консультации по цене — по таким вопросам нужно отвечать текстом "
             "и направлять к администратору. "
@@ -58,10 +58,15 @@ SELECT_TRIAL_INTENT_LLM = {
                         "trial_edit",
                         "trial_status",
                         "trial_cancel",
+                        "confirm_yes",
+                        "confirm_no",
                         "human_help",
                         "decline_distance",
                         "decline_later",
                         "decline",
+                        "greeting",
+                        "thanks",
+                        "bot_identity",
                         "unclear",
                         "other",
                     ],
@@ -134,22 +139,26 @@ EXTRACT_TRIAL_DATA_LLM = {
                 "child_birth_year": {
                     "type": ["integer", "null"],
                     "description": (
-                        "Four-digit student's birth year. If the user clearly gives their own "
-                        "age for self-signup, such as 'мне 15 лет' or 'маған 15 жас', return the "
-                        "estimated birth year using the current year. Null unless explicit."
+                        "Four-digit student's birth year, for adults too. If the student's age is "
+                        "given, such as 'мне 15 лет', 'маған 15 жас', 'жасым 36', return the current "
+                        "year minus the age. The age of a parent signing up a child is not the "
+                        "student's: null. Null unless explicit."
                     ),
                 },
                 "audience": {
                     "type": ["string", "null"],
                     "enum": ["child", "adult", None],
                     "description": (
-                        "Which group the signup is for. 'adult' when the student is 18 or older: "
+                        "Which group the signup is for. 'adult' when the student is 17 or older: "
                         "the user asks for the adult group ('ересектер тобы', 'ересектерге', "
-                        "'взрослая группа', 'для взрослых'), signs up themselves as an adult, or "
-                        "gives their own age of 18+ ('Мен 25 жастамын', 'мне 30 лет'). 'child' when "
-                        "a child is being signed up ('балам', 'сын', 'дочь'), the children's group "
-                        "is named ('балалар тобы', 'детская группа') or the student is 5-17. "
+                        "'взрослая группа', 'для взрослых') or gives the student's age of 17+ "
+                        "('Мен 25 жастамын', 'мне 30 лет', 'жасым 36'). 'child' when a child is being "
+                        "signed up ('балам', 'сын', 'дочь'), the children's group is named ('балалар "
+                        "тобы', 'детская группа') or the student is 3-16. "
                         "A parent stating their own age while signing up a child is 'child'. "
+                        "Signing up oneself ('для себя', 'сам', 'өзім') says nothing about the group, "
+                        "because a child can sign up alone: with no age it is null, 'для себя, мне 12' "
+                        "is 'child', 'для себя, мне 30' is 'adult'. "
                         "A reply to the assistant's group list ('1. ... балалар тобы', '2. ... "
                         "ересектер тобы'): '1' -> 'child', '2' -> 'adult'. Null when unclear."
                     ),
@@ -159,7 +168,16 @@ EXTRACT_TRIAL_DATA_LLM = {
                     "enum": ["Beginner", "Intermediate", "Advanced", None],
                     "description": (
                         "Training level. Map beginner/новичок/бастапқы/бастауыш to Beginner, "
-                        "intermediate/средний/орта to Intermediate, advanced/продвинутый/жоғары/жетілген to Advanced."
+                        "intermediate/средний/орта to Intermediate, advanced/продвинутый/жоғары/жетілген to Advanced. "
+                        "Never trained ('с нуля', 'бұрын қатыспаған') is Beginner. A reply to the "
+                        "assistant's numbered level list is the value of the chosen item."
+                    ),
+                },
+                "wants_change": {
+                    "type": "boolean",
+                    "description": (
+                        "True when the client asks to change the signup, with or without naming "
+                        "what ('поменяйте время', 'басқа күн', 'давайте другой день'). Otherwise false."
                     ),
                 },
                 "school_shift": {
@@ -170,7 +188,8 @@ EXTRACT_TRIAL_DATA_LLM = {
                         "morning means studies in the morning (первая смена, бірінші ауысым); "
                         "afternoon means studies in the afternoon (вторая смена, екінші ауысым, "
                         "түстен кейін оқиды, учится после обеда); kindergarten means the child "
-                        "goes to kindergarten, not school (балабақшаға барады, ходит в садик)."
+                        "goes to kindergarten, not school (балабақшаға барады, ходит в садик). "
+                        "A reply to the assistant's numbered shift list is the value of the chosen item."
                     ),
                 },
                 "preferred_date": {
@@ -195,13 +214,33 @@ EXTRACT_TRIAL_DATA_LLM = {
                 },
                 "preferred_time_end": {
                     "type": ["string", "null"],
-                    "description": "Preferred end time HH:MM, or null.",
+                    "description": (
+                        "End of the wished time range HH:MM, or null. With "
+                        "preferred_time_start it is a range: 'кешке' is 18:00–23:59, "
+                        "'түстен кейін' is 15:00–18:00."
+                    ),
+                },
+                "preferred_weekdays": {
+                    "type": ["array", "null"],
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Every weekday the client wishes for, 0=Monday through 6=Sunday, or null."
+                    ),
+                },
+                "preferred_trainers": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "Trainers the client wants, names without case endings, or null. "
+                        "Comparing trainers or complaining about the list is not a wish."
+                    ),
                 },
             },
             "required": [
                 "child_name",
                 "signup_for",
                 "asks_about_trial_or_price",
+                "wants_change",
                 "child_birth_year",
                 "audience",
                 "experience",
@@ -210,6 +249,8 @@ EXTRACT_TRIAL_DATA_LLM = {
                 "preferred_weekday",
                 "preferred_time_start",
                 "preferred_time_end",
+                "preferred_weekdays",
+                "preferred_trainers",
             ],
         },
     },
@@ -245,7 +286,8 @@ EDIT_TRIAL_TOOL = {
                 },
                 "shift": {
                     "type": "string",
-                    "description": "Новое значение смены учебы ребенка клиента. Опускай, если смена учебы не меняется.",
+                    "enum": ["morning", "afternoon", "kindergarten"],
+                    "description": "Новая смена учебы ребенка клиента: morning — утренняя, afternoon — дневная, kindergarten — детский сад. Опускай, если смена учебы не меняется.",
                 },
                 "child_birth_year": {
                     "type": "integer",

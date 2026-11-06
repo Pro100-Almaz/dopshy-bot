@@ -7,9 +7,7 @@ pytestmark = pytest.mark.no_db
 
 
 def _ask_name_via_flow(monkeypatch, bot_name):
-    # No adult group, so the children's questions start straight away.
-    monkeypatch.setattr(llm_trial_flow.academy_repo, "get_groups_info", lambda bot_name, audience=None: [])
-    return LlmTrialFlowHandler()._evaluate_and_respond("chat-1", bot_name, {"id": 1}, "ru")
+    return LlmTrialFlowHandler()._evaluate_and_respond("chat-1", bot_name, {"id": 1, "audience": "child"}, "ru")
 
 
 def test_boxing_bot_uses_friendly_texts(monkeypatch):
