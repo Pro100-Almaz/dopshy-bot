@@ -1,7 +1,9 @@
 """Offer consent before the ApiPay invoice (integrations/consent_flow.py).
 
 Acceptance:
-  * no ApiPay `create_invoice` before the client's "Келісемін" — on any path;
+  * no ApiPay `create_invoice` before the client's "Келісемін" in the bot
+    dialog; website (checkbox) and admin bookings are billed at once, and the
+    client's "booking created" message states the offer;
   * a client whose WhatsApp number has no Kaspi is asked for another number,
     and the invoice goes to that number.
 Plus: decline, the retry limit and admin hand-over, "same number as last
@@ -439,29 +441,6 @@ def test_expired_consent_releases_the_slot_and_tells_the_client(apipay, monkeypa
     assert apipay["created"] == []
 
 
-def test_unanswered_template_ends_with_the_cancelled_template(api, apipay, monkeypatch, outbox):
-    """The template-only flow: a client who never wrote gets the confirm
-    request as a template and, with no answer, the cancellation as one too."""
-    monkeypatch.setattr(config, "WA_TEMPLATES", {**config.WA_TEMPLATES,
-                                                 "booking_confirm_request": "dopsy_confirm",
-                                                 "booking_cancelled": "dopsy_cancelled"})
-    r = api.post("/api/manager/bookings/batch",
-                 json={"phone": _WA, "slots": [_slot(1, "2027-10-12")]}, headers=_HDR)
-    bid = r.get_json()["booking_ids"][0]
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE consent_requests SET expires_at = NOW() - interval '1 minute'")
-
-    consent_flow.expire_stale()
-
-    sent = _to(outbox, _CLIENT)
-    assert [(m[1], m[2]) for m in sent] == [("template", "dopsy_confirm"),
-                                            ("template", "dopsy_cancelled")]
-    assert sent[1][3][1] == "подтверждение не получено"
-    assert all("\n" not in p for m in sent for p in m[3]), "no newlines in variables"
-    assert _state(bid) == "cancelled"
-
-
 def test_reset_cancels_the_dialog(apipay, monkeypatch):
     bid, _ = _confirm(monkeypatch, "2027-09-20")
     assert consent_flow.cancel_for_phone(_WA)
@@ -476,7 +455,22 @@ def _slot(field, date, ts="10:00", te="11:00", **extra):
     return {"field": field, "date": date, "time_start": ts, "time_end": te, **extra}
 
 
-def test_manager_batch_waits_for_consent_then_bills(api, apipay, outbox):
+def _hold(api, date):
+    """An admin 24h hold without payment; returns its booking id."""
+    r = api.post("/api/manager/bookings/batch",
+                 json={"hold_without_payment": True, "phone": "77001234567",
+                       "slots": [_slot(1, date)]}, headers=_HDR)
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()["booking_ids"][0]
+
+
+def _offer_note_in(text):
+    return config.OFFER_URL in text and "позвоните администратору" in text
+
+
+def test_manager_batch_bills_at_once_without_asking(api, apipay, outbox):
+    """An admin booking counts as offer accepted: no WhatsApp consent dialog,
+    the invoice goes out at once, the client is told and shown the offer."""
     body = {"phone": "+7 700 123 45 67", "customer": "Иван",
             "slots": [_slot(1, "2027-10-01"), _slot(2, "2027-10-01")]}
 
@@ -484,34 +478,24 @@ def test_manager_batch_waits_for_consent_then_bills(api, apipay, outbox):
 
     assert r.status_code == 200, r.get_json()
     data = r.get_json()
-    assert data["invoice"] is None and data["consent"]["status"] == "pending"
-    assert {_state(b) for b in data["booking_ids"]} == {"awaiting_consent"}
-    assert apipay["created"] == [] and apipay["checked"] == []
-    # First the booking itself — no offer, no amount yet.
-    ask = json.loads(_to(outbox, _CLIENT)[0][2])
-    assert "оформил для вас бронь" in ask["body"]["text"] and "поле 2" in ask["body"]["text"]
-    assert config.OFFER_URL not in ask["body"]["text"]
-    assert [b["reply"]["title"] for b in ask["action"]["buttons"]] == ["✅ Подтвердить", "❌ Отменить"]
-    assert _say("✅ Согласен") is not None and _state(data["booking_ids"][0]) == "awaiting_consent", \
-        "consent words do not confirm the booking — the question is re-asked"
-
-    # Then the offer, as a separate step.
-    offer = json.loads(_say("Подтвердить"))
-    assert config.OFFER_URL in offer["body"]["text"] and "20 000₸" in offer["body"]["text"]
-    assert apipay["created"] == [], "confirming the booking is not consent"
-
-    assert "отправлен в Kaspi" in _say("✅ Согласен")
+    assert data["payment"] == {"method": "kaspi_invoice", "phone": _WA, "amount": 20000}
     assert apipay["created"] == [{"phone": _WA, "amount": 20000}], "one invoice, both slots"
     for b in data["booking_ids"]:
         row = _row(b)
-        assert row["state"] == "awaiting_payment" and row["consent_channel"] == "admin_bot"
+        assert row["state"] == "awaiting_payment" and row["consent_channel"] == "admin"
+        assert row["consent_at"] is not None and row["payment_method"] == "kaspi_invoice"
+    assert consent_flow.get_active_request(_WA) is None, "no consent dialog"
+    assert _say("✅ Согласен") is None, "the client's messages are not intercepted"
+    (msg,) = _to(outbox, _CLIENT)
+    assert "Бронь создана" in msg[2] and "поле 2" in msg[2] and "20 000₸" in msg[2]
+    assert _offer_note_in(msg[2])
 
 
-def test_manager_can_hold_24h_without_phone_or_invoice_then_start_consent(api, apipay, outbox):
+def test_manager_can_hold_24h_without_phone_or_invoice_then_send_the_invoice(api, apipay, outbox):
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO customers (name, phone) VALUES ('Walk-in', '77009990000') RETURNING id"
+                "INSERT INTO customers (name, phone) VALUES ('Walk-in', '77001234567') RETURNING id"
             )
             customer_id = cur.fetchone()[0]
 
@@ -541,36 +525,119 @@ def test_manager_can_hold_24h_without_phone_or_invoice_then_start_consent(api, a
             cur.execute("SELECT description FROM booking_history WHERE booking_id = %s ORDER BY id", (bid,))
             assert "Слот 24 сағатқа төлемсіз ұсталды (админ)" in [x[0] for x in cur.fetchall()]
 
-    converted = api.post(
-        f"/api/manager/bookings/{bid}/request-payment",
-        json={"phone": _WA},
-        headers=_HDR,
-    )
-    assert converted.status_code == 200, converted.get_json()
-    assert _state(bid) == "awaiting_consent"
-    assert apipay["created"] == [], "conversion starts consent; it never invoices directly"
-    assert "оформил для вас бронь" in json.loads(_to(outbox, _CLIENT)[0][2])["body"]["text"]
+    sent = api.post(f"/api/manager/bookings/{bid}/request-payment", json={}, headers=_HDR)
+
+    assert sent.status_code == 200, sent.get_json()
+    assert sent.get_json()["payment"] == {"method": "kaspi_invoice", "phone": _WA, "amount": 10000}
+    assert apipay["created"] == [{"phone": _WA, "amount": 10000}], "billed at once, no dialog"
+    row = _row(bid)
+    assert row["state"] == "awaiting_payment" and row["payment_method"] == "kaspi_invoice"
+    assert row["consent_channel"] == "admin" and row["kaspi_phone"] == _WA
+    assert consent_flow.get_active_request(_WA) is None
+    (msg,) = _to(outbox, _CLIENT)
+    assert "Бронь создана" in msg[2] and _offer_note_in(msg[2])
+
+
+def test_hold_without_kaspi_is_sent_the_payment_link(api, apipay, outbox):
+    apipay["no_kaspi"].add(_WA)
+    bid = _hold(api, "2027-10-22")
+
+    r = api.post(f"/api/manager/bookings/{bid}/request-payment", json={}, headers=_HDR)
+
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["payment"]["method"] == "link"
+    row = _row(bid)
+    assert row["payment_method"] == "link" and row["consent_channel"] == "admin"
+    assert config.KASPI_PAYMENT_URL in _to(outbox, _CLIENT)[0][2]
+    assert _to(outbox, _ADMIN)
+
+
+def test_request_payment_only_for_holds(api, apipay):
+    r = api.post("/api/manager/bookings/batch",
+                 json={"phone": _WA, "slots": [_slot(1, "2027-10-23")]}, headers=_HDR)
+    bid = r.get_json()["booking_ids"][0]
+    r = api.post(f"/api/manager/bookings/{bid}/request-payment", json={}, headers=_HDR)
+    assert r.status_code == 409 and r.get_json()["code"] == "NOT_A_HOLD"
+
+
+def test_hold_is_edited_like_any_booking(api, apipay, outbox):
+    """A client may pay cash after the match: the admin edits the hold freely."""
+    bid = _hold(api, "2027-10-24")
+
+    r = api.patch(f"/api/manager/bookings/{bid}",
+                  json={"paid_cash": 15000, "status": "confirmed"}, headers=_HDR)
+
+    assert r.status_code == 200, r.get_json()
+    row = _row(bid)
+    assert row["state"] == "confirmed" and float(row["paid_cash"]) == 15000
+    assert apipay["created"] == []
+
+
+def test_manual_confirm_cancels_the_open_invoice(api, apipay, monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(apipay_client, "cancel_invoice", lambda iid: cancelled.append(iid))
+    r = api.post("/api/manager/bookings/batch",
+                 json={"phone": _WA, "slots": [_slot(1, "2027-10-25")]}, headers=_HDR)
+    bid = r.get_json()["booking_ids"][0]
+
+    r = api.patch(f"/api/manager/bookings/{bid}", json={"status": "confirmed"}, headers=_HDR)
+
+    assert r.status_code == 200, r.get_json()
+    assert cancelled == [apipay["next_id"]], "the client must not be able to pay twice"
 
 
 def test_manager_batch_respects_the_prepayment_override(api, apipay, outbox):
     body = {"phone": _WA, "prepayment": 5000, "slots": [_slot(1, "2027-10-02")]}
     api.post("/api/manager/bookings/batch", json=body, headers=_HDR)
-    _say("Подтвердить")
-    _say("✅ Согласен")
-    assert apipay["created"][0]["amount"] == 5000
+    assert apipay["created"] == [{"phone": _WA, "amount": 5000}]
 
 
-def test_client_cancels_the_manager_booking_at_the_first_step(api, apipay, outbox):
+def test_manager_booking_without_kaspi_pays_by_link(api, apipay, outbox):
+    apipay["no_kaspi"].add(_WA)
     r = api.post("/api/manager/bookings/batch",
                  json={"phone": _WA, "slots": [_slot(1, "2027-10-19")]}, headers=_HDR)
 
-    assert "бронь отменена" in _say("❌ Отменить")
+    assert r.status_code == 200, r.get_json()
+    data = r.get_json()
+    assert data["payment"]["method"] == "link" and data["payment"]["reason"] == "no_kaspi"
+    assert apipay["created"] == []
+    row = _row(data["booking_ids"][0])
+    assert row["state"] == "awaiting_payment" and row["payment_method"] == "link"
+    assert row["consent_channel"] == "admin"
+    (msg,) = _to(outbox, _CLIENT)
+    assert config.KASPI_PAYMENT_URL in msg[2] and _offer_note_in(msg[2])
+    assert _to(outbox, _ADMIN), "the admin is alerted"
 
-    assert _state(r.get_json()["booking_ids"][0]) == "cancelled"
-    assert apipay["created"] == [] and apipay["checked"] == []
+
+def test_manager_failed_invoice_send_keeps_the_booking_and_sends_the_link(
+        api, apipay, monkeypatch, outbox):
+    """Website: a failed send takes the bookings back. Admin: they stay and
+    the client pays by the Kaspi link."""
+    def boom(**kw):
+        raise apipay_client.ApiPayError("ApiPay down")
+    monkeypatch.setattr(apipay_client, "create_invoice", boom)
+
+    r = api.post("/api/manager/bookings/batch",
+                 json={"phone": _WA, "slots": [_slot(1, "2027-10-20")]}, headers=_HDR)
+
+    assert r.status_code == 200, r.get_json()
+    data = r.get_json()
+    assert data["payment"] == {"method": "link", "url": config.KASPI_PAYMENT_URL,
+                               "amount": 10000, "reason": "check_failed"}
+    row = _row(data["booking_ids"][0])
+    assert row["state"] == "awaiting_payment" and row["payment_method"] == "link"
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM apipay_invoices WHERE %s = ANY(booking_ids)",
+                        (row["id"],))
+            assert [x[0] for x in cur.fetchall()] == ["cancelled"], \
+                "the outbox must not push the invoice later"
+    (msg,) = _to(outbox, _CLIENT)
+    assert config.KASPI_PAYMENT_URL in msg[2] and _offer_note_in(msg[2])
+    assert _to(outbox, _ADMIN)
 
 
-def test_manager_single_booking_also_waits_for_consent(api, apipay, outbox):
+def test_manager_single_booking_also_bills_at_once(api, apipay, outbox):
     body = {"field": 1, "date": "2027-10-03", "time_start": "10:00", "time_end": "11:00",
             "phone": _WA, "customer": "Иван"}
 
@@ -578,18 +645,27 @@ def test_manager_single_booking_also_waits_for_consent(api, apipay, outbox):
 
     assert r.status_code == 200, r.get_json()
     bid = r.get_json()["data"]["booking_id"]
-    assert _state(bid) == "awaiting_consent"
-    assert apipay["created"] == []
-    assert _to(outbox, _CLIENT), "the client was asked"
+    row = _row(bid)
+    assert row["state"] == "awaiting_payment" and row["consent_channel"] == "admin"
+    assert apipay["created"] == [{"phone": _WA, "amount": 10000}]
+    assert consent_flow.get_active_request(_WA) is None
+    (msg,) = _to(outbox, _CLIENT)
+    assert "Бронь создана" in msg[2] and _offer_note_in(msg[2])
 
 
 def test_manager_payment_number_is_billed_without_asking(api, apipay):
     body = {"phone": _WA, "kaspi_phone": "+7 747 999 88 77", "slots": [_slot(1, "2027-10-13")]}
-    api.post("/api/manager/bookings/batch", json=body, headers=_HDR)
-
-    _say("Подтвердить")
-    assert "отправлен в Kaspi" in _say("✅ Согласен")
+    r = api.post("/api/manager/bookings/batch", json=body, headers=_HDR)
+    assert r.status_code == 200, r.get_json()
     assert apipay["created"] == [{"phone": _THIRD, "amount": 10000}]
+
+
+def test_manager_booking_defaults_to_the_last_kaspi_number(api, apipay):
+    _customer(_WA, kaspi=_OTHER)
+    r = api.post("/api/manager/bookings/batch",
+                 json={"phone": _WA, "slots": [_slot(1, "2027-10-17")]}, headers=_HDR)
+    assert r.status_code == 200, r.get_json()
+    assert apipay["created"] == [{"phone": _OTHER, "amount": 10000}]
 
 
 def test_manager_payment_number_must_be_valid(api, apipay):
@@ -610,7 +686,7 @@ def test_manager_single_repeating_booking_is_unchanged(api, apipay):
 
 def test_manager_batch_outside_24h_uses_the_template(api, apipay, monkeypatch, outbox):
     monkeypatch.setattr(config, "WA_TEMPLATES", {**config.WA_TEMPLATES,
-                                                 "booking_confirm_request": "dopsy_confirm"})
+                                                 "booking_created": "dopsy_created"})
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO whatsapp_last_inbound (phone, at) "
@@ -619,17 +695,12 @@ def test_manager_batch_outside_24h_uses_the_template(api, apipay, monkeypatch, o
     r = api.post("/api/manager/bookings/batch",
                  json={"phone": _WA, "slots": [_slot(1, "2027-10-05")]}, headers=_HDR)
 
+    assert r.status_code == 200, r.get_json()
     (to, kind, name, params), = _to(outbox, _CLIENT)
-    assert kind == "template" and name == "dopsy_confirm"
-    assert len(params) == 1 and "поле 1" in params[0]
-    req = consent_flow.get_request(r.get_json()["consent"]["request_id"])
-    assert req["prompt_delivery"] == "template"
-    # The template's quick reply comes back as a plain button title — and
-    # opens the window, so the rest of the dialog is free-form.
-    from integrations import client_notify
-    client_notify.touch_inbound(_CLIENT)
-    assert config.OFFER_URL in _say("Подтвердить")
-    assert "отправлен в Kaspi" in _say("✅ Согласен")
+    assert kind == "template" and name == "dopsy_created"
+    assert len(params) == 2 and "поле 1" in params[0]
+    assert "отправлен в Kaspi" in params[1] and _offer_note_in(params[1])
+    assert all("\n" not in p for p in params), "no newlines in variables"
 
 
 def test_inside_24h_the_free_form_message_is_sent(api, apipay, monkeypatch, outbox):
@@ -697,6 +768,7 @@ def test_site_with_consent_bills_the_kaspi_number_at_once(api, apipay, outbox):
     assert row["payment_method"] == "kaspi_invoice"
     assert _customer_kaspi(_WA) == _OTHER
     assert "Бронь создана" in _to(outbox, _CLIENT)[0][2], "booking-created message to WhatsApp"
+    assert _offer_note_in(_to(outbox, _CLIENT)[0][2]), "the message states the offer"
 
 
 def test_site_kaspi_number_without_kaspi_pays_by_link(api, apipay, outbox):
@@ -803,28 +875,6 @@ def test_kazakh_template_variables_are_translated():
     assert cn.localize_param("счёт на аванс 10 000₸ отправлен в Kaspi на номер +7 707 111 22 33",
                              "kk") == "10 000₸ аванс шоты Kaspi-ге (+7 707 111 22 33) жіберілді"
     assert cn.localize_param("📅 5 ноября · поле 1", "ru") == "📅 5 ноября · поле 1"
-
-
-def test_kazakh_client_gets_the_kazakh_template(api, apipay, monkeypatch, outbox):
-    monkeypatch.setattr(config, "WA_TEMPLATES", {**config.WA_TEMPLATES,
-                                                 "booking_confirm_request": "booking_confirm_request"})
-    from handlers import whatsapp_client
-    langs = []
-    monkeypatch.setattr(whatsapp_client, "send_template_message",
-                        lambda ch, to, name, lang, params: (
-                            langs.append(lang), outbox.append((to, "template", name, params))))
-    r = api.post("/api/manager/bookings/batch",
-                 json={"phone": _WA, "lang": "kk", "slots": [_slot(1, "2027-11-05")]}, headers=_HDR)
-    assert r.status_code == 200
-
-    assert langs == ["kk"]
-    (to, kind, name, params), = _to(outbox, _CLIENT)
-    assert kind == "template" and "қараша" in params[0] and "1-алаң" in params[0]
-    assert "Kaspi" not in params[0]
-    # The Kazakh quick reply leads into the same dialog.
-    from integrations import client_notify
-    client_notify.touch_inbound(_CLIENT)
-    assert config.OFFER_URL in _say("Растау")
 
 
 def test_missing_kazakh_template_falls_back_to_russian(apipay, monkeypatch):

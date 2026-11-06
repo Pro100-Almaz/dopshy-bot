@@ -238,7 +238,7 @@ def queue_invoice(cur, phone: str, booking_ids: list[int], slot_count: int,
 
 
 def batch_invoice_hook(phone: str, customer: str | None = None,
-                       consent: dict | None = None):
+                       consent: dict | None = None, consent_channel: str = "site"):
     """Build the ``on_created`` hook for `manager_create_bookings_batch`.
 
     Called with the batch's open cursor once every booking row exists. Only
@@ -256,11 +256,12 @@ def batch_invoice_hook(phone: str, customer: str | None = None,
             logger.info("[APIPAY] Пакет без разовых слотов — счёт не создаётся.")
             return {}
         if consent is not None:
-            # Website: the client ticked the offer checkbox. The proof goes on
-            # every booking of the request before the guard in queue_invoice
+            # Website: the client ticked the offer checkbox ('site'); admin:
+            # the admin booked on the client's behalf ('admin'). The proof goes
+            # on every booking of the request before the guard in queue_invoice
             # looks for it.
             from integrations import consent_flow
-            consent_flow.record_consent(cur, ctx["booking_ids"], "site",
+            consent_flow.record_consent(cur, ctx["booking_ids"], consent_channel,
                                         offer_version=consent.get("offer_version"),
                                         text_version=consent.get("text_version"))
             cur.execute("UPDATE bookings SET kaspi_phone = %s, payment_method = 'kaspi_invoice' "
@@ -411,6 +412,40 @@ def rollback_failed_send(queued: dict, error: str,
     logger.warning("[APIPAY] Счёт %s не отправлен (%s) — брони %s отменены",
                    queued["external_order_id"], error, ids)
     return ids
+
+
+def fallback_failed_send_to_link(queued: dict, error: str) -> dict | None:
+    """The admin-booking answer to a failed send: keep the bookings and let
+    the client pay by the Kaspi payment link instead (`mark_link`).
+
+    The queued row is retired first, exactly as in `rollback_failed_send`, so
+    the outbox does not push the invoice later on top of the link. If a webhook
+    already backfilled the row (the send did land) nothing changes and None is
+    returned — the invoice is live. Otherwise returns {amount, booking_ids}.
+    Never raises.
+    """
+    from integrations import consent_flow
+
+    try:
+        if not apipay_repo.cancel_unsent_row(queued["row_id"], f"send_failed: {error}"):
+            logger.warning("[APIPAY] Счёт %s уже существует на стороне ApiPay — "
+                           "оплата по ссылке не нужна", queued["external_order_id"])
+            return None
+    except Exception:  # noqa: BLE001
+        logger.exception("[APIPAY] Не удалось снять счёт %s с очереди",
+                         queued["external_order_id"])
+    booking_ids = list(queued.get("booking_ids") or [])
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                consent_flow.mark_link(cur, booking_ids)
+                for bid in booking_ids:
+                    _record_event(cur, bid, "apipay_send_failed",
+                                  note=f"оплата по ссылке: {error}")
+    except Exception:  # noqa: BLE001
+        logger.exception("[APIPAY] Брони %s не переведены на оплату по ссылке",
+                         booking_ids)
+    return {"amount": queued["amount"], "booking_ids": booking_ids}
 
 
 def sweep_pending_sends() -> int:
