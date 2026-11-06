@@ -4,14 +4,18 @@ No Kaspi invoice is raised until the client has agreed to the public offer
 (the avans is refundable within 48 hours of payment). Every path that wants money goes through here:
 
     bot "Подтверждаю"        ─┐
-    manager batch / single   ─┼─► bookings held in `awaiting_consent` (slot blocked,
+                              ├─► bookings held in `awaiting_consent` (slot blocked,
                               │    no invoice) + a `consent_requests` row
-                              │    manager-created first: "confirm this booking?"
+                              │    (legacy) admin-created first: "confirm this booking?"
                               │      «✅ Подтверждаю / ❌ Отменить» (the
                               │      `booking_confirm_request` template when the client
                               │      has not written in 24h); the tap opens the window
                               │    → the client gets "✅ Келісемін / ❌ Жоқ"
-    website (consent ticked) ─┴─► consent stored with the booking, invoice at once
+    website (consent ticked) ─┤
+    manager batch / single /  │
+    admin hold → send invoice─┴─► consent stored with the booking (channel 'site' /
+                                   'admin'), invoice at once; the "booking created"
+                                   message states the offer (blueprints/manager_api.py)
 
     ❌ Жоқ / no answer in CONSENT_TTL_SECONDS → bookings cancelled, nothing billed
     ✅ Келісемін → consent_at / channel / versions saved on every booking, then
@@ -370,15 +374,23 @@ def create_request(cur, *, phone: str, booking_ids: list[int],
     return req_id
 
 
-def start_hold_payment(booking_id: int, *, phone: str | None = None,
-                       kaspi_phone: str | None = None, lang: str | None = None,
-                       source: str = "manager") -> dict:
-    """Convert a no-payment hold into the ordinary manager consent flow.
+def bill_hold(booking_id: int, *, phone: str | None = None,
+              kaspi_phone: str, link_reason: str | None = None,
+              customer: str | None = None, source: str = "manager") -> dict:
+    """Bill an admin's 24h no-payment hold right away — no WhatsApp dialog.
 
-    This never issues an invoice. It changes the held logical slot to
-    ``awaiting_consent`` and asks the client to confirm the booking and offer;
-    billing can begin only after that dialog succeeds.
+    The admin manages the booking, so the offer counts as accepted (consent
+    channel 'admin'), exactly like an admin-created booking. In one
+    transaction: consent recorded, then either the invoice is queued
+    (awaiting_payment, payment_method='kaspi_invoice', PAYMENT_TTL_SECONDS) or,
+    with `link_reason` (no Kaspi / check failed), the hold becomes a payment by
+    link (LINK_PAYMENT_TTL_SECONDS). `kaspi_phone` must already have been
+    checked. The send and the client's message are the caller's (after commit).
+
+    Returns {ok, code, booking_ids, invoice?: queued, link?: {amount, booking_ids}}.
     """
+    from integrations import apipay_service
+
     contact = canonical_phone(phone)
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -394,11 +406,6 @@ def start_hold_payment(booking_id: int, *, phone: str | None = None,
                 return {"ok": False, "code": "NOT_A_HOLD",
                         "message": "Бронь не является 24-часовым удержанием без оплаты."}
 
-            contact = contact or canonical_phone(booking.get("phone"))
-            if len(contact) != 11 or not contact.startswith("7"):
-                return {"ok": False, "code": "PHONE_REQUIRED",
-                        "message": "Для запроса оплаты нужен номер клиента."}
-
             cur.execute(
                 "SELECT id FROM bookings WHERE id = %s OR "
                 " (group_transition IS NOT NULL AND group_transition = %s) "
@@ -406,26 +413,34 @@ def start_hold_payment(booking_id: int, *, phone: str | None = None,
                 (booking_id, booking.get("group_transition")),
             )
             booking_ids = [row["id"] for row in cur.fetchall()]
-            cur.execute(
-                "UPDATE bookings SET state = 'awaiting_consent', phone = %s, "
-                "payment_method = NULL, paid_avans = 0, updated_at = NOW() "
-                "WHERE id = ANY(%s)",
-                (contact, booking_ids),
-            )
+            if contact and not booking.get("phone"):
+                # Only fill a missing number: rewriting one linked to a customer
+                # trips the customer/phone consistency trigger.
+                cur.execute("UPDATE bookings SET phone = %s WHERE id = ANY(%s)",
+                            (contact, booking_ids))
+            record_consent(cur, booking_ids, "admin")
             for held_id in booking_ids:
-                _record_history(
-                    cur, held_id, source, key="status_change",
-                    old_status=_STATES_RUSSIAN.get("awaiting_payment"),
-                    new_status=_STATES_RUSSIAN.get("awaiting_consent"),
-                )
-            req_id = create_request(
-                cur, phone=contact, booking_ids=booking_ids,
-                chargeable_ids=booking_ids, slot_count=1, source="manager",
-                consent_channel="admin_bot", lang=lang,
-                chat_id=f"{config.WHATSAPP_PHONE_NUMBER_ID_BOT_1}:{contact}",
-                provider="ycloud", kaspi_phone=kaspi_phone, step="confirm",
-            )
-    return {"ok": True, "request_id": req_id, "booking_ids": booking_ids}
+                _record_history(cur, held_id, source,
+                                description="Удержание отправлено на оплату (админ)")
+
+            if link_reason:
+                mark_link(cur, booking_ids)
+                return {"ok": True, "code": "LINK", "booking_ids": booking_ids,
+                        "link": {"amount": config.APIPAY_AVANS_PER_BOOKING,
+                                 "booking_ids": booking_ids}}
+
+            normalized = apipay_client.normalize_phone(kaspi_phone)
+            cur.execute(
+                "UPDATE bookings SET payment_method = 'kaspi_invoice', kaspi_phone = %s, "
+                "       reserved_until = NOW() + make_interval(secs => %s), "
+                "       updated_at = NOW() "
+                " WHERE id = ANY(%s)",
+                (normalized, config.PAYMENT_TTL_SECONDS, booking_ids))
+            queued = apipay_service.queue_invoice(
+                cur, normalized, booking_ids, 1,
+                apipay_service._avans_description(1, customer or booking.get("customer_name")),
+                source="manager")
+    return {"ok": True, "code": "INVOICE", "booking_ids": booking_ids, "invoice": queued}
 
 
 def record_consent(cur, booking_ids: list[int], channel: str,

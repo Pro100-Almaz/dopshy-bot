@@ -697,15 +697,30 @@ def create_booking():
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "field, date, time_start, time_end are required."}), 400
 
-    # OFFER CONSENT: with ApiPay on, a one-off booking for a client with a phone
-    # is billed an avans — so it is held in `awaiting_consent` and the client is
-    # asked to agree to the offer on WhatsApp; the invoice follows their consent
-    # (integrations/consent_flow.py). Repeating or phone-less bookings carry no
-    # avans and are created as before.
+    # AVANS: with ApiPay on, a one-off booking for a client with a phone is
+    # billed an avans. The admin books on the client's behalf, so the offer
+    # counts as accepted — no WhatsApp consent dialog: the Kaspi invoice (or
+    # the payment link) goes out at once, exactly as for a one-slot batch, and
+    # the client's "booking created" message states the offer. Repeating or
+    # phone-less bookings carry no avans and are created as before.
     hold_without_payment = body.get("hold_without_payment", False)
     if not isinstance(hold_without_payment, bool):
         return jsonify({"ok": False, "code": "INVALID",
                         "message": "hold_without_payment must be a boolean."}), 400
+
+    if not hold_without_payment and config.APIPAY_ENABLED and repeat == "none" \
+            and body.get("phone"):
+        payload, status = _create_bookings_batch({
+            "slots": [{k: body[k] for k in ("field", "date", "time_start", "time_end")}],
+            **{k: body[k] for k in ("customer", "phone", "kaspi_phone", "notes",
+                                    "price_total", "prepayment", "discount_id",
+                                    "customer_id", "lang") if k in body},
+            "source": body.get("updated_by", "Неизвестен"),
+        })
+        if payload.get("ok") and payload.get("booking_ids"):
+            # The single endpoint's own shape: `data.booking_id`.
+            payload["data"]["booking_id"] = payload["booking_ids"][-1]
+        return jsonify(payload), status
 
     state = "confirmed"
     reserved_until = body.get("reserved_until")
@@ -715,17 +730,6 @@ def create_booking():
         reserved_until = 24 * 60
         consent_hook = _hold_without_payment_hook(
             body.get("source") or body.get("updated_by") or "manager")
-    elif config.APIPAY_ENABLED and repeat == "none" and body.get("phone"):
-        if not client_notify.normalize_recipient(body["phone"]):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "Некорректный номер телефона."}), 400
-        state = "awaiting_consent"
-        reserved_until = max(1, config.CONSENT_TTL_SECONDS // 60)
-        if body.get("kaspi_phone") and not consent_flow.parse_phone(body["kaspi_phone"]):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "Некорректный номер для оплаты (Kaspi)."}), 400
-        consent_hook = _consent_hook(body["phone"], body.get("customer"), body.get("lang"),
-                                     single=True, kaspi_phone=body.get("kaspi_phone"))
 
     res = booking_service.manager_create_booking(
         field=int(body["field"]),
@@ -753,40 +757,8 @@ def create_booking():
     if res["ok"] and res.get("data", {}).get("booking_id"):
         booking_row = repo.get_booking(res["data"]["booking_id"])
         _single_table_write(booking_row)
-        consent = (res.get("data") or {}).get("consent")
-        if consent:
-            consent_flow.deliver_prompt_async(consent["request_id"])
 
     return jsonify(res), (200 if res["ok"] else 409)
-
-
-def _consent_hook(phone: str, customer: str | None, lang: str | None,
-                  single: bool = False, amount=None, kaspi_phone: str | None = None):
-    """`on_created` hook opening a consent request for manager-created bookings.
-
-    Runs inside the booking transaction. The client is messaged only after the
-    commit (`consent_flow.deliver_prompt_async`), and the invoice only after
-    they agree — the manager never bills a client directly.
-    """
-    recipient = client_notify.normalize_recipient(phone)
-
-    def hook(cur, ctx):
-        if single:
-            ctx = {"booking_ids": ctx, "chargeable_booking_ids": ctx, "chargeable_count": 1}
-        count = ctx["chargeable_count"]
-        if count == 0:
-            return {}
-        req_id = consent_flow.create_request(
-            cur, phone=phone, booking_ids=ctx["booking_ids"],
-            chargeable_ids=ctx["chargeable_booking_ids"], slot_count=count,
-            source="manager", consent_channel="admin_bot", lang=lang or "ru",
-            chat_id=f"{config.WHATSAPP_PHONE_NUMBER_ID_BOT_1}:{recipient}",
-            provider="ycloud", amount=amount or None, kaspi_phone=kaspi_phone,
-            description=apipay_service._avans_description(count, customer),
-            step="confirm")
-        return {"consent": {"status": "pending", "request_id": req_id}}
-
-    return hook
 
 
 def _hold_without_payment_hook(source: str):
@@ -808,13 +780,13 @@ def _hold_without_payment_hook(source: str):
     return hook
 
 
-def _site_link_hook(consent: dict, kaspi_phone: str):
-    """Website booking whose payment number cannot get a Kaspi invoice: the
-    consent is stored and the bookings wait for a payment by link."""
+def _site_link_hook(consent: dict, kaspi_phone: str, consent_channel: str = "site"):
+    """Website/admin booking whose payment number cannot get a Kaspi invoice:
+    the consent is stored and the bookings wait for a payment by link."""
     def hook(cur, ctx: dict) -> dict:
         if ctx["chargeable_count"] == 0:
             return {}
-        consent_flow.record_consent(cur, ctx["booking_ids"], "site",
+        consent_flow.record_consent(cur, ctx["booking_ids"], consent_channel,
                                     offer_version=consent.get("offer_version"),
                                     text_version=consent.get("text_version"))
         consent_flow.mark_link(cur, ctx["chargeable_booking_ids"])
@@ -853,56 +825,66 @@ def create_bookings_batch():
         text_version?}`, else 400 CONSENT_REQUIRED. The consent is stored on the
         bookings (channel 'site') and the invoice goes to `kaspi_phone`
         (default `phone`) at once, in the same transaction as the bookings.
-      * MANAGER (no `consent`): the bookings are created in `awaiting_consent`
-        (slot held, CONSENT_TTL_SECONDS) and the bot asks the client on WhatsApp
-        to agree; the invoice follows their "Келісемін". Response carries
-        `consent: {status: "pending", request_id}` instead of an invoice.
+      * MANAGER (no `consent`): the admin books on the client's behalf, so
+        the offer counts as accepted (consent channel 'admin') — no WhatsApp
+        consent dialog. The invoice goes to `kaspi_phone`, else the client's
+        last Kaspi number, else `phone`, at once. If it cannot be sent, the
+        bookings are kept and the client pays by the Kaspi link instead.
+
+    Either way the client gets one WhatsApp message: the booking, how to pay,
+    and that booking means accepting the offer (OFFER_URL).
     """
-    body = request.get_json(silent=True) or {}
+    payload, status = _create_bookings_batch(request.get_json(silent=True) or {})
+    return jsonify(payload), status
+
+
+def _create_bookings_batch(body: dict) -> tuple[dict, int]:
+    """`create_bookings_batch` minus the HTTP layer; also used by the single
+    booking endpoint for a one-off ApiPay booking. Returns (payload, status)."""
     hold_without_payment = body.get("hold_without_payment", False)
     if not isinstance(hold_without_payment, bool):
-        return jsonify({"ok": False, "code": "INVALID",
-                        "message": "hold_without_payment must be a boolean."}), 400
+        return {"ok": False, "code": "INVALID",
+                "message": "hold_without_payment must be a boolean."}, 400
     consent = body.get("consent")
     is_site = consent is not None or body.get("channel") == "site"
     if not hold_without_payment and is_site and not (
         isinstance(consent, dict) and consent.get("accepted") is True
     ):
-        return jsonify({"ok": False, "code": "CONSENT_REQUIRED",
-                        "message": "Для брони необходимо согласиться с офертой."}), 400
+        return {"ok": False, "code": "CONSENT_REQUIRED",
+                "message": "Для брони необходимо согласиться с офертой."}, 400
     slots = body.get("slots")
     if not isinstance(slots, list) or not slots:
-        return jsonify({"ok": False, "code": "INVALID",
-                        "message": "slots must be a non-empty list."}), 400
+        return {"ok": False, "code": "INVALID",
+                "message": "slots must be a non-empty list."}, 400
 
     valid_modes = ("none", "daily", "weekly", "monthly")
     total_occurrences = 0
     for s in slots:
         if not isinstance(s, dict) or not all(s.get(k) for k in ("field", "date", "time_start", "time_end")):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "each slot needs field, date, time_start, time_end."}), 400
+            return {"ok": False, "code": "INVALID",
+                    "message": "each slot needs field, date, time_start, time_end."}, 400
         mode = s.get("repeat_mode") or "none"
         if mode not in valid_modes:
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": f"repeat_mode must be one of {valid_modes}."}), 400
+            return {"ok": False, "code": "INVALID",
+                    "message": f"repeat_mode must be one of {valid_modes}."}, 400
         until = s.get("repeat_until")
         if mode != "none":
             if not until:
-                return jsonify({"ok": False, "code": "INVALID",
-                                "message": "repeat_until is required when repeat_mode != none."}), 400
+                return {"ok": False, "code": "INVALID",
+                        "message": "repeat_until is required when repeat_mode != none."}, 400
             if str(until) < str(s["date"]):
-                return jsonify({"ok": False, "code": "INVALID",
-                                "message": "repeat_until must be >= date."}), 400
+                return {"ok": False, "code": "INVALID",
+                        "message": "repeat_until must be >= date."}, 400
         try:
             total_occurrences += len(booking_service.occurrence_dates(
                 str(s["date"]), str(until or s["date"]), mode))
         except (ValueError, TypeError):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "invalid date or repeat_until."}), 400
+            return {"ok": False, "code": "INVALID",
+                    "message": "invalid date or repeat_until."}, 400
 
     if total_occurrences > 1000:
-        return jsonify({"ok": False, "code": "INVALID",
-                        "message": "too many occurrences (max 1000); shorten the repeat range."}), 400
+        return {"ok": False, "code": "INVALID",
+                "message": "too many occurrences (max 1000); shorten the repeat range."}, 400
 
     # ── Avans invoice (ApiPay) ────────────────────────────────────────────────
     # Only non-repeating slots are charged, so a batch of pure repeats needs no
@@ -914,6 +896,7 @@ def create_bookings_batch():
     invoice_hook = None
     avans_per_booking = None
     link_reason = None
+    consent_channel = "site"
     state = "awaiting_payment"
     reserved_until = body.get("reserved_until", max(1, config.PAYMENT_TTL_SECONDS // 60))
     if hold_without_payment:
@@ -921,27 +904,27 @@ def create_bookings_batch():
         reserved_until = 24 * 60
         invoice_hook = _hold_without_payment_hook(
             body.get("source") or body.get("updated_by") or "manager")
-    elif config.APIPAY_ENABLED and chargeable_slots and not is_site:
-        if not phone or not client_notify.normalize_recipient(phone):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "phone обязателен: клиенту отправляется оферта."}), 400
-        state = "awaiting_consent"
-        reserved_until = max(1, config.CONSENT_TTL_SECONDS // 60)
-        if body.get("kaspi_phone") and not consent_flow.parse_phone(body["kaspi_phone"]):
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "Некорректный номер для оплаты (Kaspi)."}), 400
-        invoice_hook = _consent_hook(phone, body.get("customer"), body.get("lang"),
-                                     amount=body.get("prepayment"),
-                                     kaspi_phone=body.get("kaspi_phone"))
-        avans_per_booking = config.APIPAY_AVANS_PER_BOOKING
     elif config.APIPAY_ENABLED and chargeable_slots:
         if not phone:
-            return jsonify({"ok": False, "code": "INVALID",
-                            "message": "phone обязателен: на него выставляется аванс."}), 400
+            return {"ok": False, "code": "INVALID",
+                    "message": "phone обязателен: на него выставляется аванс."}, 400
+        if not is_site:
+            # Admin booking: the admin booked on the client's behalf, so the
+            # offer counts as accepted — no WhatsApp consent dialog. The client
+            # is told so in the "booking created" message.
+            if not client_notify.normalize_recipient(phone):
+                return {"ok": False, "code": "INVALID",
+                        "message": "Некорректный номер телефона."}, 400
+            if body.get("kaspi_phone") and not consent_flow.parse_phone(body["kaspi_phone"]):
+                return {"ok": False, "code": "INVALID",
+                        "message": "Некорректный номер для оплаты (Kaspi)."}, 400
+            kaspi_phone = body.get("kaspi_phone") or _last_kaspi_phone(phone) or phone
+            consent = {}
+            consent_channel = "admin"
         try:
             apipay_client.normalize_phone(kaspi_phone)
         except ApiPayError as exc:
-            return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+            return {"ok": False, "code": "INVALID", "message": str(exc)}, 400
         # And ask Kaspi whether it knows the number at all. An invoice to an
         # unknown one is accepted and only dies later as a webhook, so the
         # manager would get a 200 here and never hear that it failed — while the
@@ -958,10 +941,11 @@ def create_bookings_batch():
             logger.error("[MANAGER_API] Проверка номера в Kaspi не удалась: %s — оплата по ссылке", exc)
             link_reason = "check_failed"
         if link_reason:
-            invoice_hook = _site_link_hook(consent, kaspi_phone)
+            invoice_hook = _site_link_hook(consent, kaspi_phone, consent_channel)
         else:
             invoice_hook = apipay_service.batch_invoice_hook(kaspi_phone, body.get("customer"),
-                                                             consent=consent)
+                                                             consent=consent,
+                                                             consent_channel=consent_channel)
         avans_per_booking = config.APIPAY_AVANS_PER_BOOKING
 
     try:
@@ -986,27 +970,40 @@ def create_bookings_batch():
         # Only reachable before the invoice row is written (a phone ApiPay
         # rejects outright); the batch transaction was rolled back.
         logger.error("[MANAGER_API] ApiPay отклонил счёт, пакет отменён: %s", exc)
-        return jsonify({"ok": False, "code": "PAYMENT_PROVIDER_ERROR",
-                        "message": f"Не удалось выставить аванс: {exc}. "
-                                   "Брони не созданы, попробуйте ещё раз."}), 502
+        return {"ok": False, "code": "PAYMENT_PROVIDER_ERROR",
+                "message": f"Не удалось выставить аванс: {exc}. "
+                           "Брони не созданы, попробуйте ещё раз."}, 502
 
     if res["ok"]:
         # Bookings and invoice row are committed — now ask ApiPay to push it.
-        # No invoice means no bookings: the whole batch is taken back (repeating
-        # slots included — one request, one outcome) and the failure is reported
-        # with ApiPay's own wording, so the manager can act on it or retry.
+        # Website: no invoice means no bookings — the whole batch is taken back
+        # (repeating slots included — one request, one outcome) and the failure
+        # is reported with ApiPay's own wording, so the client can retry.
+        # Admin: the bookings stay and the client pays by the Kaspi link.
         queued = (res.get("data") or {}).get("invoice")
         if queued:
             try:
                 res["data"]["invoice"] = apipay_service.send_invoice(queued)
             except ApiPayError as exc:
+                if not is_site:
+                    link = apipay_service.fallback_failed_send_to_link(queued, str(exc))
+                    if link is not None:
+                        logger.error("[MANAGER_API] ApiPay не выставил счёт, брони %s "
+                                     "переведены на оплату по ссылке: %s",
+                                     queued["booking_ids"], exc)
+                        res["data"]["invoice"] = None
+                        res["data"]["link"] = {**link, "payment_phone": kaspi_phone}
+                        link_reason = "check_failed"
+                    # else: a webhook shows the send landed after all — the
+                    # invoice is live, the bookings stay as they are.
+                    return _batch_success(body, res, phone, kaspi_phone, link_reason)
                 cancelled = apipay_service.rollback_failed_send(
                     queued, str(exc),
                     booking_ids=(res.get("data") or {}).get("booking_ids") or [],
                 )
                 logger.error("[MANAGER_API] ApiPay не выставил счёт, брони %s "
                              "отменены: %s", cancelled, exc)
-                return jsonify({
+                return {
                     "ok": False,
                     "code": "PAYMENT_PROVIDER_ERROR",
                     "error": "apipay_error",
@@ -1014,83 +1011,148 @@ def create_bookings_batch():
                     "message": f"Не удалось выставить аванс: {exc}. "
                                "Брони отменены — попробуйте ещё раз.",
                     "cancelled_booking_ids": cancelled,
-                }), 502
+                }, 502
 
-        for r in res.get("data", {}).get("created", []):
-            if r.get("booking_id"):
-                booking_row = repo.get_booking(r["booking_id"])
-                _single_table_write(booking_row)
-        data = res.get("data") or {}
-        payment = None
-        invoice = data.get("invoice")
-        if invoice and invoice.get("id"):
-            consent_flow.remember_kaspi_phone(phone, invoice["phone"], name=body.get("customer"))
-            payment = {"method": "kaspi_invoice", "phone": invoice["phone"],
-                       "amount": invoice["amount"]}
-            _notify_site_booking(phone, data, "booking_created_invoice",
-                                 amount=client_notify.fmt_amount(invoice["amount"]),
-                                 kaspi_phone=consent_flow.display_phone(invoice["phone"]),
-                                 ttl=config.PAYMENT_TTL_SECONDS // 60)
-        elif data.get("link"):
-            payment = {"method": "link", "url": config.KASPI_PAYMENT_URL,
-                       "amount": data["link"]["amount"], "reason": link_reason}
-            reason_text = ("На номере {} не найден Kaspi — счёт выставить нельзя."
-                           if link_reason == "no_kaspi" else
-                           "Не удалось выставить счёт в Kaspi на номер {}.")
-            _notify_site_booking(phone, data, "payment_link",
-                                 amount=client_notify.fmt_amount(data["link"]["amount"]),
-                                 link=config.KASPI_PAYMENT_URL,
-                                 reason=reason_text.format(consent_flow.display_phone(kaspi_phone)))
-            rows = repo.get_bookings(data["link"]["booking_ids"])
-            test_context.spawn_thread(consent_flow.alert_admin_link, rows, phone, kaspi_phone,
-                                      link_reason, data["link"]["amount"])
-        if data.get("consent"):
-            consent_flow.deliver_prompt_async(data["consent"]["request_id"])
-        return jsonify({"ok": True,
-                        "created_count": data.get("created_count", 0),
-                        "booking_ids": data.get("booking_ids", []),
-                        # Present only when an avans was charged; the client
-                        # confirms in their Kaspi app, we get a webhook.
-                        "invoice": invoice,
-                        # How the website client pays: Kaspi invoice or link.
-                        "payment": payment,
-                        # Manager batch: the client is being asked for consent.
-                        "consent": data.get("consent"),
-                        "hold_without_payment": bool(data.get("hold_without_payment")),
-                        "data": data}), 200
+        return _batch_success(body, res, phone, kaspi_phone, link_reason)
 
     # Conflict ->  409 with the precise collision list the FE renders.
     if res.get("error") == "conflict":
-        return jsonify({"ok": False, "error": "conflict",
-                        "conflicts": res.get("conflicts", []),
-                        "code": res.get("code"),
-                        "message": res.get("message")}), 409
+        return {"ok": False, "error": "conflict",
+                "conflicts": res.get("conflicts", []),
+                "code": res.get("code"),
+                "message": res.get("message")}, 409
 
-    return jsonify(res), 409
+    return res, 409
+
+
+def _batch_success(body: dict, res: dict, phone, kaspi_phone, link_reason) -> tuple[dict, int]:
+    """Sheet write, the client's WhatsApp message and the 200 payload for a
+    committed batch. The message says how to pay and that booking means
+    accepting the offer (website and admin bookings have no consent dialog)."""
+    for r in res.get("data", {}).get("created", []):
+        if r.get("booking_id"):
+            booking_row = repo.get_booking(r["booking_id"])
+            _single_table_write(booking_row)
+    data = res.get("data") or {}
+    payment = None
+    invoice = data.get("invoice")
+    if invoice and invoice.get("id"):
+        consent_flow.remember_kaspi_phone(phone, invoice["phone"], name=body.get("customer"))
+        payment = {"method": "kaspi_invoice", "phone": invoice["phone"],
+                   "amount": invoice["amount"]}
+        _notify_site_booking(phone, data, "booking_created_invoice_offer",
+                             amount=client_notify.fmt_amount(invoice["amount"]),
+                             kaspi_phone=consent_flow.display_phone(invoice["phone"]),
+                             ttl=config.PAYMENT_TTL_SECONDS // 60)
+    elif data.get("link"):
+        payment = {"method": "link", "url": config.KASPI_PAYMENT_URL,
+                   "amount": data["link"]["amount"], "reason": link_reason}
+        reason_text = ("На номере {} не найден Kaspi — счёт выставить нельзя."
+                       if link_reason == "no_kaspi" else
+                       "Не удалось выставить счёт в Kaspi на номер {}.")
+        _notify_site_booking(phone, data, "payment_link_offer",
+                             amount=client_notify.fmt_amount(data["link"]["amount"]),
+                             link=config.KASPI_PAYMENT_URL,
+                             reason=reason_text.format(consent_flow.display_phone(kaspi_phone)))
+        rows = repo.get_bookings(data["link"]["booking_ids"])
+        test_context.spawn_thread(consent_flow.alert_admin_link, rows, phone, kaspi_phone,
+                                  link_reason, data["link"]["amount"])
+    return {"ok": True,
+            "created_count": data.get("created_count", 0),
+            "booking_ids": data.get("booking_ids", []),
+            # Present only when an avans was charged; the client
+            # confirms in their Kaspi app, we get a webhook.
+            "invoice": invoice,
+            # How the client pays: Kaspi invoice or link.
+            "payment": payment,
+            "hold_without_payment": bool(data.get("hold_without_payment")),
+            "data": data}, 200
+
+
+def _last_kaspi_phone(phone: str) -> str | None:
+    """The client's Kaspi number from last time, if any. Never raises."""
+    try:
+        return consent_flow.last_kaspi_phone(phone)
+    except Exception:  # noqa: BLE001
+        logger.exception("[MANAGER_API] Не удалось прочитать kaspi_phone клиента %s", phone)
+        return None
 
 
 @manager_api.post("/api/manager/bookings/<int:booking_id>/request-payment")
 def request_payment_for_hold(booking_id: int):
-    """Start the normal client-confirmation/offer flow for a 24-hour hold."""
+    """Send the Kaspi invoice for an admin's 24h no-payment hold.
+
+    No WhatsApp consent dialog: the admin manages the booking, so the offer
+    counts as accepted (consent channel 'admin') — the same as an admin-created
+    booking. Body: `{phone?, kaspi_phone?}`. The invoice goes to `kaspi_phone`,
+    else the client's last Kaspi number, else the booking's phone. No Kaspi on
+    that number, or a failed check/send → the client pays by the Kaspi link.
+    The client gets the informational "booking created" message (with the
+    offer note); the response has the same `payment` as booking creation.
+    """
     body = request.get_json(silent=True) or {}
-    result = consent_flow.start_hold_payment(
-        booking_id,
-        phone=body.get("phone"),
-        kaspi_phone=body.get("kaspi_phone"),
-        lang=body.get("lang"),
-        source=body.get("source") or _api_key_actor(),
-    )
-    if result["ok"]:
-        consent_flow.deliver_prompt_async(result["request_id"])
-        for held_id in result["booking_ids"]:
-            booking_row = repo.get_booking(held_id)
-            if booking_row:
-                _single_table_write(booking_row)
-        return jsonify(result), 200
-    status = 404 if result["code"] == "NOT_FOUND" else 409
-    if result["code"] == "PHONE_REQUIRED":
-        status = 400
-    return jsonify(result), status
+    if not config.APIPAY_ENABLED:
+        return jsonify({"ok": False, "code": "NOT_CONFIGURED",
+                        "message": "ApiPay не настроен."}), 503
+    booking = repo.get_booking(booking_id)
+    if not booking:
+        return jsonify({"ok": False, "code": "NOT_FOUND", "message": "Бронь не найдена."}), 404
+    phone = body.get("phone") or booking.get("phone")
+    contact = consent_flow.canonical_phone(phone)
+    if len(contact) != 11 or not contact.startswith("7"):
+        return jsonify({"ok": False, "code": "PHONE_REQUIRED",
+                        "message": "Для отправки счёта нужен номер клиента."}), 400
+    if body.get("kaspi_phone") and not consent_flow.parse_phone(body["kaspi_phone"]):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "Некорректный номер для оплаты (Kaspi)."}), 400
+    kaspi_phone = body.get("kaspi_phone") or _last_kaspi_phone(contact) or contact
+    try:
+        apipay_client.normalize_phone(kaspi_phone)
+    except ApiPayError as exc:
+        return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+
+    link_reason = None
+    try:
+        apipay_service.ensure_kaspi_client(kaspi_phone)
+    except KaspiClientMissing as exc:
+        logger.warning("[MANAGER_API] %s — оплата по ссылке", exc)
+        link_reason = "no_kaspi"
+    except ApiPayError as exc:
+        logger.error("[MANAGER_API] Проверка номера в Kaspi не удалась: %s — оплата по ссылке", exc)
+        link_reason = "check_failed"
+
+    try:
+        result = consent_flow.bill_hold(
+            booking_id, phone=contact, kaspi_phone=kaspi_phone, link_reason=link_reason,
+            customer=booking.get("customer_name"),
+            source=body.get("source") or _api_key_actor() or "manager")
+    except ApiPayError as exc:
+        logger.error("[MANAGER_API] Счёт для удержания #%s не поставлен: %s", booking_id, exc)
+        return jsonify({"ok": False, "code": "PAYMENT_PROVIDER_ERROR",
+                        "message": f"Не удалось выставить аванс: {exc}"}), 502
+    if not result["ok"]:
+        status = 404 if result["code"] == "NOT_FOUND" else 409
+        return jsonify(result), status
+
+    data = {"booking_ids": result["booking_ids"],
+            "created": [{"booking_id": bid} for bid in result["booking_ids"]],
+            "invoice": result.get("invoice"), "link": result.get("link")}
+    queued = data["invoice"]
+    if queued:
+        try:
+            data["invoice"] = apipay_service.send_invoice(queued)
+        except ApiPayError as exc:
+            # The hold was the admin's promise: keep it, pay by link instead.
+            link = apipay_service.fallback_failed_send_to_link(queued, str(exc))
+            if link is not None:
+                logger.error("[MANAGER_API] ApiPay не выставил счёт для удержания %s, "
+                             "оплата по ссылке: %s", result["booking_ids"], exc)
+                data["invoice"] = None
+                data["link"] = link
+                link_reason = "check_failed"
+    payload, status = _batch_success({"customer": booking.get("customer_name")},
+                                     {"data": data}, contact, kaspi_phone, link_reason)
+    return jsonify(payload), status
 
 
 @manager_api.post("/api/manager/bookings/<int:booking_id>/invoice")
@@ -1183,19 +1245,9 @@ def patch_booking(booking_id: int):
     if "customer_id" in body:
         patch["customer_id"] = body["customer_id"]
 
+    # A 24h hold is edited like any other booking (status, payments, slot):
+    # a client may pay cash after the match without any invoice.
     before = repo.get_booking(booking_id)
-    hold_payment_edit = any(
-        key in patch for key in ("paid_kaspi_qr", "paid_cash", "paid_avans")
-    )
-    if (before and before.get("payment_method") == "hold_without_payment"
-            and (hold_payment_edit or patch.get("state") not in (
-                None, before.get("state"), "cancelled", "unpaid"
-            ))):
-        return jsonify({
-            "ok": False,
-            "code": "CONSENT_REQUIRED",
-            "message": "Сначала запустите запрос оплаты: POST .../request-payment.",
-        }), 409
     res = booking_service.manager_update_booking(booking_id, actor_id=_api_key_actor(), **patch)
 
     if res["ok"]:
@@ -1211,6 +1263,12 @@ def patch_booking(booking_id: int):
             notification = _STATE_NOTIFICATIONS.get(patch.get("state"))
             if notification and patch["state"] != (res.get("data") or {}).get("old_state"):
                 client_notify.notify_booking(booking_row, notification)
+            if patch.get("state") == "confirmed" \
+                    and (res.get("data") or {}).get("old_state") != "confirmed":
+                # Paid some other way (cash, QR…): retire an invoice still open
+                # in the client's Kaspi app, or they could pay twice. Never raises.
+                apipay_service.cancel_invoices_for_bookings(
+                    [booking_id], reason="confirmed_by_admin")
 
             upsert_booking_row(booking_row)
             # Sheet is a best-effort view; never fail the committed DB mutation on it.

@@ -55,6 +55,11 @@ def _default_phone_number_id() -> str:
 # nesting by language is kept so a second language is a new key here rather than
 # a change to `render` and its callers.
 
+# Appended to the website/admin "booking created" messages. Fixed text (no
+# `{}` tokens left after this module loads), so it is safe inside `.format`.
+OFFER_NOTE = (f"Создавая бронь, вы приняли условия публичной оферты: {config.OFFER_URL}. "
+              "Если есть вопросы — позвоните администратору.")
+
 MESSAGES: dict[str, dict[str, str]] = {
     # ── Manager actions ───────────────────────────────────────────────────
     "manager_cancelled": {
@@ -129,6 +134,24 @@ MESSAGES: dict[str, dict[str, str]] = {
                "Оплатите аванс {amount} по ссылке:\n{link}\n\n"
                "После оплаты отправьте чек в этот чат — администратор подтвердит бронь."),
     },
+    # Website / admin bookings: no consent dialog on WhatsApp, so the message
+    # itself says that booking means accepting the offer. No refund wording on
+    # purpose: refund questions go to the admin (OFFER_NOTE says so).
+    "booking_created_invoice_offer": {
+        "ru": ("📋 Бронь создана!\n\n"
+               "{slots}\n\n"
+               "💳 Счёт на аванс {amount} отправлен в Kaspi на номер {kaspi_phone} — "
+               "подтвердите оплату в приложении Kaspi.\n"
+               "Без оплаты бронь отменится через {ttl} мин.\n\n"
+               "📄 " + OFFER_NOTE),
+    },
+    "payment_link_offer": {
+        "ru": ("📋 Бронь создана!\n\n{slots}\n\n"
+               "⚠️ {reason}\n"
+               "Оплатите аванс {amount} по ссылке:\n{link}\n\n"
+               "После оплаты отправьте чек в этот чат — администратор подтвердит бронь.\n\n"
+               "📄 " + OFFER_NOTE),
+    },
     "consent_expired": {
         "ru": ("⏰ Бронь снята — подтверждение не получено.\n\n"
                "{slots}\n\n"
@@ -166,6 +189,13 @@ TEMPLATES: dict[str, tuple[str, "callable"]] = {
     "booking_created_invoice": ("booking_created", lambda f: [
         f["slots"], f"счёт на аванс {f['amount']} отправлен в Kaspi на номер {f['kaspi_phone']}"]),
     "payment_link": ("payment_link", lambda f: [f["slots"], f["amount"], f["link"]]),
+    # The approved templates have no offer line of their own, so it rides in
+    # a variable (flattened to one line by `_one_line`).
+    "booking_created_invoice_offer": ("booking_created", lambda f: [
+        f["slots"], f"счёт на аванс {f['amount']} отправлен в Kaspi на номер "
+                    f"{f['kaspi_phone']}. {OFFER_NOTE[:-1]}"]),
+    "payment_link_offer": ("payment_link", lambda f: [
+        f"{f['slots']}. {OFFER_NOTE}", f["amount"], f["link"]]),
     "contract_payment_link": ("payment_link", lambda f: [
         f"договор №{f['contract_id']}: {f['description']}", f["amount"], f["link"]]),
 }

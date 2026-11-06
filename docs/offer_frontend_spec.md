@@ -63,3 +63,28 @@ backend stores it on every booking as proof (`consent_at`, `consent_channel =
 flag `payment_method = "link"` (confirm by receipt, or bill a corrected number via
 `POST /api/manager/bookings/{id}/invoice {kaspi_phone}`). New state
 `awaiting_consent` («ОЖИДАЕТ СОГЛАСИЯ») needs a label in the UI.
+
+## Admin-created bookings (2026-11-06)
+
+`POST /api/manager/bookings` and `/batch` without `consent`/`channel: "site"`
+(the admin panel) no longer ask the client to agree on WhatsApp. The admin books
+on the client's behalf, so the offer counts as accepted (`consent_channel =
+"admin"`, migration 068) and the response is the same as the website's:
+`payment.method = "kaspi_invoice"` or `"link"`. The invoice goes to
+`kaspi_phone`, else the client's last Kaspi number, else `phone`. If the invoice
+cannot be sent the bookings are kept and the client pays by the link (website:
+502, bookings released). The response no longer carries `consent`.
+
+Website and admin clients get one WhatsApp message — the booking, how to pay,
+and «Создавая бронь, вы приняли условия публичной оферты: OFFER_URL. Если есть
+вопросы — позвоните администратору». The WhatsApp bot flow is unchanged.
+
+### 24-hour holds
+
+`POST /api/manager/bookings/{id}/request-payment` (`{phone?, kaspi_phone?}`)
+no longer starts a WhatsApp dialog: it bills the hold right away like an admin
+booking (consent channel `admin`, Kaspi invoice or payment link) and answers
+with the same `payment` object. Only a hold still in `awaiting_payment` can be
+billed, else `409 NOT_A_HOLD`. A hold can also be edited like any booking
+(status, `paid_cash`, …) — the old `409 CONSENT_REQUIRED` guard is gone.
+Setting any booking to `confirmed` by hand cancels its still-open Kaspi invoice.

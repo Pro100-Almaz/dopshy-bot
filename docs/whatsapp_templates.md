@@ -35,8 +35,8 @@ with `; `.
 
 | # | Env var | When it is sent | Variables | Buttons |
 |---|---|---|---|---|
-| 1 | `WA_TEMPLATE_BOOKING_CONFIRM_REQUEST` | Admin created a booking → the client confirms or cancels **the booking**. On «Подтверждаю» the bot sends the offer-consent question as a normal message (the tap opened the 24h window). No answer in 30 min → booking cancelled (template 5). | `{{1}}` booking | Quick reply ×2 |
-| 2 | `WA_TEMPLATE_BOOKING_CREATED` | Client booked on the website and the Kaspi invoice went out. | `{{1}}` booking, `{{2}}` payment line | — |
+| 1 | `WA_TEMPLATE_BOOKING_CONFIRM_REQUEST` | **Unused since 2026-11-06** (admin bookings and holds no longer ask the client). Was: admin created a booking → the client confirms or cancels **the booking**. On «Подтверждаю» the bot sends the offer-consent question as a normal message (the tap opened the 24h window). No answer in 30 min → booking cancelled (template 5). | `{{1}}` booking | Quick reply ×2 |
+| 2 | `WA_TEMPLATE_BOOKING_CREATED` | Client booked on the website, or an admin booked for them, and the Kaspi invoice went out. | `{{1}}` booking, `{{2}}` payment line + offer note («…. Создавая бронь, вы приняли условия публичной оферты: <OFFER_URL>. Если есть вопросы — позвоните администратору») | — |
 | 3 | `WA_TEMPLATE_BOOKING_EDITED` | Admin moved the booking (date, time or field). | `{{1}}` the booking as it is now | — |
 | 4 | `WA_TEMPLATE_BOOKING_CONFIRMED` | Avans paid (ApiPay) or admin set "confirmed". | `{{1}}` booking | — |
 | 5 | `WA_TEMPLATE_BOOKING_CANCELLED` | Any cancellation: no answer to template 1, not paid in time, invoice expired/failed, cancelled by admin. | `{{1}}` booking, `{{2}}` reason | — |
@@ -73,14 +73,18 @@ KK example:
 **2. booking_created**
 ```
 Бронь в Dopsy Arena создана: {{1}}.
-{{2}}. Аванс можно вернуть в течение 48 часов после оплаты, без оплаты бронь отменится через 20 минут.
+{{2}}. Без оплаты бронь отменится через 20 минут.
 ```
-`{{2}}` e.g. «счёт на аванс 10 000₸ отправлен в Kaspi на номер +7 707 111 22 33».
+`{{2}}` e.g. «счёт на аванс 10 000₸ отправлен в Kaspi на номер +7 707 111 22 33.
+Создавая бронь, вы приняли условия публичной оферты: https://www.dopsy.kz/offer.
+Если есть вопросы — позвоните администратору» (the bot adds the offer note).
 
-> ⚠️ 2026-11-02: the avans is now refundable within 48 hours of payment. The
-> template approved earlier still says «Аванс не возвращается» — submit this
-> wording (ru + kk) to Meta as a new version and switch `WA_TEMPLATE_*` to it
-> once approved. The text lives in Meta, not in this repo.
+> ⚠️ 2026-11-06: no refund wording in this template, on purpose — the client
+> is pointed to the offer and the admin instead. The template approved earlier
+> still says «Аванс не возвращается, без оплаты бронь отменится через 20
+> минут» — submit this wording (ru + kk) to Meta as a new version and switch
+> `WA_TEMPLATE_BOOKING_CREATED` to it once approved. The text lives in Meta,
+> not in this repo.
 
 **3. booking_edited**
 ```
