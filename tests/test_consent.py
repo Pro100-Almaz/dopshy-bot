@@ -592,21 +592,52 @@ def test_manager_batch_respects_the_prepayment_override(api, apipay, outbox):
     assert apipay["created"] == [{"phone": _WA, "amount": 5000}]
 
 
-def test_manager_booking_without_kaspi_pays_by_link(api, apipay, outbox):
+def test_manager_booking_without_kaspi_is_refused(api, apipay, outbox):
+    """No Kaspi on the number: the admin booking is refused — nothing is
+    reserved, billed or sent (a link payment would hold the slot on a receipt
+    the bot may fail to read)."""
     apipay["no_kaspi"].add(_WA)
     r = api.post("/api/manager/bookings/batch",
                  json={"phone": _WA, "slots": [_slot(1, "2027-10-19")]}, headers=_HDR)
 
-    assert r.status_code == 200, r.get_json()
+    assert r.status_code == 422, r.get_json()
     data = r.get_json()
-    assert data["payment"]["method"] == "link" and data["payment"]["reason"] == "no_kaspi"
+    assert data["ok"] is False and data["code"] == "NO_KASPI"
     assert apipay["created"] == []
-    row = _row(data["booking_ids"][0])
-    assert row["state"] == "awaiting_payment" and row["payment_method"] == "link"
-    assert row["consent_channel"] == "admin"
-    (msg,) = _to(outbox, _CLIENT)
-    assert config.KASPI_PAYMENT_URL in msg[2] and _offer_note_in(msg[2])
-    assert _to(outbox, _ADMIN), "the admin is alerted"
+    assert not _to(outbox, _CLIENT) and not _to(outbox, _ADMIN)
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM bookings WHERE start_at::date = %s", ("2027-10-19",))
+            assert cur.fetchone()[0] == 0, "no booking may be created"
+
+
+def test_manager_booking_is_refused_when_the_kaspi_check_fails(api, apipay, monkeypatch, outbox):
+    def boom(phone):
+        raise apipay_client.ApiPayError("ApiPay down")
+    monkeypatch.setattr(apipay_client, "check_client", boom)
+
+    r = api.post("/api/manager/bookings/batch",
+                 json={"phone": _WA, "slots": [_slot(1, "2027-10-18")]}, headers=_HDR)
+
+    assert r.status_code == 502, r.get_json()
+    assert r.get_json()["code"] == "KASPI_CHECK_FAILED"
+    assert apipay["created"] == [] and not _to(outbox, _CLIENT)
+
+
+def test_kaspi_check_endpoint(api, apipay):
+    apipay["no_kaspi"].add(_OTHER)
+    r = api.post("/api/manager/kaspi/check", json={"phone": _WA}, headers=_HDR)
+    assert r.status_code == 200 and r.get_json()["has_kaspi"] is True
+    assert r.get_json()["checked"] is True
+
+    r = api.post("/api/manager/kaspi/check", json={"phone": _OTHER}, headers=_HDR)
+    assert r.status_code == 200 and r.get_json()["has_kaspi"] is False
+
+    r = api.post("/api/manager/kaspi/check", json={"phone": "123"}, headers=_HDR)
+    assert r.status_code == 400 and r.get_json()["code"] == "INVALID"
+
+    r = api.post("/api/manager/kaspi/check", json={}, headers=_HDR)
+    assert r.status_code == 400
 
 
 def test_manager_failed_invoice_send_keeps_the_booking_and_sends_the_link(

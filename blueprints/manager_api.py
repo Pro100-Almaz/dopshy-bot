@@ -803,6 +803,39 @@ def _notify_site_booking(phone, data: dict, key: str, **fields) -> None:
     client_notify.send_async(phone, key, slots=client_notify.fmt_slots(rows), **fields)
 
 
+@manager_api.post("/api/manager/kaspi/check")
+def check_kaspi_number():
+    """Does Kaspi know this number? The admin form calls it before booking.
+
+    Body: `{"phone": "+7 701 555 12 12"}`. 200 `{ok, has_kaspi, phone,
+    client_name, checked}` — `has_kaspi: false` is an answer, not an error.
+    400 INVALID: not a Kazakh number. 502 KASPI_CHECK_FAILED: ApiPay could not
+    be asked, so nothing is known — the caller must not treat it as valid.
+    `checked: false` means ApiPay is off or APIPAY_CHECK_CLIENT is disabled:
+    there is nothing to verify, and booking does not require it either.
+    """
+    body = request.get_json(silent=True) or {}
+    phone = body.get("phone")
+    if not phone or not isinstance(phone, str):
+        return jsonify({"ok": False, "code": "INVALID",
+                        "message": "phone обязателен."}), 400
+    if not (config.APIPAY_ENABLED and config.APIPAY_CHECK_CLIENT):
+        return jsonify({"ok": True, "has_kaspi": True, "checked": False,
+                        "phone": phone, "client_name": None}), 200
+    try:
+        normalized = apipay_client.normalize_phone(phone)
+    except ApiPayError as exc:
+        return jsonify({"ok": False, "code": "INVALID", "message": str(exc)}), 400
+    try:
+        result = apipay_client.check_client(normalized)
+    except ApiPayError as exc:
+        logger.error("[MANAGER_API] Проверка номера %s в Kaspi не удалась: %s", normalized, exc)
+        return jsonify({"ok": False, "code": "KASPI_CHECK_FAILED",
+                        "message": "Не удалось проверить номер в Kaspi. Попробуйте ещё раз."}), 502
+    return jsonify({"ok": True, "has_kaspi": bool(result.get("has_kaspi")), "checked": True,
+                    "phone": normalized, "client_name": result.get("client_name")}), 200
+
+
 @manager_api.post("/api/manager/bookings/batch")
 def create_bookings_batch():
     """Create bookings for a single customer from a list of (repeating) slots.
@@ -932,12 +965,25 @@ def _create_bookings_batch(body: dict) -> tuple[dict, int]:
         # A payment number Kaspi does not know (or a check that fails) no
         # longer refuses the booking: the client pays by the Kaspi payment link
         # and an admin confirms the payment by its receipt.
+        # Exception — the ADMIN booking: it is refused instead. A booking paid
+        # by link is confirmed only from a receipt the bot has to read, and
+        # while it waits the slot is held (or released and rebooked by someone
+        # else). The admin must fix the number (see /api/manager/kaspi/check).
         try:
             apipay_service.ensure_kaspi_client(kaspi_phone)
         except KaspiClientMissing as exc:
+            if not is_site:
+                logger.warning("[MANAGER_API] %s — бронь админа отклонена", exc)
+                return {"ok": False, "code": "NO_KASPI", "message": str(exc)}, 422
             logger.warning("[MANAGER_API] %s — оплата по ссылке", exc)
             link_reason = "no_kaspi"
         except ApiPayError as exc:
+            if not is_site:
+                logger.error("[MANAGER_API] Проверка номера в Kaspi не удалась: %s — "
+                             "бронь админа отклонена", exc)
+                return {"ok": False, "code": "KASPI_CHECK_FAILED",
+                        "message": "Не удалось проверить номер в Kaspi. "
+                                   "Брони не созданы, попробуйте ещё раз."}, 502
             logger.error("[MANAGER_API] Проверка номера в Kaspi не удалась: %s — оплата по ссылке", exc)
             link_reason = "check_failed"
         if link_reason:
