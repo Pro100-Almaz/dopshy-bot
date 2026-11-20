@@ -89,7 +89,7 @@ def chat(monkeypatch):
     monkeypatch.setattr(llm_trial_flow, "today_almaty", lambda: TODAY)
     monkeypatch.setattr(llm_trial_flow, "academy_location", lambda *a: "")
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text, answering=None, wish=None: dict(
+                        lambda history, text, answering=None, wish=None, known=None: dict(
                             state["extract"].pop(text, None) or _reads(text, answering)))
     repo = llm_trial_flow.academy_repo
     monkeypatch.setattr(repo, "get_existing_trial_draft",
@@ -562,7 +562,7 @@ def test_the_extractor_decides_what_a_name_is(chat):
 def test_the_extractor_is_told_the_step(chat, monkeypatch):
     steps = []
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text, answering=None, wish=None: steps.append(answering) or {})
+                        lambda history, text, answering=None, wish=None, known=None: steps.append(answering) or {})
     chat.send("хочу на пробное")
     chat.send("Әсет")
     assert steps == [None, "audience"]
