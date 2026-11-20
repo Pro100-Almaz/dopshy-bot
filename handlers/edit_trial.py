@@ -7,6 +7,7 @@ from chat.system_prompts.academy_rules import ACADEMY_ADMIN_PHONES, academy_loca
 from handlers.academy_extractor import extract_trial_details
 from integrations import trial_service
 from integrations.repo import postgres
+from utils import today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,15 @@ def _trial_line(trial: dict, idx: int | None = None, lang: str = "ru") -> str:
     )
 
 
+def _age_text(birth_year) -> str | None:
+    """Age for client-facing text — the birth year itself stays internal."""
+    try:
+        year = int(birth_year)
+    except (TypeError, ValueError):
+        return None
+    return str(today_almaty().year - year)
+
+
 def _trial_details(trial: dict, idx: int | None = None, lang: str = "ru") -> str:
     prefix = f"{idx}. " if idx is not None else ""
     labels = {
@@ -105,7 +115,7 @@ def _trial_details(trial: dict, idx: int | None = None, lang: str = "ru") -> str
             "date": "Дата",
             "time": "Время",
             "name": "Имя",
-            "birth_year": "Год рождения",
+            "age": "Возраст",
             "level": "Уровень",
             "shift": "Школьная смена",
             "adult_group": "Взрослая группа",
@@ -114,7 +124,7 @@ def _trial_details(trial: dict, idx: int | None = None, lang: str = "ru") -> str
             "date": "Күні",
             "time": "Уақыты",
             "name": "Аты",
-            "birth_year": "Туған жылы",
+            "age": "Жасы",
             "level": "Деңгейі",
             "shift": "Мектеп ауысымы",
             "adult_group": "Ересектер тобы",
@@ -132,7 +142,7 @@ def _trial_details(trial: dict, idx: int | None = None, lang: str = "ru") -> str
         f"{prefix}{labels['date']}: {_fmt_date(trial.get('trial_day'), lang)}",
         f"{labels['time']}: {time_text}",
         f"{labels['name']}: {trial.get('child_name') or '?'}",
-        f"{labels['birth_year']}: {trial.get('child_birth_year') or '?'}",
+        f"{labels['age']}: {_age_text(trial.get('child_birth_year')) or '?'}",
         f"{labels['level']}: {_fmt_level(trial.get('experience'), lang)}",
         f"{labels['shift']}: {_fmt_shift(trial.get('school_shift'), lang)}",
     ]
@@ -144,7 +154,7 @@ def _draft_summary(trial: dict, idx: int | None = None, lang: str = "ru") -> str
         "ru": {
             "item": {
                 "child_name": "имя",
-                "child_birth_year": "год рождения",
+                "child_birth_year": "возраст",
                 "experience": "уровень подготовки",
                 "school_shift": "школьная смена",
                 "slot": "время пробного занятия",
@@ -156,7 +166,7 @@ def _draft_summary(trial: dict, idx: int | None = None, lang: str = "ru") -> str
         "kk": {
             "item": {
                 "child_name": "аты",
-                "child_birth_year": "туған жылы",
+                "child_birth_year": "жасы",
                 "experience": "дайындық деңгейі",
                 "school_shift": "мектеп ауысымы",
                 "slot": "сынақ сабағының уақыты",
@@ -168,7 +178,7 @@ def _draft_summary(trial: dict, idx: int | None = None, lang: str = "ru") -> str
     }[lang]
     values = {
         "child_name": trial.get("child_name"),
-        "child_birth_year": trial.get("child_birth_year"),
+        "child_birth_year": _age_text(trial.get("child_birth_year")),
         "experience": _fmt_level(trial.get("experience"), lang) if trial.get("experience") else None,
         "school_shift": _fmt_shift(trial.get("school_shift"), lang) if trial.get("school_shift") else None,
         "slot": (

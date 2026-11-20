@@ -62,14 +62,38 @@ def _failed_extraction(user_text: str) -> dict[str, Any]:
     return {**_with_deterministic_weekday({}, user_text), "failed": True}
 
 
+_AUDIENCE_NAMES = {"adult": "взрослая", "child": "детская"}
+_SIGNUP_FOR_NAMES = {"self": "сам клиент", "other": "другой человек"}
+
+
+def _known_signup_hint(known: dict[str, Any] | None) -> str | None:
+    """The group and who signs up, as saved on the draft — so the client's
+    message is read for that signup, even when the history is incomplete."""
+    known = known or {}
+    parts = []
+    if known.get("audience") in _AUDIENCE_NAMES:
+        parts.append(f"группа — {_AUDIENCE_NAMES[known['audience']]} (audience={known['audience']})")
+    if known.get("signup_for") in _SIGNUP_FOR_NAMES:
+        parts.append(f"записывается {_SIGNUP_FOR_NAMES[known['signup_for']]} (signup_for={known['signup_for']})")
+    if not parts:
+        return None
+    return (
+        "Уже сохранено в заявке: " + "; ".join(parts) + ". Это факты, даже если в истории чата их "
+        "не видно. Читай сообщение клиента для этой записи. Возвращай другое значение audience или "
+        "signup_for только если клиент в последнем сообщении прямо говорит, что записывается "
+        "другая группа или другой человек."
+    )
+
+
 def extract_trial_details(
     history: list[dict[str, str]], user_text: str, answering: str | None = None,
-    wish: dict[str, Any] | None = None,
+    wish: dict[str, Any] | None = None, known: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Extract academy trial intake fields and schedule preferences.
 
     `answering` is the signup step the bot is waiting on, if any; `wish` what
-    the client already wishes for, so a later message only changes that.
+    the client already wishes for, so a later message only changes that;
+    `known` the draft's saved audience and signup_for.
 
     The returned preferred_* values are user wishes only. The gated trial flow
     must validate them against eligible groups before assigning trial_day,
@@ -80,6 +104,9 @@ def extract_trial_details(
         today=today_almaty().isoformat(),
         now=now.strftime("%Y-%m-%d %H:%M"),
     )
+    known_hint = _known_signup_hint(known)
+    if known_hint:
+        prompt = f"{prompt}\n\n{known_hint}"
     hint = _STEP_HINTS.get(answering)
     if hint:
         prompt = f"{prompt}\n\n{hint}"

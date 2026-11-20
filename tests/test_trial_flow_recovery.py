@@ -59,7 +59,7 @@ def _with_draft(monkeypatch, draft, extracted=None):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot_name: dict(draft))
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, user_text, answering=None, wish=None: dict(extracted or {}))
+                        lambda history, user_text, answering=None, wish=None, known=None: dict(extracted or {}))
     monkeypatch.setattr(llm_trial_flow.trial_service, "update_intake",
                         lambda bot_name, trial_id, fields: {"ok": True, "data": {"trial": {**draft, **fields}}})
 
@@ -121,7 +121,7 @@ def test_opening_signup_sentence_is_not_taken_as_the_childs_name(monkeypatch):
     monkeypatch.setattr(llm_trial_flow.trial_service, "create_or_get_draft",
                         lambda *a: {"ok": True, "data": {"trial": {"id": 11}}})
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text, answering=None, wish=None: {"asks_about_trial_or_price": True, "audience": "child"})
+                        lambda history, text, answering=None, wish=None, known=None: {"asks_about_trial_or_price": True, "audience": "child"})
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)
@@ -147,7 +147,7 @@ def test_sentence_on_return_to_a_draft_is_not_taken_as_the_name(monkeypatch):
     stale = {"id": 11, "audience": "child", "updated_at": datetime.now(timezone.utc) - timedelta(minutes=60)}
     saved = {}
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft", lambda phone, bot: dict(stale))
-    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text, answering=None, wish=None: {})
+    monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda history, text, answering=None, wish=None, known=None: {})
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)

@@ -29,7 +29,7 @@ def test_boxing_texts_keep_placeholders_and_options():
             original, friendly = T[key][lang], entry[lang]
             for placeholder in ("{year}", "{min_age}", "{max_age}", "{max_len}", "{requested}",
                                 "{offered}", "{date}", "{start}", "{end}", "{name}",
-                                "{birth_year}", "{experience}", "{school_shift}"):
+                                "{age}", "{experience}", "{school_shift}"):
                 assert (placeholder in original) == (placeholder in friendly), (key, lang, placeholder)
             for option in ("1. ", "2. ", "3. ", "«моя запись»", "«перенести запись»"):
                 assert (option in original) == (option in friendly), (key, lang, option)
