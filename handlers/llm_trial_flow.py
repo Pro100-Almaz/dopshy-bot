@@ -61,12 +61,12 @@ T = {
         "kk": "Есім тым ұзын — {max_len} таңбадан аспауы керек. Қысқарақ жазыңыз.",
     },
     "ask_birth_year": {
-        "ru": "Укажите год рождения того, кто будет заниматься. Например: *2016*.",
-        "kk": "Қатысушының туған жылын жазыңыз. Мысалы: *2016*.",
+        "ru": "Укажите возраст того, кто будет заниматься.",
+        "kk": "Қатысушының жасын жазыңыз.",
     },
     "ask_birth_year_other": {
-        "ru": "Укажите год рождения ребенка. Например: *2016*.",
-        "kk": "Балаңыздың туған жылын жазыңыз. Мысалы: *2016*.",
+        "ru": "Укажите возраст ребенка.",
+        "kk": "Балаңыздың жасын жазыңыз.",
     },
     "ask_experience": {
         "ru": "Выберите уровень подготовки:\n1. Начинающий\n2. Средний\n3. Продвинутый",
@@ -93,8 +93,8 @@ T = {
         "kk": "Балаңыз қай ауысымда оқиды?\n1. Таңғы\n2. Түскі\n3. Балабақшаға барады",
     },
     "ask_birth_year_self": {
-        "ru": "Укажите ваш возраст или год рождения. Например: *2010*.",
-        "kk": "Жасыңызды немесе туған жылыңызды жазыңыз. Мысалы: *2010*.",
+        "ru": "Укажите ваш возраст.",
+        "kk": "Жасыңызды жазыңыз.",
     },
     # Put in front of the first reply of a new signup. Empty: the football
     # bot's material doesn't say its trial is free.
@@ -115,8 +115,8 @@ T = {
         "kk": "Көрсетілген уақыт бұл топқа келмейді. Қолжетімді нұсқалардың бірін таңдаңыз:",
     },
     "confirm": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
-        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nРастайсыз ба?",
+        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n🎂 Возраст: {age}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
+        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n🎂 Жасы: {age}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nРастайсыз ба?",
     },
     "confirmed": {
         "ru": "Запись на пробный урок оформлена, будем ждать!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}",
@@ -183,8 +183,8 @@ T = {
         "kk": "Бұл уақытта ересектер тобының жаттығуы жоқ.",
     },
     "confirm_adult": {
-        "ru": "📋 Детали записи:\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}\n📆 Год рождения: {birth_year}\n\nВсё верно? Подтверждаете запись?",
-        "kk": "📋 Жазылым деректері:\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есімі: {name}\n📆 Туған жылы: {birth_year}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
+        "ru": "📋 Детали записи:\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}\n🎂 Возраст: {age}\n\nВсё верно? Подтверждаете запись?",
+        "kk": "📋 Жазылым деректері:\n👥 Ересектер тобы\n📅 {date}\n⏰ {start}\n👤 Есімі: {name}\n🎂 Жасы: {age}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
     },
     "confirmed_adult": {
         "ru": "Готово, запись на пробное занятие оформлена! 🎉 Будем рады встрече!\n👥 Взрослая группа\n📅 {date}\n⏰ {start}\n👤 Имя: {name}",
@@ -224,12 +224,12 @@ BOXING_T = {
         "kk": "Есім сәл ұзын болып кетті. {max_len} таңбаға дейін қысқартып жазыңызшы.",
     },
     "ask_birth_year": {
-        "ru": "Подскажите, пожалуйста, сколько лет тому, кто будет заниматься? Можно написать и год рождения, например: 2016.",
-        "kk": "Қатысушы неше жаста? Туған жылын да жазуға болады, мысалы: 2016.",
+        "ru": "Подскажите, пожалуйста, сколько лет тому, кто будет заниматься?",
+        "kk": "Қатысушы неше жаста?",
     },
     "ask_birth_year_other": {
-        "ru": "Подскажите, пожалуйста, сколько лет ребёнку? Можно написать и год рождения, например: 2016.",
-        "kk": "Балаңыз неше жаста? Туған жылын да жазуға болады, мысалы: 2016.",
+        "ru": "Подскажите, пожалуйста, сколько лет ребёнку?",
+        "kk": "Балаңыз неше жаста?",
     },
     "ask_experience": {
         "ru": "Какой уровень подготовки? Выберите, пожалуйста:\n1. Начинающий\n2. Средний\n3. Продвинутый\n\n"
@@ -263,7 +263,7 @@ BOXING_T = {
     },
     "ask_birth_year_self": {
         "ru": "Подскажите, пожалуйста, сколько вам лет?",
-        "kk": "Жасыңыз нешеде? Туған жылыңызды да жазуға болады, мысалы: 2000.",
+        "kk": "Жасыңыз нешеде?",
     },
     "trial_free_intro": {
         "ru": "Пробное занятие у нас бесплатное 🥊",
@@ -282,8 +282,8 @@ BOXING_T = {
         "kk": "Өкінішке қарай, бұл уақытта сәйкес топ жоқ. Мына нұсқалардың бірін таңдаңызшы:",
     },
     "confirm": {
-        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n📆 Год рождения: {birth_year}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
-        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n📆 Туған жылы: {birth_year}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
+        "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n🎂 Возраст: {age}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nВсё верно? Подтверждаете запись?",
+        "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n🎂 Жасы: {age}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nБәрі дұрыс па? Жазылымды растайсыз ба?",
     },
     "confirmed": {
         "ru": "Готово, запись на пробное занятие оформлена! 🎉 Будем очень рады встрече!\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n\n"
@@ -335,6 +335,13 @@ _current_bot: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # unknown — _loc then picks a key's "_self" / "_other" variant where one exists.
 _current_actor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "trial_flow_actor", default=None,
+)
+
+# The draft's stored group — "adult", "child", or None while not chosen. Passed
+# to the LLM that phrases questions, so its wording follows the saved draft
+# rather than whatever the chat history happens to contain.
+_current_audience: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "trial_flow_audience", default=None,
 )
 
 
@@ -602,7 +609,9 @@ def _phrased(lang: str, text: str, history: list | None) -> str:
     options = [line for line in rest if re.match(r"\d+\.", line)]
     try:
         from chat import llm
-        phrased = llm.get_question_reply(lang, question, history, _current_actor.get())
+        phrased = llm.get_question_reply(
+            lang, question, history, _current_actor.get(), audience=_current_audience.get(),
+        )
     except Exception:
         logger.exception("trial question phrasing failed")
         return text
@@ -700,13 +709,13 @@ def _no_groups_with_age_options(
     if lang == "ru":
         return (
             f"{_loc(lang, 'no_groups')}\n\n"
-            f"По возрасту {draft.get('child_birth_year')} подходят такие группы:\n"
+            f"Для возраста {_age_text(draft)} лет подходят такие группы:\n"
             f"{_age_group_lines(slots, lang)}\n\n"
             "Можно поменять уровень подготовки или школьную смену, и я проверю ещё раз."
         )
     return (
         f"{_loc(lang, 'no_groups')}\n\n"
-        f"{draft.get('child_birth_year')} туған жылына сәйкес келетін топтар:\n"
+        f"{_age_text(draft)} жасқа сәйкес келетін топтар:\n"
         f"{_age_group_lines(slots, lang)}\n\n"
         "Дайындық деңгейін немесе мектеп ауысымын өзгертсеңіз, қайта тексеремін."
     )
@@ -720,7 +729,7 @@ def _confirmation(draft: dict, lang: str, trainer: str | None = None) -> str:
         start=str(draft["start_time"])[:5],
         end=str(draft["end_time"])[:5],
         name=draft.get("child_name", ""),
-        birth_year=draft.get("child_birth_year", ""),
+        age=_age_text(draft),
         experience=_level_label(draft.get("experience"), lang),
         school_shift=_shift_label(draft.get("school_shift"), lang),
     )
@@ -740,7 +749,7 @@ def _adult_confirmation(draft: dict, lang: str, trainer: str | None = None) -> s
         date=_fmt_date(draft["trial_day"], lang),
         start=str(draft["start_time"])[:5],
         name=draft.get("child_name", ""),
-        birth_year=draft.get("child_birth_year", ""),
+        age=_age_text(draft),
     )
     return _with_trainer(body, trainer, lang) + _change_hint(lang)
 
@@ -780,6 +789,12 @@ _CLASS_LIST_MAX = 8
 
 def _age_of(year) -> int:
     return today_almaty().year - int(year)
+
+
+def _age_text(draft: dict) -> str:
+    """The draft's age for client-facing text — the birth year stays internal."""
+    year = _birth_year(draft.get("child_birth_year"))
+    return str(_age_of(year)) if year else ""
 
 
 def _birth_year(value) -> int | None:
@@ -946,6 +961,8 @@ class LlmTrialFlowHandler:
         self._new_draft = self._asks_about_trial = self._wants_change = self.extractor_failed = False
         # The wording is about the child until the adult group is chosen.
         token = _current_actor.set(None)
+        # Set from the stored draft by _evaluate_and_respond.
+        audience_token = _current_audience.set(None)
         try:
             full = self._handle(chat_id, sender_phone, bot_name, user_text, history, lang, intent)
             reply = shorten_repeated_list(full, history, lang)
@@ -954,6 +971,7 @@ class LlmTrialFlowHandler:
                 # just said — the LLM answers it in a word, then asks again.
                 reply = _phrased(lang, reply, [*(history or []), {"role": "user", "content": user_text}])
         finally:
+            _current_audience.reset(audience_token)
             _current_actor.reset(token)
         # A new signup opens with "the trial is free", then the first question.
         # Only when the message is about the trial lesson or its price.
@@ -1078,7 +1096,10 @@ class LlmTrialFlowHandler:
         checked against the group and the column.
         """
         stored = _wish(draft)
-        extracted = extract_trial_details(history, user_text, answering, stored)
+        extracted = extract_trial_details(
+            history, user_text, answering, stored,
+            known={"audience": _stored_audience(draft), "signup_for": draft.get("signup_for")},
+        )
         self._asks_about_trial = bool(extracted.get("asks_about_trial_or_price"))
         self._wants_change = bool(extracted.get("wants_change"))
         # A pick from the class list needs no extractor.
@@ -1195,6 +1216,7 @@ class LlmTrialFlowHandler:
         adult = _stored_audience(draft) == "adult"
         signup_actor = self._signup_actor(draft)
         _current_actor.set(signup_actor)
+        _current_audience.set(_stored_audience(draft))
         if step not in ("slot", "confirm"):
             return _ask_missing(lang, step, signup_actor, history)
 
@@ -1327,6 +1349,7 @@ class LlmTrialFlowHandler:
         adult = _stored_audience(draft) == "adult"
         signup_actor = self._signup_actor(draft)
         token = _current_actor.set(signup_actor)
+        audience_token = _current_audience.set(_stored_audience(draft))
         try:
             if step not in ("slot", "confirm"):
                 return _ask_missing(lang, step, signup_actor)
@@ -1339,6 +1362,7 @@ class LlmTrialFlowHandler:
             shown, missed = _classes_on_offer(slots, wish)
             return _class_list(shown, lang, adult, narrowed=any(wish.values()) and not missed)
         finally:
+            _current_audience.reset(audience_token)
             _current_actor.reset(token)
 
     @_bot_scoped
@@ -1366,4 +1390,57 @@ class LlmTrialFlowHandler:
             "Занятия, на которые можно записать этого клиента (возраст, уровень и смена уже учтены). "
             "На вопросы о днях и времени пробного отвечай ТОЛЬКО по этому списку — "
             "других подходящих вариантов нет:\n" + "\n".join(lines)
+        )
+
+    def draft_state_context(self, bot_name: str, draft: dict | None) -> str | None:
+        """The signup's saved state — group, who it is for and the answers so
+        far — for the LLM that answers side questions mid-signup, so its
+        wording follows the draft and not only the chat. The next question is
+        not named: the flow appends it itself."""
+        if not draft:
+            return None
+        audience = _audience(bot_name, draft)
+        adult = audience == "adult"
+        actor = self._signup_actor(draft)
+        data = _draft_to_data(draft)
+        year = _birth_year(data.get("child_birth_year"))
+        lines = [
+            "Группа: " + {"adult": "ВЗРОСЛАЯ", "child": "ДЕТСКАЯ"}.get(audience, "ещё не выбрана"),
+            "Кто записывается: " + {
+                "self": "сам клиент",
+                "other": "другой взрослый" if adult else "ребёнок клиента",
+            }.get(actor, "неизвестно"),
+            "Имя: " + (data.get("child_name") or "не указано"),
+            "Возраст: " + (f"{_age_of(year)} лет" if year else "не указан"),
+        ]
+        if not adult:
+            lines.append("Опыт: " + (_level_label(data.get("experience"), "ru") or "не указан"))
+            shift = data.get("school_shift")
+            lines.append("Смена: " + (SHIFT_LABELS["ru"].get(shift, shift) if shift else "не указана"))
+        if draft.get("trial_day") and draft.get("start_time"):
+            lines.append(f"Выбранное занятие: {_fmt_date(draft['trial_day'], 'ru')} {_hhmm(draft['start_time'])}")
+        else:
+            lines.append("Выбранное занятие: не выбрано")
+        rule = (
+            "Записывается взрослый: никогда не упоминай ребёнка, детей, школу, школьную смену, "
+            "детский сад или родителей и обращайся к клиенту как ко взрослому. "
+            "О днях и времени говори только о тренировках ВЗРОСЛОЙ группы. Если в день или время, "
+            "о которых спрашивает клиент, взрослой тренировки нет — прямо скажи, что в это время "
+            "тренировки взрослой группы нет, и никогда не предлагай время детских групп вместо неё. "
+            "Если времени взрослой группы в данных нет — не называй никаких дней и времени."
+            if adult else
+            "Записывается ребёнок: говори о ребёнке и не предлагай взрослую группу. "
+            "О днях и времени говори только о занятиях детских групп, никогда не о взрослой."
+            if audience == "child" else
+            "Группа ещё не выбрана: не решай за клиента, детская она или взрослая."
+        )
+        priority = (
+            "Эти данные взяты из сохранённой заявки — это факты. Если история чата им противоречит "
+            "или в ней чего-то не хватает (например, клиент уже назвал возраст, а в истории этого нет), "
+            "верь заявке, а не истории."
+        )
+        return (
+            "--- Текущая запись на пробное (из сохранённой заявки) ---\n"
+            + "\n".join(f"  {line}" for line in lines)
+            + f"\n{priority}\n{rule}\n---"
         )

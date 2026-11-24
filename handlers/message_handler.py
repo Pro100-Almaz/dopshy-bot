@@ -856,6 +856,11 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 availability_ctx = f"{closed_ctx}\n\n{availability_ctx}"
             context = f"{availability_ctx}\n\n{context}" if context else availability_ctx
             if trial_draft:
+                # Who the signup is for and how far it got, from the saved
+                # draft — the chat history alone may be stale or cut short.
+                state_ctx = LlmTrialFlowHandler().draft_state_context(bot_name, trial_draft)
+                if state_ctx:
+                    context += f"\n\n{state_ctx}"
                 # Last, so it is the final thing the LLM reads.
                 context += (
                     "\n\nВАЖНО: идёт запись на пробное занятие. Ответь только на вопрос клиента, коротко, и "

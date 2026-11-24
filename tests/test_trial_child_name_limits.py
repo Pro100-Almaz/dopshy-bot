@@ -58,7 +58,7 @@ def _stub_intake(monkeypatch, draft_fields, extracted=None):
     monkeypatch.setattr(llm_trial_flow.academy_repo, "get_existing_trial_draft",
                         lambda phone, bot: draft)
     monkeypatch.setattr(llm_trial_flow, "extract_trial_details",
-                        lambda history, text, answering=None, wish=None: dict(extracted or {}))
+                        lambda history, text, answering=None, wish=None, known=None: dict(extracted or {}))
 
     def fake_update(bot_name, trial_id, fields):
         saved.update(fields)

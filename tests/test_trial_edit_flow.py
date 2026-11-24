@@ -56,7 +56,7 @@ def flow(monkeypatch):
 
     def run(text, draft, extracted=None, intent="trial_continue"):
         state["draft"] = dict(draft)
-        monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda h, t, answering=None, wish=None: dict(extracted or {}))
+        monkeypatch.setattr(llm_trial_flow, "extract_trial_details", lambda h, t, answering=None, wish=None, known=None: dict(extracted or {}))
         return LlmTrialFlowHandler().handle("chat-1", "7700", "dopsy_fs_school", text, [], "ru", intent=intent)
 
     return run, state
