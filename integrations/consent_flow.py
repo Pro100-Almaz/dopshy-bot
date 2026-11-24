@@ -1,7 +1,7 @@
 """Offer consent before the ApiPay avans invoice.
 
-No Kaspi invoice is raised until the client has agreed to the public offer
-(the avans is refundable within 48 hours of payment). Every path that wants money goes through here:
+No Kaspi invoice is raised until the client has agreed to the public offer.
+Every path that wants money goes through here:
 
     bot "Подтверждаю"        ─┐
                               ├─► bookings held in `awaiting_consent` (slot blocked,
@@ -86,11 +86,11 @@ T = {
     # The task's wording (KK) and its RU translation.
     "prompt": {
         "kk": ("⚠️ Маңызды ереже. Брондау үшін {avans} аванс төленеді. "
-               "Авансты төлегеннен кейін 48 сағат ішінде қайтаруға болады. Толық шарттар — офертада: {offer_url}. "
+               "Толық шарттар — офертада: {offer_url}. "
                "Төлем жасау арқылы сіз осы офертамен келісетініңізді растайсыз.\n\n"
                "Келісесіз бе? Келіссеңіз, Kaspi-ге төлем шоты келеді."),
         "ru": ("⚠️ Важное правило. Для брони вносится аванс {avans}. "
-               "Аванс можно вернуть в течение 48 часов после оплаты. Полные условия — в оферте: {offer_url}. "
+               "Полные условия — в оферте: {offer_url}. "
                "Оплачивая, вы подтверждаете, что согласны с офертой.\n\n"
                "Согласны? Если согласны, в Kaspi придёт счёт на оплату."),
     },

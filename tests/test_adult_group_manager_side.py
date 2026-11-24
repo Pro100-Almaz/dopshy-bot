@@ -9,6 +9,7 @@ import config
 from blueprints.academy_api import academy_api, _group, _trial
 from handlers import edit_trial
 from integrations.sheets import trial_sheets
+from utils import today_almaty
 
 pytestmark = pytest.mark.no_db
 
@@ -42,7 +43,7 @@ def test_adult_trial_status_has_no_child_fields_or_end_time(monkeypatch):
 
     assert "Ересектер тобы" in reply and "Сб 24.10.2026" in reply and "12:00" in reply
     assert "13:15" not in reply
-    assert "Туған жылы" not in reply and "Деңгейі" not in reply and "ауысымы" not in reply
+    assert "Жасы" not in reply and "Деңгейі" not in reply and "ауысымы" not in reply
 
 
 def test_child_trial_status_is_unchanged(monkeypatch):
@@ -50,7 +51,9 @@ def test_child_trial_status_is_unchanged(monkeypatch):
 
     reply = edit_trial.handle_trial_status_request("77000000000", "dopsy_boxing", "ru")
 
-    assert "17:00-18:00" in reply and "Год рождения: 2015" in reply
+    # The client sees the age, never the birth year.
+    assert "17:00-18:00" in reply and f"Возраст: {today_almaty().year - 2015}" in reply
+    assert "2015" not in reply
     assert "Взрослая группа" not in reply
 
 
@@ -61,7 +64,7 @@ def test_adult_draft_summary_asks_only_name_and_slot():
     summary = edit_trial._draft_summary(draft, lang="ru")
 
     assert "имя" in summary and "время пробного занятия" in summary
-    assert "год рождения" not in summary and "школьная смена" not in summary
+    assert "возраст" not in summary and "школьная смена" not in summary
 
 
 def test_api_payloads_carry_audience():

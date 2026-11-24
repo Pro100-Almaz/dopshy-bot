@@ -122,19 +122,38 @@ def get_booking_reply(
     return response.choices[0].message.content.strip()
 
 
-def get_question_reply(lang: str, template: str, history: list, actor: str | None = None) -> str:
+def get_question_reply(lang: str, template: str, history: list, actor: str | None = None,
+                       audience: str | None = None) -> str:
     """The trial signup question `template`, phrased for this chat: about the
-    client for `actor` "self", about the child for "other", neutral when None."""
+    client for `actor` "self", about the child for "other", neutral when None.
+    `audience` is the draft's stored group ("adult" / "child" / None); when set
+    it decides the wording over anything the chat history suggests."""
+    group = {
+        "adult": "Группа записи (из сохранённой заявки): ВЗРОСЛАЯ. Занимается взрослый. "
+                 "Никогда не упоминай ребёнка, детей, школу, школьную смену, детский сад или родителей "
+                 "(ни «бала», ни «мектеп», ни «ата-ана»). Говори с клиентом как со взрослым, напрямую. ",
+        "child": "Группа записи (из сохранённой заявки): ДЕТСКАЯ. Занимается ребёнок. "
+                 "Не упоминай взрослую группу. ",
+    }.get(audience, "")
+    if group:
+        group += ("Группа взята из сохранённой заявки — это факт. Если история чата ниже ему "
+                  "противоречит или в ней чего-то не хватает, верь заявке, а не истории. ")
     who = {
         "self": "Клиент записывает САМ СЕБЯ — спрашивай о нём самом («ваше имя», «сколько вам лет»), "
                 "никогда не о ребёнке. ",
         "other": "Клиент записывает ребёнка — спрашивай о ребёнке, никогда не имя самого клиента. ",
     }.get(actor, "Неизвестно, кто записывается — спрашивай нейтрально, не упоминая ни ребёнка, ни "
                  "самого клиента («Как зовут того, кто будет заниматься?», «Кім қатысады, есімі кім?»). ")
+    if audience == "adult" and actor == "other":
+        # Someone signing up another adult: ask about that person, not a child.
+        who = ("Клиент записывает другого взрослого — спрашивай о том, кто будет заниматься "
+               "(«Как зовут того, кто будет заниматься?», «Сколько ему/ей лет?»), "
+               "никогда не о ребёнке и не имя самого клиента. ")
     system_content = (
         "Ты — ассистент спортивной академии и ведёшь запись на пробное занятие. "
         "Не обращайся к клиенту по имени. "
         "Задай клиенту ОДИН короткий вежливый вопрос с тем же смыслом, что и шаблон ниже. "
+        f"{group}"
         f"{who}"
         "Не пересказывай клиенту его же просьбу. "
         "Если последнее сообщение клиента — не ответ на предыдущий вопрос бота, сначала коротко и тепло откликнись "
