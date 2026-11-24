@@ -142,11 +142,14 @@ def cancel_booking_trial(bot_name: str, object_id: int, actor_type: str = "chatb
             # history line, another "your booking is cancelled" to the client —
             # and a cancelled booking silently re-stated as 'unpaid' by the TTL
             # sweeper, which passes its own target_state.
+            # Academy trials have no events table: the reason lives on the row.
+            reason_set = "" if bot_name == "dopsy_bot" else ", cancel_reason = %s"
+            reason_param = () if bot_name == "dopsy_bot" else (reason,)
             cur.execute(
-                f"UPDATE {table_name} SET state = %s, updated_at = NOW() "
+                f"UPDATE {table_name} SET state = %s, updated_at = NOW(){reason_set} "
                 f"WHERE ((id = %s) {extra}) "
                 "AND state NOT IN ('cancelled', 'failed', 'unpaid') RETURNING id",
-                (target_state,) + params,
+                (target_state,) + reason_param + params,
             )
             if cur.fetchone():
                 table_del = "trial_sessions"

@@ -387,9 +387,11 @@ def handle_edit_request(
 
     from handlers.llm_trial_flow import LlmTrialFlowHandler
 
-    flow_reply = LlmTrialFlowHandler()._evaluate_and_respond(
-        chat_id, bot_name, result["data"]["trial"], lang
-    )
+    flow = LlmTrialFlowHandler()
+    flow_reply = flow._evaluate_and_respond(chat_id, bot_name, result["data"]["trial"], lang)
+    if flow.handed_over:
+        # The new draft was already cancelled — don't announce it.
+        return flow_reply
     prefix = (
         "Подтвержденную запись нельзя изменить напрямую. Я отменил прежнюю запись и создал новый черновик с обновленными данными."
         if lang == "ru"

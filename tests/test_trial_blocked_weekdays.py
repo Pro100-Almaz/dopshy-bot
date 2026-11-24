@@ -31,7 +31,6 @@ def _days(slots):
 @pytest.mark.parametrize("slots_of", [
     lambda bot: trial.get_trial_daytime(bot, None),
     lambda bot: trial.get_eligible_trial_slots(bot, 2016, "kindergarten", experience="Beginner"),
-    lambda bot: trial.get_birth_year_trial_slots(bot, 2016),
     lambda bot: trial.get_adult_trial_slots(bot),
 ])
 def test_football_trials_skip_friday_and_saturday(slots_of):

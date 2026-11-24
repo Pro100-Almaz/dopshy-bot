@@ -336,3 +336,26 @@ def test_plain_text_is_not_mistaken_for_a_link(academy, paused):
 
     assert paused == []
     assert academy["routed"] == [None]
+
+
+def test_dispatch_hands_over_on_stall(academy, paused, monkeypatch):
+    def handle(self, chat_id, phone, bot, text, history, lang, intent=None):
+        self.stalled = True
+        return "FLOW"
+
+    monkeypatch.setattr(LlmTrialFlowHandler, "handle", handle)
+
+    reply = message_handler._dispatch_in_trial_signup(
+        "trial_continue", "PENDING", "chat", "+77001112233", "dopsy_boxing", "7", [], "ru")
+
+    assert reply == message_handler._hand_over_to_admin("+77001112233", "dopsy_boxing")
+    assert paused[0] == ("+77001112233", True, "handover")
+
+
+def test_dispatch_returns_absorb_handover(academy, monkeypatch):
+    monkeypatch.setattr(LlmTrialFlowHandler, "absorb", lambda self, *a: "X")
+
+    reply = message_handler._dispatch_in_trial_signup(
+        "question_price", "PENDING", "chat", "+77001112233", "dopsy_boxing", "сколько стоит?", [], "ru")
+
+    assert reply == "X"

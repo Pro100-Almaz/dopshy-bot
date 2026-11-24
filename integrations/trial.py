@@ -4,7 +4,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 from integrations.repo import academy_repo
-from utils import closest_weekday_date, is_past_booking_time, parse_weekdays, today_almaty
+from utils import closest_weekday_date, is_past_booking_time, today_almaty
 
 logger = logging.getLogger(__name__)
 
@@ -170,32 +170,6 @@ def get_eligible_trial_slots(
         result.append({
             **info,
             "date": _open_date(_next_class_date(info["training_day"], start), closed),
-        })
-    return result
-
-
-def get_birth_year_trial_slots(
-    bot_name: str,
-    child_birth_year: int,
-) -> list[dict]:
-    """Return available schedule slots filtered only by academy type and birth year."""
-    result = []
-    closed = _closed_dates(bot_name)
-    for info in _trial_groups(bot_name, "child"):
-        if _is_ignored_day(info):
-            continue
-        birth_years = info.get("birth_years") or []
-        if birth_years and int(child_birth_year) not in [int(y) for y in birth_years]:
-            continue
-
-        max_cap = info.get("max_cap")
-        curr_cap = info.get("curr_cap") or 0
-        if max_cap is not None and int(curr_cap) >= int(max_cap):
-            continue
-
-        result.append({
-            **info,
-            "date": _open_date(_next_class_date(info["training_day"], info["time_start"]), closed),
         })
     return result
 

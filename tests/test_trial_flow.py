@@ -78,9 +78,9 @@ def chat(monkeypatch):
         state["calls"].append("confirmed")
         return {"ok": True, "data": {"trial": dict(state["draft"])}}
 
-    def cancel(bot, chat_id, trial_id, reason):
-        state["calls"].append(("cancelled", reason))
-        state["draft"] = None
+    def cancel(bot, chat_id, trial_id, reason, keep_history=False):
+        state["calls"].append(("cancelled_keep_history" if keep_history else "cancelled", reason))
+        state["cancelled"], state["draft"] = state["draft"], None
 
     def groups_info(bot_name=None, audience=None):
         adult = state["adult"] if bot_name == "dopsy_boxing" else []
@@ -106,8 +106,10 @@ def chat(monkeypatch):
     logic = llm_trial_flow.trial_logic
     monkeypatch.setattr(logic, "get_eligible_trial_slots", lambda *a, **k: list(state["child"]))
     monkeypatch.setattr(logic, "get_adult_trial_slots", lambda bot: list(state["adult"]))
-    monkeypatch.setattr(logic, "get_birth_year_trial_slots", lambda *a: [])
     monkeypatch.setattr(logic, "is_trial_slot_eligible", lambda bot, draft: True)
+    monkeypatch.setattr(llm_trial_flow, "set_bot_paused",
+                        lambda phone, paused, **k: state["calls"].append(("paused", phone)))
+    monkeypatch.setattr(llm_trial_flow, "_STALLS", {})
 
     class Chat:
         bot = "dopsy_boxing"
@@ -116,7 +118,8 @@ def chat(monkeypatch):
         def send(self, text, extracted=None, intent="trial_continue"):
             if extracted:
                 state["extract"][text] = extracted
-            reply = LlmTrialFlowHandler().handle(
+            self.handler = LlmTrialFlowHandler()
+            reply = self.handler.handle(
                 "chat-1", "7700", self.bot, text, state["history"], self.lang, intent=intent,
             )
             self._remember(text, reply)
@@ -138,6 +141,11 @@ def chat(monkeypatch):
         @property
         def draft(self):
             return state["draft"]
+
+        @property
+        def cancelled(self):
+            """The draft as it was when the signup was cancelled."""
+            return state.get("cancelled")
 
         @property
         def calls(self):
@@ -466,7 +474,139 @@ def test_no_fitting_class_sends_to_the_admin(chat):
     chat.send("хочу записать ребёнка")
     for answer in ("Алихан", "8", "3"):
         chat.send(answer)
-    assert chat.send("2") == BOXING_T["no_groups_call_admin"]["ru"]
+    assert chat.send("2") == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
+
+
+def test_football_beginner_afternoon_with_no_class_hands_over(chat):
+    chat.bot = "dopsy_fs_school"
+    chat.no_child_classes()
+    for answer in ("хочу записать ребёнка", "Арман", "8", "1"):
+        chat.send(answer)
+
+    reply = chat.send("2")
+
+    assert reply == T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 6006")
+    assert not re.search(r"^\s*\d+\. ", reply, re.MULTILINE) and "уровень" not in reply
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
+    assert (chat.cancelled["experience"], chat.cancelled["school_shift"]) == ("Beginner", "afternoon")
+
+
+def test_boxing_no_class_handover_is_kazakh_and_warm(chat):
+    chat.lang = "kk"
+    chat.no_child_classes()
+    for answer in ("хочу записать ребёнка", "Алихан", "8", "1"):
+        chat.send(answer)
+    assert chat.send("2") == BOXING_T["no_groups_call_admin"]["kk"].format(phone="+7 700 555 2202")
+
+
+def _to_shift_step(chat):
+    chat.send("хочу записать ребёнка")
+    for answer in ("Алихан", "8", "1"):
+        chat.send(answer)
+    assert chat.draft.get("school_shift") is None
+
+
+def test_side_question_that_completes_intake_with_no_class_hands_over(chat):
+    _to_shift_step(chat)
+    chat.no_child_classes()
+    chat.extracted["днём учится, сколько стоит?"] = {"school_shift": "afternoon"}
+
+    reply = LlmTrialFlowHandler().absorb("chat-1", "7700", chat.bot, "днём учится, сколько стоит?",
+                                         chat.history, chat.lang)
+
+    assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
+
+
+def test_absorb_returns_none_while_classes_fit(chat):
+    _to_shift_step(chat)
+    chat.extracted["днём учится, сколько стоит?"] = {"school_shift": "afternoon"}
+
+    reply = LlmTrialFlowHandler().absorb("chat-1", "7700", chat.bot, "днём учится, сколько стоит?",
+                                         chat.history, chat.lang)
+
+    assert reply is None
+    assert chat.draft["school_shift"] == "afternoon" and chat.calls == []
+
+
+def test_confirm_with_no_class_left_only_hands_over(chat, monkeypatch):
+    _to_class_list(chat)
+    chat.send("1")
+    monkeypatch.setattr(llm_trial_flow.trial_logic, "is_trial_slot_eligible", lambda bot, draft: False)
+    chat.no_child_classes()
+
+    reply = chat.send("да", intent="confirm_yes")
+
+    assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
+
+
+def test_out_of_range_level_pick_is_not_stored(chat):
+    chat.send("хочу записать ребёнка")
+    chat.send("Алихан")
+    chat.send("8")
+
+    reply = chat.send("7", {"experience": "Beginner", "child_birth_year": TODAY.year - 7})
+
+    assert chat.draft.get("experience") is None
+    assert chat.draft["child_birth_year"] == TODAY.year - 8
+    # The list was the last message, so the bot points back to it.
+    assert reply == _ask("choose_from_above")
+
+
+def test_out_of_range_pick_is_not_rephrased_by_the_llm(chat, monkeypatch):
+    from chat import llm
+    chat.send("хочу записать ребёнка")
+    chat.send("Алихан")
+    chat.send("8")
+    # With "7" in the chat the LLM once rewrote the hint as an age question.
+    monkeypatch.setattr(llm, "get_question_reply", lambda *a, **k: "Понял. Сколько лет ребёнку?")
+
+    reply = chat.send("7")
+
+    assert reply == _ask("choose_from_above")
+
+
+def test_level_and_shift_picks_map_deterministically(chat):
+    chat.send("хочу записать ребёнка")
+    chat.send("Алихан")
+    chat.send("8")
+    # The extractor's guess is ignored: the number is the list's line.
+    chat.send("2-ші", {"experience": "Beginner"})
+    assert chat.draft["experience"] == "Intermediate"
+    chat.send("3", {"school_shift": "morning"})
+    assert chat.draft["school_shift"] == "kindergarten"
+
+
+def test_third_stalled_answer_sets_stalled(chat):
+    chat.send("хочу записать ребёнка")
+    chat.send("Алихан")
+    chat.send("8")
+    chat.send("7")
+    chat.send("9")
+    assert not chat.handler.stalled
+    chat.send("0")
+    assert chat.handler.stalled
+
+
+def test_progress_resets_the_stall_count(chat):
+    chat.send("хочу записать ребёнка")
+    chat.send("Алихан")
+    chat.send("8")
+    chat.send("7")
+    chat.send("9")
+    chat.send("1")  # level stored, now at the shift
+    chat.send("7")
+    chat.send("9")
+    assert not chat.handler.stalled
+
+
+def test_class_list_browsing_never_stalls(chat):
+    _to_class_list(chat)
+    for day in ("2026-10-31", "2026-11-01", "2026-11-07"):
+        chat.send(f"а {day}?", {"preferred_date": day})
+        assert not chat.handler.stalled
 
 
 def test_kazakh_signup_uses_kazakh_texts(chat):
@@ -520,9 +660,9 @@ def test_a_stated_adult_stays_adult_with_no_adult_classes(chat):
 
     reply = chat.send("36")
 
-    assert chat.draft["audience"] == "adult" and chat.draft["child_birth_year"] == TODAY.year - 36
-    assert reply == BOXING_T["no_groups_call_admin"]["ru"]
-    assert chat.calls == []
+    assert chat.cancelled["audience"] == "adult" and chat.cancelled["child_birth_year"] == TODAY.year - 36
+    assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_an_adult_age_with_no_adult_classes_still_moves_to_the_adult_group(chat):
@@ -532,9 +672,9 @@ def test_an_adult_age_with_no_adult_classes_still_moves_to_the_adult_group(chat)
 
     reply = chat.send("36")
 
-    assert chat.draft["audience"] == "adult"
-    assert reply == BOXING_T["no_groups_call_admin"]["ru"]
-    assert chat.calls == []
+    assert chat.cancelled["audience"] == "adult"
+    assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_football_keeps_a_stated_adult(chat):
