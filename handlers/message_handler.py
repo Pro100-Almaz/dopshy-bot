@@ -5,7 +5,6 @@ Core message processing pipeline:
 import logging
 import re
 import threading
-from typing import Union
 
 import requests
 
@@ -17,8 +16,8 @@ from handlers.extractor import extract_booking_details
 from handlers.payment.pricing import process_field_prices, fmt_price
 from handlers.questions import check_slots
 from handlers.sessions.base_session import BasePromptBuilder
-from handlers.sessions.trial_session import handle_trial_turn, start_trial_flow
-from handlers.llm_trial_flow import LlmTrialFlowHandler, is_draft_abandoned
+from handlers.sessions.trial_session import handle_trial_turn
+from handlers.llm_trial_flow import _STALL_LIMIT, LlmTrialFlowHandler, is_draft_abandoned
 from handlers.llm_trial_flow import shorten_repeated_list
 from integrations.providers.payload import IncomingWhatsAppMessage, OutboundChannel, WhatsAppMedia
 from integrations.repo.booking_repo import has_awaiting_payments, get_existing_draft
@@ -32,7 +31,7 @@ from integrations.sheets.booking_sheets import upsert_booking_row, refresh_all_b
 from integrations.sheets.trial_sheets import refresh_all_trials
 from rag.retriever import intent_context, retrieve_context
 from handlers.whatsapp_client import send_text_message as _send_text_message, mark_as_read, download_media
-from handlers.sessions.booking_session import handle_booking_turn, start_booking_flow
+from handlers.sessions.booking_session import handle_booking_turn
 from handlers.edit_booking import handle_edit_request as handle_edit_booking_request
 from handlers.edit_trial import (
     handle_edit_request as handle_edit_trial_request,
@@ -397,6 +396,11 @@ def _dispatch_in_trial_signup(
     if intent in _FLOW_INTENTS:
         flow = LlmTrialFlowHandler()
         reply = flow.handle(chat_id, sender_id, bot_name, user_text, history, lang, intent=intent)
+        if flow.stalled:
+            # The same step asked again and again: the admin takes over, the
+            # draft stays for them to finish.
+            logger.warning("[TRIAL] Same step asked %d times for %s — handing over", _STALL_LIMIT, sender_id)
+            return _hand_over_to_admin(sender_id, bot_name)
         if not flow.extractor_failed:
             return reply
         # The answer was lost: ask once more, then the admin. The draft stays.
@@ -413,8 +417,8 @@ def _dispatch_in_trial_signup(
         return _hand_over_to_admin(sender_id, bot_name)
     # Info questions (schedule, trainers, prices, ...) are answered by RAG/LLM;
     # the signup answers they carry («8 жаста, бағасы қанша?») are saved first.
-    LlmTrialFlowHandler().absorb(chat_id, sender_id, bot_name, user_text, history, lang)
-    return None
+    # Answers that leave no class to pick come back as the admin handover.
+    return LlmTrialFlowHandler().absorb(chat_id, sender_id, bot_name, user_text, history, lang)
 
 
 def _format_payment_reject_message(
@@ -1011,10 +1015,16 @@ def handle_incoming_message(payload: IncomingWhatsAppMessage) -> None:
                 logger.info("[TRIAL] Ignoring start_trial tool — signup already in progress")
                 tool_call = None
             elif tool_call["name"] == "edit_trial":
-                edit_reply = LlmTrialFlowHandler().handle(
+                flow = LlmTrialFlowHandler()
+                edit_reply = flow.handle(
                     chat_id, sender_id, bot_config["name"], user_text, history, draft_lang
                 )
-                reply = f"{reply}\n\n{edit_reply}" if reply else edit_reply
+                if flow.stalled:
+                    edit_reply = _hand_over_to_admin(sender_id, bot_config["name"])
+                if flow.handed_over or flow.stalled:
+                    reply = edit_reply
+                else:
+                    reply = f"{reply}\n\n{edit_reply}" if reply else edit_reply
                 tool_call = None
                 pending = None
 

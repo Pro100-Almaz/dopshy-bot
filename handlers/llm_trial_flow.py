@@ -36,6 +36,7 @@ from handlers.academy_extractor import extract_trial_details
 from integrations import trial_service
 from integrations import trial as trial_logic
 from integrations.repo import academy_repo
+from integrations.repo.bot_pause_repo import set_bot_paused
 from utils import today_almaty
 
 logger = logging.getLogger(__name__)
@@ -107,8 +108,8 @@ T = {
         "kk": "Қазір сәйкес топ табылмады. Әкімші қолмен нұсқа таңдап береді.",
     },
     "no_groups_call_admin": {
-        "ru": "Подходящих групп сейчас не нашлось. Пожалуйста, позвоните администратору по номеру +7 700 555 6006.",
-        "kk": "Қазір сәйкес топ табылмады. Әкімшіге +7 700 555 6006 нөміріне қоңырау шалыңыз.",
+        "ru": "К сожалению, сейчас нет группы, которая подошла бы для пробного занятия. Я передал вашу заявку администратору — он ответит вам здесь и подберёт вариант. Телефон администратора: {phone}.",
+        "kk": "Өкінішке қарай, қазір сынақ сабағына сәйкес топ жоқ. Өтінішіңізді әкімшіге жеткіздім — ол осы жерде жауап беріп, қолайлы нұсқаны ұсынады. Әкімші телефоны: {phone}.",
     },
     "preferred_unavailable": {
         "ru": "Указанное время не подходит для этой группы. Выберите один из доступных вариантов:",
@@ -274,8 +275,8 @@ BOXING_T = {
         "kk": "Өкінішке қарай, қазір сәйкес топ табылмады. Бірақ уайымдамаңыз — әкімші қолайлы нұсқаны таңдауға көмектеседі.",
     },
     "no_groups_call_admin": {
-        "ru": "К сожалению, сейчас подходящей группы не нашлось. Пожалуйста, позвоните нашему администратору по номеру +7 700 555 2202 — там с радостью помогут!",
-        "kk": "Өкінішке қарай, қазір сәйкес топ табылмады. Әкімшімізге +7 700 555 2202 нөміріне қоңырау шалыңызшы — міндетті түрде көмектеседі!",
+        "ru": "К сожалению, сейчас нет группы, которая подошла бы для пробного занятия. Но не переживайте — я передал вашу заявку администратору, он ответит вам здесь и с радостью подберёт вариант 🥊 Телефон администратора: {phone}.",
+        "kk": "Өкінішке қарай, қазір сынақ сабағына сәйкес топ жоқ. Бірақ уайымдамаңыз — өтінішіңізді әкімшіге жеткіздім, ол осы жерде жауап беріп, қолайлы нұсқаны қуана ұсынады 🥊 Әкімші телефоны: {phone}.",
     },
     "preferred_unavailable": {
         "ru": "К сожалению, в это время подходящей группы нет. Вот что можем предложить — выберите, пожалуйста, удобный вариант:",
@@ -642,24 +643,6 @@ def _with_trainer(body: str, trainer: str | None, lang: str) -> str:
     return "\n".join(lines)
 
 
-def _slot_lines(slots: list[dict], lang: str) -> str:
-    lines = []
-    for i, slot in enumerate(slots, 1):
-        group = slot.get("group_name") or f"Group #{slot.get('group_id')}"
-        levels = slot.get("level") or []
-        if isinstance(levels, str):
-            levels = [levels]
-        labels = LEVEL_LABELS.get(lang, LEVEL_LABELS["ru"])
-        localized_levels = [labels.get(level, level) for level in levels]
-        level_text = f" | {', '.join(localized_levels)}" if localized_levels else ""
-        lines.append(
-            f"{i}. {group}{level_text}{_trainer_suffix(slot)}\n"
-            f"   {_fmt_date(slot['date'], lang)} | "
-            f"{str(slot['time_start'])[:5]}–{str(slot['time_end'])[:5]}"
-        )
-    return "\n".join(lines)
-
-
 # Draft columns that together hold the chosen class.
 _CLEARED_SLOT = {"trial_day": None, "start_time": None, "end_time": None, "group_id": None}
 
@@ -670,46 +653,6 @@ def _iso_date(value) -> str | None:
 
 def _hhmm(value) -> str | None:
     return str(value)[:5] if value not in (None, "") else None
-
-
-def _age_group_lines(slots: list[dict], lang: str) -> str:
-    seen = set()
-    unique = []
-    for slot in slots:
-        key = (
-            slot.get("group_id"),
-            slot.get("training_day"),
-            str(slot.get("time_start"))[:5],
-            str(slot.get("time_end"))[:5],
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(slot)
-    return _slot_lines(unique, lang)
-
-
-def _no_groups_with_age_options(
-    lang: str,
-    slots: list[dict],
-    draft: dict,
-    signup_actor: str | None = None,
-) -> str:
-    if not slots:
-        return _loc(lang, "no_groups_call_admin")
-    if lang == "ru":
-        return (
-            f"{_loc(lang, 'no_groups')}\n\n"
-            f"По возрасту {draft.get('child_birth_year')} подходят такие группы:\n"
-            f"{_age_group_lines(slots, lang)}\n\n"
-            "Можно поменять уровень подготовки или школьную смену, и я проверю ещё раз."
-        )
-    return (
-        f"{_loc(lang, 'no_groups')}\n\n"
-        f"{draft.get('child_birth_year')} туған жылына сәйкес келетін топтар:\n"
-        f"{_age_group_lines(slots, lang)}\n\n"
-        "Дайындық деңгейін немесе мектеп ауысымын өзгертсеңіз, қайта тексеремін."
-    )
 
 
 def _confirmation(draft: dict, lang: str, trainer: str | None = None) -> str:
@@ -771,6 +714,24 @@ _CHILD_STEPS = ("child_name", "child_birth_year", "experience", "school_shift")
 _ADULT_STEPS = ("child_name", "child_birth_year")
 _LEVELS = ("Beginner", "Intermediate", "Advanced")
 _SHIFTS = ("morning", "afternoon", "kindergarten")
+
+# ponytail: process-local, so with 2 gunicorn workers the handover can come a
+# few turns later; move to Redis/a draft column if that matters.
+_STALLS: dict[int, int] = {}
+_STALL_LIMIT = 3
+
+
+def _stalled(draft_id: int, answering: str | None, step: str) -> bool:
+    """True on the _STALL_LIMIT-th answer in a row that left an intake step
+    open — the client and the bot are going round in circles."""
+    if answering not in ("audience", *_CHILD_STEPS) or step != answering:
+        _STALLS.pop(draft_id, None)
+        return False
+    _STALLS[draft_id] = _STALLS.get(draft_id, 0) + 1
+    if _STALLS[draft_id] < _STALL_LIMIT:
+        return False
+    del _STALLS[draft_id]
+    return True
 # A pick from a numbered list: «2», «2.», «№2», «2-ші».
 _PICK_RE = re.compile(r"^\s*(?:№\s*)?(\d{1,2})\s*(?:[.)]|-?(?:ші|шы|ой|ий|й|я))?\s*$", re.IGNORECASE)
 _LIST_LINE_RE = re.compile(r"^\s*(\d{1,2})\.\s+(.+?)\s*$", re.MULTILINE)
@@ -925,6 +886,12 @@ class LlmTrialFlowHandler:
     # The last message's answer was lost to an extractor failure: the caller
     # asks again, then hands over to the admin.
     extractor_failed = False
+    # The client was handed to the admin (no class fits): nothing goes in
+    # front of the handover message.
+    handed_over = False
+    # The same intake step went unanswered _STALL_LIMIT times: the caller
+    # hands over to the admin.
+    stalled = False
 
     # ══════════════════════════════════════════════════════════════════════
     #  Main Entry Point
@@ -944,20 +911,22 @@ class LlmTrialFlowHandler:
         """Process one user message through the LLM trial flow. `intent` is the
         router's reading of it; None means the router could not tell."""
         self._new_draft = self._asks_about_trial = self._wants_change = self.extractor_failed = False
+        self.handed_over = self.stalled = False
         # The wording is about the child until the adult group is chosen.
         token = _current_actor.set(None)
         try:
             full = self._handle(chat_id, sender_phone, bot_name, user_text, history, lang, intent)
             reply = shorten_repeated_list(full, history, lang)
-            if reply != full:
-                # A bare "choose from the list" would ignore what the client
-                # just said — the LLM answers it in a word, then asks again.
+            # A bare "choose from the list" would ignore what the client just
+            # said — the LLM answers it in a word, then asks again. A bare
+            # number has nothing to answer, and the LLM may read it as an age.
+            if reply != full and not _PICK_RE.match(user_text or ""):
                 reply = _phrased(lang, reply, [*(history or []), {"role": "user", "content": user_text}])
         finally:
             _current_actor.reset(token)
         # A new signup opens with "the trial is free", then the first question.
         # Only when the message is about the trial lesson or its price.
-        intro = _loc(lang, "trial_free_intro") if self._new_draft and self._asks_about_trial else ""
+        intro = _loc(lang, "trial_free_intro") if self._new_draft and self._asks_about_trial and not self.handed_over else ""
         return f"{intro}\n\n{reply}" if intro else reply
 
     @_bot_scoped
@@ -969,13 +938,18 @@ class LlmTrialFlowHandler:
         user_text: str,
         history: list,
         lang: str,
-    ) -> None:
+    ) -> str | None:
         """Save the signup answers a side question carries («8 жаста, бағасы
-        қанша?») so they are not asked again. Replies nothing — the question
-        is answered elsewhere."""
+        қанша?») so they are not asked again. Returns None — the question is
+        answered elsewhere — unless the answers leave no class to pick: then
+        the admin handover reply."""
         draft = academy_repo.get_existing_trial_draft(sender_phone, bot_name)
-        if draft:
-            self._save_answers(bot_name, draft, user_text, history, lang, answering=None)
+        if not draft:
+            return None
+        draft = self._save_answers(bot_name, draft, user_text, history, lang, answering=None)[0]
+        if self._next_step(bot_name, draft) in ("slot", "confirm") and not self._class_slots(bot_name, draft):
+            return self._no_fitting_group(chat_id, bot_name, draft, lang)
+        return None
 
     def _handle(
         self,
@@ -1038,6 +1012,8 @@ class LlmTrialFlowHandler:
                     return result.get("message") or _loc(lang, "no_groups")
                 draft = result["data"]["trial"]
 
+        self.stalled = _stalled(draft["id"], answering, self._next_step(bot_name, draft))
+
         # ── 3. Next step ──
         return self._evaluate_and_respond(
             chat_id, bot_name, draft, lang,
@@ -1077,6 +1053,16 @@ class LlmTrialFlowHandler:
         The extractor reads the client's words; here its values are only
         checked against the group and the column.
         """
+        # A bare number at a numbered-list step can only mean that list's
+        # line; out of range stores nothing (and is never read as an age).
+        if answering in ("experience", "school_shift") and (pick := _PICK_RE.match(user_text or "")):
+            options = _LEVELS if answering == "experience" else _SHIFTS
+            number = int(pick.group(1))
+            if not 1 <= number <= len(options):
+                _log_rejected(answering, "out_of_range", user_text, options=len(options))
+                return {}, None, False
+            value = options[number - 1]
+            return ({answering: value} if value != draft.get(answering) else {}), None, False
         stored = _wish(draft)
         extracted = extract_trial_details(history, user_text, answering, stored)
         self._asks_about_trial = bool(extracted.get("asks_about_trial_or_price"))
@@ -1196,11 +1182,14 @@ class LlmTrialFlowHandler:
         signup_actor = self._signup_actor(draft)
         _current_actor.set(signup_actor)
         if step not in ("slot", "confirm"):
-            return _ask_missing(lang, step, signup_actor, history)
+            # After a bare number there is nothing to answer, and the LLM may
+            # read it as an age — the fixed question is asked instead.
+            bare_pick = _PICK_RE.match(user_text or "")
+            return _ask_missing(lang, step, signup_actor, None if bare_pick else history)
 
         slots, note = self._class_slots(bot_name, draft), None
         if not slots:
-            return self._no_classes(bot_name, draft, lang, signup_actor)
+            return self._no_fitting_group(chat_id, bot_name, draft, lang)
         if step == "confirm":
             if _slot_on_offer(draft, slots):
                 return self._summary(draft, slots, lang, adult)
@@ -1242,11 +1231,17 @@ class LlmTrialFlowHandler:
         trainer = _slot_trainer(draft, slots)
         return _adult_confirmation(draft, lang, trainer) if adult else _confirmation(draft, lang, trainer)
 
-    def _no_classes(self, bot_name: str, draft: dict, lang: str, signup_actor: str | None) -> str:
-        if _stored_audience(draft) == "adult":
-            return _loc(lang, "no_groups_call_admin")
-        age_slots = trial_logic.get_birth_year_trial_slots(bot_name, int(draft["child_birth_year"]))
-        return _no_groups_with_age_options(lang, age_slots, draft, signup_actor)
+    def _no_fitting_group(self, chat_id: str, bot_name: str, draft: dict, lang: str) -> str:
+        """No class fits this signup: end it and hand the client to the admin —
+        a list they cannot pick from would only loop."""
+        logger.info("[TRIAL] No fitting class — id=%d handed to the admin", draft["id"])
+        self.handed_over = True
+        trial_service.cancel_trial(bot_name, chat_id, draft["id"], "no_fitting_group")
+        try:
+            set_bot_paused(draft["phone"], True, reason="handover", paused_by=bot_name)
+        except Exception:
+            logger.exception("[HANDOVER] Could not pause the bot for trial id=%d", draft["id"])
+        return _loc(lang, "no_groups_call_admin", phone=ACADEMY_ADMIN_PHONES.get(bot_name, ""))
 
     def _age_no_group(self, bot_name: str, age: int, lang: str) -> str:
         unit = "лет" if lang == "ru" else "жас"
@@ -1265,10 +1260,8 @@ class LlmTrialFlowHandler:
             )
             if not result["ok"]:
                 return result.get("message") or _loc(lang, "no_groups")
-            return (
-                f"{_loc(lang, 'slot_no_longer_eligible')}\n\n"
-                f"{self._evaluate_and_respond(chat_id, bot_name, result['data']['trial'], lang)}"
-            )
+            reply = self._evaluate_and_respond(chat_id, bot_name, result["data"]["trial"], lang)
+            return reply if self.handed_over else f"{_loc(lang, 'slot_no_longer_eligible')}\n\n{reply}"
 
         result = trial_service.confirm_trial(bot_name, chat_id, draft["id"])
         if not result["ok"]:

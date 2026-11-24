@@ -9,9 +9,8 @@ import logging
 from chat.openai_client import client as _client
 from chat.conversation import Message
 from chat.system_prompts.sp_1 import INTENT_PROMPT
-from chat.tools.arena_tools import EDIT_BOOKING_TOOL, START_BOOKING_TOOL, SELECT_INTENT_LLM
+from chat.tools.arena_tools import SELECT_INTENT_LLM
 from chat.tools.academy_tools import (
-    START_TRIAL_TOOL,
     EDIT_TRIAL_TOOL,
     CANCEL_TRIAL_TOOL,
     SELECT_TRIAL_INTENT_LLM,
@@ -237,6 +236,9 @@ def route_trial_message(
         "Asking to hear about the trial class in general (often from an ad) is trial_new too — "
         "e.g. 'Сынақ жаттығуы туралы білгім келеді', 'сынақ сабағы туралы айтып беріңізші', "
         "'хочу узнать про пробное занятие', 'расскажите о пробной тренировке'. "
+        "When the bot's latest message invited the client to sign up for the trial class and the client "
+        "agrees — e.g. 'да', 'иә', 'давайте', 'хочу', 'хорошо', 'жарайды', 'жазылайық' — that is trial_new, "
+        "not thanks or unclear. "
         "Signing up for the adult group (17–60) is a signup like any other: trial_new, or "
         "trial_continue mid-signup — e.g. 'ересектер тобына жазылғым келеді', 'хочу во взрослую "
         "группу', 'Мен 25 жастамын, сынақ сабағына жазылғым келеді', 'мне 30 лет, хочу на пробное', "
