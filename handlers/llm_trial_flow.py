@@ -1236,7 +1236,7 @@ class LlmTrialFlowHandler:
         a list they cannot pick from would only loop."""
         logger.info("[TRIAL] No fitting class — id=%d handed to the admin", draft["id"])
         self.handed_over = True
-        trial_service.cancel_trial(bot_name, chat_id, draft["id"], "no_fitting_group")
+        trial_service.cancel_trial(bot_name, chat_id, draft["id"], "no_fitting_group", keep_history=True)
         try:
             set_bot_paused(draft["phone"], True, reason="handover", paused_by=bot_name)
         except Exception:

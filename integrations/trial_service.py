@@ -137,8 +137,10 @@ def confirm_trial(bot_name: str, chat_id: str, trial_id: int) -> dict:
     return _ok({"trial": trial})
 
 
-def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dict:
-    """Cancel a draft or trial and wipe the chat."""
+def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str,
+                 keep_history: bool = False) -> dict:
+    """Cancel a draft or trial and wipe the chat — unless the admin takes the
+    chat over (keep_history), who then needs the conversation."""
     result = postgres.cancel_booking_trial(
         bot_name,
         trial_id,
@@ -147,7 +149,8 @@ def cancel_trial(bot_name: str, chat_id: str, trial_id: int, reason: str) -> dic
         reason=reason,
     )
     postgres.delete_session(bot_name, chat_id)
-    clear_history(chat_id)
+    if not keep_history:
+        clear_history(chat_id)
     refresh_all_trials()
     return result
 

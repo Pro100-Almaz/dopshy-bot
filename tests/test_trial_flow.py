@@ -78,8 +78,8 @@ def chat(monkeypatch):
         state["calls"].append("confirmed")
         return {"ok": True, "data": {"trial": dict(state["draft"])}}
 
-    def cancel(bot, chat_id, trial_id, reason):
-        state["calls"].append(("cancelled", reason))
+    def cancel(bot, chat_id, trial_id, reason, keep_history=False):
+        state["calls"].append(("cancelled_keep_history" if keep_history else "cancelled", reason))
         state["cancelled"], state["draft"] = state["draft"], None
 
     def groups_info(bot_name=None, audience=None):
@@ -106,7 +106,6 @@ def chat(monkeypatch):
     logic = llm_trial_flow.trial_logic
     monkeypatch.setattr(logic, "get_eligible_trial_slots", lambda *a, **k: list(state["child"]))
     monkeypatch.setattr(logic, "get_adult_trial_slots", lambda bot: list(state["adult"]))
-    monkeypatch.setattr(logic, "get_birth_year_trial_slots", lambda *a: [])
     monkeypatch.setattr(logic, "is_trial_slot_eligible", lambda bot, draft: True)
     monkeypatch.setattr(llm_trial_flow, "set_bot_paused",
                         lambda phone, paused, **k: state["calls"].append(("paused", phone)))
@@ -476,7 +475,7 @@ def test_no_fitting_class_sends_to_the_admin(chat):
     for answer in ("Алихан", "8", "3"):
         chat.send(answer)
     assert chat.send("2") == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
-    assert chat.calls == [("cancelled", "no_fitting_group"), ("paused", "7700")]
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_football_beginner_afternoon_with_no_class_hands_over(chat):
@@ -489,7 +488,7 @@ def test_football_beginner_afternoon_with_no_class_hands_over(chat):
 
     assert reply == T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 6006")
     assert not re.search(r"^\s*\d+\. ", reply, re.MULTILINE) and "уровень" not in reply
-    assert chat.calls == [("cancelled", "no_fitting_group"), ("paused", "7700")]
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
     assert (chat.cancelled["experience"], chat.cancelled["school_shift"]) == ("Beginner", "afternoon")
 
 
@@ -517,7 +516,7 @@ def test_side_question_that_completes_intake_with_no_class_hands_over(chat):
                                          chat.history, chat.lang)
 
     assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
-    assert chat.calls == [("cancelled", "no_fitting_group"), ("paused", "7700")]
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_absorb_returns_none_while_classes_fit(chat):
@@ -540,7 +539,7 @@ def test_confirm_with_no_class_left_only_hands_over(chat, monkeypatch):
     reply = chat.send("да", intent="confirm_yes")
 
     assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
-    assert chat.calls == [("cancelled", "no_fitting_group"), ("paused", "7700")]
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_out_of_range_level_pick_is_not_stored(chat):
@@ -663,7 +662,7 @@ def test_a_stated_adult_stays_adult_with_no_adult_classes(chat):
 
     assert chat.cancelled["audience"] == "adult" and chat.cancelled["child_birth_year"] == TODAY.year - 36
     assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
-    assert chat.calls == [("cancelled", "no_fitting_group"), ("paused", "7700")]
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_an_adult_age_with_no_adult_classes_still_moves_to_the_adult_group(chat):
@@ -675,7 +674,7 @@ def test_an_adult_age_with_no_adult_classes_still_moves_to_the_adult_group(chat)
 
     assert chat.cancelled["audience"] == "adult"
     assert reply == BOXING_T["no_groups_call_admin"]["ru"].format(phone="+7 700 555 2202")
-    assert chat.calls == [("cancelled", "no_fitting_group"), ("paused", "7700")]
+    assert chat.calls == [("cancelled_keep_history", "no_fitting_group"), ("paused", "7700")]
 
 
 def test_football_keeps_a_stated_adult(chat):
