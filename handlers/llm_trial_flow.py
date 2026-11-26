@@ -115,6 +115,12 @@ T = {
         "ru": "Указанное время не подходит для этой группы. Выберите один из доступных вариантов:",
         "kk": "Көрсетілген уақыт бұл топқа келмейді. Қолжетімді нұсқалардың бірін таңдаңыз:",
     },
+    # The wished day (or weekdays) has no trial class at all, e.g. a Friday
+    # every group lists in ignore_days.
+    "preferred_day_unavailable": {
+        "ru": "В этот день пробных занятий нет. Выберите, пожалуйста, один из ближайших вариантов:",
+        "kk": "Бұл күні сынақ сабағы жоқ. Жақын нұсқалардың бірін таңдаңызшы:",
+    },
     "confirm": {
         "ru": "📋 Детали записи:\n📅 {date}\n⏰ {start}–{end}\n👤 Имя: {name}\n🎂 Возраст: {age}\n🎯 Опыт: {experience}\n🏫 Смена: {school_shift}\n\nПодтвердить?",
         "kk": "📋 Жазылым деректері:\n📅 {date}\n⏰ {start}–{end}\n👤 Есімі: {name}\n🎂 Жасы: {age}\n🎯 Тәжірибе: {experience}\n🏫 Ауысым: {school_shift}\n\nРастайсыз ба?",
@@ -176,8 +182,8 @@ T = {
         "kk": "Жаттығуды таңдап, нөмірін жазыңыз:\n\n{lines}",
     },
     "choose_class_wished": {
-        "ru": "Вот что подходит 🥊 Напишите номер тренировки:\n\n{lines}",
-        "kk": "Сізге сәйкес жаттығулар 🥊 Нөмірін жазыңыз:\n\n{lines}",
+        "ru": "Вот что подходит. Напишите номер тренировки:\n\n{lines}",
+        "kk": "Сізге сәйкес жаттығулар. Нөмірін жазыңыз:\n\n{lines}",
     },
     "adult_unavailable": {
         "ru": "В это время тренировки взрослой группы нет.",
@@ -265,6 +271,10 @@ BOXING_T = {
     "ask_birth_year_self": {
         "ru": "Подскажите, пожалуйста, сколько вам лет?",
         "kk": "Жасыңыз нешеде?",
+    },
+    "choose_class_wished": {
+        "ru": "Вот что подходит 🥊 Напишите номер тренировки:\n\n{lines}",
+        "kk": "Сізге сәйкес жаттығулар 🥊 Нөмірін жазыңыз:\n\n{lines}",
     },
     "trial_free_intro": {
         "ru": "Пробное занятие у нас бесплатное 🥊",
@@ -861,20 +871,28 @@ def _wished_classes(slots: list[dict], wish: dict) -> list[dict]:
     return fits
 
 
-def _classes_on_offer(slots: list[dict], wish: dict) -> tuple[list[dict], bool]:
-    """The classes to show, and whether the wish could not be met. Nothing
-    fits: the closest ones, giving up the time first, the trainer last."""
+def _classes_on_offer(slots: list[dict], wish: dict) -> tuple[list[dict], str | None]:
+    """The classes to show, and which wish had to be given up ("time", "day"
+    or "trainer"; None when the wish is met). Nothing fits: the closest ones,
+    giving up the time first, the trainer last."""
     shown = _wished_classes(slots, wish)
     if shown:
-        return shown, False
+        return shown, None
     closest = dict(wish)
-    for fields in (("preferred_time_start", "preferred_time_end"),
-                   ("preferred_date", "preferred_weekdays"), ("preferred_trainers",)):
+    dropped = None
+    for name, fields in (("time", ("preferred_time_start", "preferred_time_end")),
+                         ("day", ("preferred_date", "preferred_weekdays")),
+                         ("trainer", ("preferred_trainers",))):
+        if any(closest[f] for f in fields):
+            dropped = name
         closest.update(dict.fromkeys(fields))
         shown = _wished_classes(slots, closest)
         if shown:
             break
-    return shown, True
+    return shown, dropped or "time"
+
+
+_UNAVAILABLE_NOTE = {"day": "preferred_day_unavailable"}
 
 
 def _slot_on_offer(draft: dict, slots: list[dict]) -> bool:
@@ -1224,7 +1242,7 @@ class LlmTrialFlowHandler:
         wish = _wish(draft)
         shown, missed = _classes_on_offer(slots, wish)
         if missed:
-            note = _loc(lang, "adult_unavailable" if adult else "preferred_unavailable")
+            note = _loc(lang, "adult_unavailable" if adult else _UNAVAILABLE_NOTE.get(missed, "preferred_unavailable"))
         elif not picked and wanted and any(wish.values()) and len(shown) == 1:
             picked = shown[0]
         if picked:

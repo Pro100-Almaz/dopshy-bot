@@ -363,7 +363,17 @@ def test_a_named_day_with_one_class_picks_it(chat):
 def test_a_day_without_classes_shows_the_list_with_a_note(chat):
     _to_class_list(chat)
     reply = chat.send("в субботу", {"preferred_date": "2026-10-31"})
-    assert reply.startswith(BOXING_T["preferred_unavailable"]["ru"])
+    assert reply.startswith(T["preferred_day_unavailable"]["ru"])
+    assert chat.draft.get("group_id") is None
+
+
+def test_a_day_without_classes_blames_the_day_not_a_leftover_time(chat):
+    # A parent asked for «завтра» (a Friday no group takes trials on) after an
+    # earlier pick had saved a time: the note must say the day has no trials,
+    # not that «the time does not suit the group».
+    _to_class_list(chat)
+    reply = chat.send("а можно в субботу", {"preferred_date": "2026-10-31", "preferred_time_start": "15:00"})
+    assert reply.startswith(T["preferred_day_unavailable"]["ru"])
     assert chat.draft.get("group_id") is None
 
 
